@@ -54,7 +54,7 @@ class TimeSeriesDataset(Dataset):
     def __init__(self, 
                  data_path: str, 
                  timeframes: list = ['15m', '4h', '1d'],
-                 sequence_length: int = 50,
+                 sequence_length: dict = None,
                  target_column: str = 'close',
                  feature_columns: list = None,
                  normalize: bool = True):
@@ -64,14 +64,22 @@ class TimeSeriesDataset(Dataset):
         Parameters:
         - data_path: Path to the HDF5 file with time series data
         - timeframes: List of timeframes to include
-        - sequence_length: Number of time steps to include in each sample
+        - sequence_length: Dict mapping timeframes to their sequence lengths or single int for all timeframes
         - target_column: Column to use as the prediction target
         - feature_columns: List of columns to use as features (None = use all)
         - normalize: Whether to normalize the features
         """
         self.data_path = data_path
         self.timeframes = timeframes
-        self.sequence_length = sequence_length
+        
+        # Handle sequence_length as either dict or int
+        if isinstance(sequence_length, dict):
+            self.sequence_length = sequence_length
+        else:
+            # Default to 50 if not specified
+            default_length = 50 if sequence_length is None else sequence_length
+            self.sequence_length = {tf: default_length for tf in timeframes}
+            
         self.target_column = target_column
         self.normalize = normalize
         
@@ -151,9 +159,12 @@ class TimeSeriesDataset(Dataset):
                     self.data[tf] = self.data[tf].drop(columns=['timestamp'])
         
         # Calculate valid indices (ensuring we have enough sequential data)
+        # For valid indices, we need to ensure we have enough data for the longest sequence
+        max_sequence_length = max(self.sequence_length.values())
         min_length = min(len(df) for df in self.data.values())
-        self.valid_indices = range(sequence_length, min_length)
+        self.valid_indices = range(max_sequence_length, min_length)
         logger.info(f"Loaded dataset with {len(self.valid_indices)} valid samples")
+        logger.info(f"Using sequence lengths: {self.sequence_length}")
 
     def __len__(self):
         return len(self.valid_indices)
@@ -165,8 +176,9 @@ class TimeSeriesDataset(Dataset):
         # Extract sequences for each timeframe
         sequences = {}
         for tf, df in self.data.items():
-            # Get the sequence
-            sequence = df.iloc[index - self.sequence_length:index].copy()
+            # Get the sequence using timeframe-specific length
+            tf_seq_length = self.sequence_length[tf]
+            sequence = df.iloc[index - tf_seq_length:index].copy()
             
             # Convert to tensor
             feature_tensor = torch.tensor(sequence.values, dtype=torch.float32)
