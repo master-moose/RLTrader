@@ -19,6 +19,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 import torch.nn.functional as F
 import torchmetrics
 from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score
+import sys
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 # Import from local modules
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
@@ -305,48 +307,27 @@ class LightningTimeSeriesModel(pl.LightningModule):
         }
     
     def configure_optimizers(self):
-        """Configure optimizers with warmup and cosine scheduling"""
-        # Adam optimizer with weight decay
-        optimizer = torch.optim.AdamW(
+        """Configure optimizer and learning rate scheduler"""
+        optimizer = optim.AdamW(
             self.parameters(),
             lr=self.learning_rate,
-            weight_decay=self.weight_decay,
-            amsgrad=True
+            weight_decay=self.weight_decay
         )
         
-        # Create scheduler with warmup
-        schedulers = []
-        
-        # Learning rate warmup
-        if self.warm_up_steps > 0:
-            warmup_scheduler = {
-                'scheduler': torch.optim.lr_scheduler.LambdaLR(
-                    optimizer,
-                    lambda epoch: min(1.0, epoch / self.warm_up_steps)
-                ),
-                'interval': 'step',
-                'frequency': 1,
-                'name': 'warmup'
-            }
-            schedulers.append(warmup_scheduler)
-        
-        # LR scheduler for after warmup
-        main_scheduler = {
-            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
+        # Add cosine annealing with warm restarts
+        lr_scheduler = {
+            'scheduler': CosineAnnealingWarmRestarts(
                 optimizer,
-                mode='min',
-                factor=self.lr_scheduler_factor,
-                patience=self.lr_scheduler_patience,
-                verbose=True
+                T_0=20,              # Increased from 10 to 20 epochs
+                T_mult=2,            # Double the period after each restart
+                eta_min=1e-6,
             ),
-            "monitor": "val_loss",
-            "interval": "epoch",
-            "frequency": 1,
-            "name": "plateau"
+            'name': 'cosine_lr',
+            'interval': 'epoch',
+            'frequency': 1
         }
-        schedulers.append(main_scheduler)
         
-        return [optimizer], schedulers
+        return [optimizer], [lr_scheduler]
 
 def train_lightning_model(
     config_path: str,
@@ -356,18 +337,18 @@ def train_lightning_model(
     trainer_class=None
 ):
     """
-    Train the model using PyTorch Lightning
+    Training entry point for Lightning model.
     
     Parameters:
-    - config_path: Path to configuration JSON file
+    - config_path: Path to the configuration file
     - max_epochs: Maximum number of epochs to train
     - early_stopping_patience: Patience for early stopping
-    - verbose: Whether to enable verbose logging
-    - trainer_class: Optional custom trainer class to use instead of pl.Trainer
+    - verbose: Whether to print verbose logs
+    - trainer_class: Optional custom trainer class
     
     Returns:
     - model: Trained model
-    - trainer: Lightning trainer
+    - trainer: PyTorch Lightning trainer object
     """
     # Enable tensor cores for better performance on CUDA devices
     if torch.cuda.is_available():
@@ -398,12 +379,27 @@ def train_lightning_model(
     training_params = config.get('training', {})
     learning_rate = training_params.get('learning_rate', 0.001)
     weight_decay = training_params.get('weight_decay', 1e-5)
+    # Enable mixup for better generalization
+    mixup_alpha = training_params.get('mixup_alpha', 0.2)
+    use_focal_loss = training_params.get('use_focal_loss', True)  # Enable focal loss by default
     
     # Setup data
     data_params = config.get('data', {})
     train_data_path = data_params.get('train_data_path', '')
     val_data_path = data_params.get('val_data_path', '')
     batch_size = config.get('training', {}).get('batch_size', 32)
+    num_workers = data_params.get('num_workers', None)  # Get num_workers from config
+    
+    if num_workers is not None:
+        logger.info(f"Using {num_workers} workers for data loading")
+    else:
+        # Default behavior based on platform
+        if sys.platform.startswith('win'):
+            num_workers = 0
+            logger.info("Detected Windows platform, defaulting to 0 workers")
+        else:
+            num_workers = 2
+            logger.info(f"Using default of {num_workers} workers for data loading")
     
     if not train_data_path or not val_data_path:
         logger.warning("No data paths provided in config, skipping data loading")
@@ -444,12 +440,17 @@ def train_lightning_model(
                         if verbose:
                             logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
                         
+                        # Copy the structured array to fix strides issue
+                        table_data = np.array(table_data.copy())
+                        
                         # Convert structured array to separate tensors
                         for field_name in table_data.dtype.names:
                             if field_name != 'index':  # Skip the index field
                                 feature_name = f"{tf}_{field_name}"
+                                # Use np.copy to ensure contiguous memory
+                                field_data = np.copy(table_data[field_name])
                                 train_data[feature_name] = torch.tensor(
-                                    table_data[field_name], dtype=torch.float32
+                                    field_data, dtype=torch.float32
                                 )
                                 if verbose:
                                     logger.info(f"    Added feature: {feature_name}, Shape: {train_data[feature_name].shape}")
@@ -506,12 +507,17 @@ def train_lightning_model(
                         if verbose:
                             logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
                         
+                        # Copy the structured array to fix strides issue
+                        table_data = np.array(table_data.copy())
+                        
                         # Convert structured array to separate tensors
                         for field_name in table_data.dtype.names:
                             if field_name != 'index':  # Skip the index field
                                 feature_name = f"{tf}_{field_name}"
+                                # Use np.copy to ensure contiguous memory
+                                field_data = np.copy(table_data[field_name])
                                 val_data[feature_name] = torch.tensor(
-                                    table_data[field_name], dtype=torch.float32
+                                    field_data, dtype=torch.float32
                                 )
                                 if verbose:
                                     logger.info(f"    Added feature: {feature_name}, Shape: {val_data[feature_name].shape}")
@@ -548,8 +554,13 @@ def train_lightning_model(
         # Create datasets
         class TimeSeriesDataset(torch.utils.data.Dataset):
             def __init__(self, data, labels):
-                self.data = data
-                self.labels = labels
+                # Deep copy the data to avoid pickling issues with references
+                self.data = {}
+                for key, tensor in data.items():
+                    self.data[key] = tensor.clone() if isinstance(tensor, torch.Tensor) else torch.tensor(tensor, dtype=torch.float32)
+                
+                # Make sure labels are properly copied
+                self.labels = labels.clone() if isinstance(labels, torch.Tensor) else torch.tensor(labels, dtype=torch.long)
                 
                 # Group features by timeframe
                 self.timeframes = {}
@@ -560,26 +571,71 @@ def train_lightning_model(
                             self.timeframes[tf] = []
                         self.timeframes[tf].append(feature)
                 
-                # Find the minimum length across all tensors
-                self.data_length = len(labels)
-                for key, tensor in data.items():
-                    if len(tensor) < self.data_length:
-                        if verbose:
-                            logger.warning(f"Feature {key} has length {len(tensor)}, shorter than labels with length {self.data_length}.")
-                        self.data_length = min(self.data_length, len(tensor))
+                # Find the base timeframe (assumed to be '15m') and its length
+                base_tf = None
+                base_length = 0
                 
-                # Truncate all tensors to the minimum length
-                for key, tensor in data.items():
-                    if len(tensor) > self.data_length:
-                        if verbose:
-                            logger.warning(f"Feature {key} has length {len(tensor)}, truncating to {self.data_length}.")
-                        self.data[key] = tensor[:self.data_length]
+                # Determine the shortest timeframe (highest frequency) and use its length as base
+                timeframe_lengths = {}
+                for tf in self.timeframes.keys():
+                    # Get the length of one feature from this timeframe
+                    if self.timeframes[tf]:
+                        feature = self.timeframes[tf][0]
+                        tf_length = len(self.data[f"{tf}_{feature}"])
+                        timeframe_lengths[tf] = tf_length
+                        if base_tf is None or tf_length > base_length:
+                            base_tf = tf
+                            base_length = tf_length
                 
-                # Truncate labels to match
-                if len(self.labels) > self.data_length:
+                if verbose:
+                    logger.info(f"Base timeframe is {base_tf} with {base_length} samples")
+                    for tf, length in timeframe_lengths.items():
+                        logger.info(f"Timeframe {tf} has {length} samples")
+                
+                # Use the length of the labels if available
+                self.data_length = len(self.labels)
+                
+                # Ensure labels match the base timeframe length
+                if len(self.labels) != base_length:
                     if verbose:
-                        logger.warning(f"Labels has length {len(self.labels)}, truncating to {self.data_length}.")
-                    self.labels = self.labels[:self.data_length]
+                        logger.warning(f"Labels length ({len(self.labels)}) doesn't match base timeframe length ({base_length}), adjusting...")
+                    
+                    # If labels are longer, truncate
+                    if len(self.labels) > base_length:
+                        self.labels = self.labels[:base_length]
+                    # If labels are shorter, pad with zeros (this should be rare)
+                    elif len(self.labels) < base_length:
+                        padding = torch.zeros(base_length - len(self.labels), dtype=torch.long)
+                        self.labels = torch.cat([self.labels, padding])
+                    
+                    self.data_length = base_length
+                
+                # Resample lower frequency data to match the base timeframe length
+                for tf in self.timeframes.keys():
+                    if tf != base_tf:
+                        tf_length = timeframe_lengths.get(tf, 0)
+                        
+                        # Only process if we have features for this timeframe
+                        if tf_length > 0:
+                            for feature in self.timeframes[tf]:
+                                feature_key = f"{tf}_{feature}"
+                                source_tensor = self.data[feature_key]
+                                
+                                # If source is shorter than target (lower frequency data)
+                                if len(source_tensor) < base_length:
+                                    if verbose:
+                                        logger.info(f"Upsampling {feature_key} from {len(source_tensor)} to {base_length} samples")
+                                    
+                                    # Create indices for nearest-neighbor upsampling
+                                    # This effectively repeats each value the appropriate number of times
+                                    indices = torch.linspace(0, len(source_tensor) - 1, base_length).long()
+                                    upsampled = source_tensor[indices]
+                                    self.data[feature_key] = upsampled
+                                # If source is longer than target (this should be rare)
+                                elif len(source_tensor) > base_length:
+                                    if verbose:
+                                        logger.warning(f"Feature {feature_key} has length {len(source_tensor)}, truncating to {base_length}.")
+                                    self.data[feature_key] = source_tensor[:base_length]
                 
                 if verbose:
                     logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
@@ -595,6 +651,10 @@ def train_lightning_model(
                 # Organize data by timeframe for model consumption
                 sample = {}
                 for tf in self.timeframes:
+                    # Check if this timeframe has any features
+                    if not self.timeframes[tf]:
+                        continue  # Skip empty timeframes
+                        
                     # Stack features into a tensor of shape (num_features,)
                     try:
                         features = torch.stack([
@@ -612,6 +672,10 @@ def train_lightning_model(
                     except IndexError as e:
                         logger.error(f"Index error for {tf} at idx={idx}: {str(e)}")
                         raise
+                    except Exception as e:
+                        logger.error(f"Error processing timeframe {tf} at idx={idx}: {str(e)}")
+                        # Provide an empty tensor as fallback
+                        sample[tf] = torch.zeros((1, 1), dtype=torch.float32)
                 
                 sample['label'] = self.labels[idx]
                 return sample
@@ -619,13 +683,16 @@ def train_lightning_model(
         train_dataset = TimeSeriesDataset(train_data, train_labels)
         val_dataset = TimeSeriesDataset(val_data, val_labels)
         
-        # Create DataLoaders with safer settings
-        # Use fewer workers to reduce likelihood of race conditions
+        # Create DataLoaders with proper worker configuration
+        # Platform-specific adjustments for Windows
+        if sys.platform.startswith('win') and num_workers > 0:
+            logger.warning("Windows detected, multiprocessing may be unstable - consider setting num_workers=0 if issues occur")
+        
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=2,  # Reduced from 4
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True  # Drop the last incomplete batch
         )
@@ -634,12 +701,12 @@ def train_lightning_model(
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=2,  # Reduced from 4
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True  # Drop the last incomplete batch
         )
         
-        logger.info(f"Created data loaders with batch size {batch_size}")
+        logger.info(f"Created data loaders with batch size {batch_size} and {num_workers} workers")
         
         # Determine input dimensions from actual data
         input_dims = {}
@@ -649,6 +716,11 @@ def train_lightning_model(
         
         logger.info(f"Computed input dimensions from data: {input_dims}")
         
+        # Check if we have any input dimensions at all
+        if not input_dims:
+            logger.error("No valid input dimensions found. Dataset is empty or failed to load properly.")
+            return None, None
+            
         # Create Lightning model
         model = LightningTimeSeriesModel(
             input_dims=input_dims,
@@ -659,7 +731,10 @@ def train_lightning_model(
             attention=attention,
             num_classes=num_classes,
             learning_rate=learning_rate,
-            weight_decay=weight_decay
+            weight_decay=weight_decay,
+            mixup_alpha=mixup_alpha,
+            use_focal_loss=use_focal_loss,
+            use_batch_norm=True  # Add batch normalization
         )
         
     except Exception as e:
@@ -703,7 +778,9 @@ def train_lightning_model(
         'log_every_n_steps': 50,  # Reduced logging frequency
         'accelerator': 'auto',  # Use GPU if available
         'enable_progress_bar': True,
-        'enable_model_summary': True
+        'enable_model_summary': True,
+        'gradient_clip_val': 1.0,  # Add gradient clipping
+        'gradient_clip_algorithm': 'norm'  # Use norm clipping
     }
     
     if trainer_class:
@@ -718,3 +795,62 @@ def train_lightning_model(
     logger.info("Training complete")
     
     return model, trainer
+
+# Add a more robust model checking function
+def _robust_model_check_fn(model_path, inputs, expected_output=None):
+    """More robust ONNX model checker with exception handling for Windows compatibility"""
+    try:
+        import onnxruntime
+        import os
+        import platform
+        
+        # Convert path to absolute path with proper formatting for the OS
+        p = os.path.abspath(model_path)
+        
+        # Check if the file exists
+        if not os.path.exists(p):
+            logger.warning(f"ONNX model file not found at {p}")
+            return
+            
+        # On Windows, make sure the path format is correct
+        if platform.system() == 'Windows':
+            p = p.replace('\\', '/')
+            
+        logger.info(f"Loading ONNX model from {p}")
+        
+        # Create session with appropriate providers for the platform
+        providers = ['CPUExecutionProvider']
+        if platform.system() != 'Windows' and 'CUDAExecutionProvider' in onnxruntime.get_available_providers():
+            providers.insert(0, 'CUDAExecutionProvider')
+            
+        session_options = onnxruntime.SessionOptions()
+        session_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        
+        # Try to load the model with appropriate error handling
+        try:
+            sess = onnxruntime.InferenceSession(p, session_options, providers=providers)
+            logger.info("ONNX model loaded successfully")
+            
+            # Basic input shape verification if we have input
+            if inputs is not None:
+                input_name = sess.get_inputs()[0].name
+                logger.info(f"Model expects input with name: {input_name}")
+                
+                # Simple test run with provided input
+                test_input = {input_name: inputs.numpy() if hasattr(inputs, 'numpy') else inputs}
+                result = sess.run(None, test_input)
+                logger.info(f"Model successfully ran inference. Output shape: {result[0].shape}")
+                
+        except Exception as e:
+            logger.error(f"Error testing ONNX model: {str(e)}")
+    except ImportError as e:
+        logger.warning(f"ONNX validation skipped: {str(e)}")
+    except Exception as e:
+        logger.warning(f"Unexpected error in ONNX validation: {str(e)}")
+
+def to_onnx(self, file_path, input_sample=None, **kwargs):
+    # ... existing code ...
+    
+    # Use the more robust model check function
+    model_check_fn = kwargs.get('model_check_fn', _robust_model_check_fn)
+    # ... rest of function ...

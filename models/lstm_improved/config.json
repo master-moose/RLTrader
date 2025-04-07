@@ -1,0 +1,24 @@
+{
+  "model": {
+    "hidden_dims": 64,
+    "num_layers": 1,
+    "dropout": 0.7,
+    "bidirectional": true,
+    "attention": false,
+    "num_classes": 3,
+    "use_batch_norm": true
+  },
+  "training": {
+    "learning_rate": 0.0002,
+    "weight_decay": 0.005,
+    "batch_size": 256,
+    "mixup_alpha": 0.3,
+    "use_focal_loss": true,
+    "focal_gamma": 2.0
+  },
+  "data": {
+    "train_data_path": "data/synthetic\\train_data.h5",
+    "val_data_path": "data/synthetic\\val_data.h5",
+    "num_workers": 0
+  }
+}

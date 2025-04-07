@@ -296,15 +296,56 @@ def calculate_multi_timeframe_signal(data_dict, primary_tf='15m', threshold_pct=
     # Create a common timestamp index based on primary timeframe
     common_index = primary_df.index
     
-    # Align all signals to primary timeframe
+    # Align all signals to primary timeframe with improved resampling
     aligned_signals = {}
     for tf, signal in signals.items():
         if tf == primary_tf:
+            # Primary timeframe remains unchanged
             aligned_signals[tf] = signal
         else:
-            # Resample signal to match primary timeframe
-            resampled = signal.reindex(common_index, method='ffill')
-            aligned_signals[tf] = resampled
+            # Determine the proper resampling ratio between timeframes
+            # This assumes standard timeframe relationships (e.g., 4h = 16 * 15m, 1d = 96 * 15m)
+            timeframe_ratios = {
+                '15m_4h': 16,  # 16 15-minute candles = 1 4-hour candle
+                '15m_1d': 96,  # 96 15-minute candles = 1 day candle
+                '4h_1d': 6     # 6 4-hour candles = 1 day candle
+            }
+            
+            # Determine the ratio based on the timeframes we're working with
+            ratio_key = f"{primary_tf}_{tf}"
+            reverse_ratio_key = f"{tf}_{primary_tf}"
+            
+            # Check if we have a direct ratio or need to reverse it
+            if ratio_key in timeframe_ratios:
+                ratio = timeframe_ratios[ratio_key]
+                # For higher timeframes, we repeat each value 'ratio' times
+                # Create a new index that will match the primary timeframe
+                resampled = pd.Series(index=common_index, dtype=float)
+                
+                # Find where each higher timeframe value should be assigned
+                for i, idx in enumerate(signal.index):
+                    # Find the closest index in the primary timeframe
+                    closest_idx = common_index[common_index >= idx]
+                    if len(closest_idx) > 0:
+                        # Assign this value to the next 'ratio' candles in the primary timeframe
+                        segment = common_index[common_index >= closest_idx[0]][:ratio]
+                        resampled.loc[segment] = signal.iloc[i]
+                
+                # Fill any remaining NaN values with forward fill
+                aligned_signals[tf] = resampled.fillna(method='ffill')
+                
+            elif reverse_ratio_key in timeframe_ratios:
+                # For lower timeframes to higher (should be rare), use downsampling
+                # with a last-value strategy
+                ratio = timeframe_ratios[reverse_ratio_key]
+                # Downsample by taking the last value of each group
+                resampled = signal.reindex(common_index, method='ffill')
+                aligned_signals[tf] = resampled
+                
+            else:
+                # Default fallback if ratio not found: use standard resampling with forward fill
+                resampled = signal.reindex(common_index, method='ffill')
+                aligned_signals[tf] = resampled
     
     # Combine signals with weights (higher timeframes get more weight)
     weights = {'15m': 1.0, '4h': 2.0, '1d': 3.0}

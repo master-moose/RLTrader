@@ -15,9 +15,17 @@ import pandas as pd
 import h5py
 import matplotlib.pyplot as plt
 import shutil
+import sys
+import platform
 from sklearn.utils.class_weight import compute_class_weight
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
+
+# Setup multiprocessing to work on both Windows and Linux
+if sys.platform.startswith('win'):
+    # On Windows, we need to use spawn method instead of fork
+    import multiprocessing
+    multiprocessing.set_start_method('spawn', force=True)
 
 from crypto_trading_model.lstm_lightning import LightningTimeSeriesModel, train_lightning_model
 from crypto_trading_model.data_processing.feature_engineering import calculate_multi_timeframe_signal
@@ -29,6 +37,7 @@ logger = logging.getLogger(__name__)
 def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
     """
     Prepare the dataset for training with optional label regeneration.
+    Uses hierarchical multi-timeframe approach for data and signal alignment.
     
     Parameters:
     -----------
@@ -55,7 +64,7 @@ def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
     
     # If we need to regenerate labels
     if regenerate_labels:
-        logger.info("Regenerating labels using multi-timeframe approach...")
+        logger.info("Regenerating labels using hierarchical multi-timeframe approach...")
         
         # Process each split
         for split_name, file_path in [('train', train_path), ('val', val_path), ('test', test_path)]:
@@ -81,9 +90,10 @@ def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
                     logger.warning(f"No timeframes found in {file_path}, skipping.")
                     continue
                     
-                # Calculate multi-timeframe signals
-                logger.info(f"Calculating signals for {split_name} data...")
-                lookforward_periods = {'15m': 16, '4h': 4, '1d': 1}
+                # Calculate multi-timeframe signals with hierarchical alignment
+                logger.info(f"Calculating signals for {split_name} data with proper hierarchical alignment...")
+                # Use shorter lookforward periods to reduce noise in labeling
+                lookforward_periods = {'15m': 8, '4h': 2, '1d': 1}
                 multi_tf_signals = calculate_multi_timeframe_signal(
                     data_dict,
                     primary_tf='15m',
@@ -242,7 +252,7 @@ def analyze_label_distribution(data_path):
     
     return results
 
-def train_model(data_paths, config_path=None, output_dir='models/lstm_improved', max_epochs=100):
+def train_model(data_paths, config_path=None, output_dir='models/lstm_improved', max_epochs=100, num_workers=None):
     """
     Train the improved LSTM model.
     
@@ -256,6 +266,8 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
         Directory to save model and logs
     max_epochs : int
         Maximum number of epochs for training
+    num_workers : int, optional
+        Number of worker processes for data loading. Default is None (auto-detection)
         
     Returns:
     --------
@@ -274,17 +286,21 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
         # Default configuration
         config = {
             "model": {
-                "hidden_dims": 256,
-                "num_layers": 3,
-                "dropout": 0.3,
+                "hidden_dims": 64,          # Further reduced from 128
+                "num_layers": 1,            # Single layer model
+                "dropout": 0.7,             # Very high dropout
                 "bidirectional": True,
-                "attention": True,
-                "num_classes": 3
+                "attention": False,         # Disable attention to simplify
+                "num_classes": 3,
+                "use_batch_norm": True
             },
             "training": {
-                "learning_rate": 0.0005,
-                "weight_decay": 1e-4,
-                "batch_size": 256
+                "learning_rate": 0.0002,    # Lower learning rate
+                "weight_decay": 5e-3,       # Higher weight decay
+                "batch_size": 256,          # Increased from 128 for better efficiency
+                "mixup_alpha": 0.3,         # More aggressive mixup
+                "use_focal_loss": True,
+                "focal_gamma": 2.0
             },
             "data": {
                 "train_data_path": data_paths['train_path'],
@@ -297,6 +313,17 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
         logger.info(f"Created new configuration and saved to {config_path}")
+    
+    # Add num_workers to config if specified
+    if num_workers is not None:
+        if "data" not in config:
+            config["data"] = {}
+        config["data"]["num_workers"] = num_workers
+        logger.info(f"Using {num_workers} workers for data loading")
+        
+        # Update config file
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
     
     # Analyze label distribution
     logger.info("Analyzing label distribution in the training data...")
@@ -321,7 +348,7 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
     # Create callbacks
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=20,  # Using a fixed patience value
+        patience=40,
         mode='min'
     )
     
@@ -342,7 +369,7 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
         model, trainer = train_lightning_model(
             config_path=config_path,
             max_epochs=max_epochs,
-            early_stopping_patience=20,
+            early_stopping_patience=40,
             verbose=True
         )
         
@@ -374,6 +401,8 @@ def main():
                       help="Whether to regenerate labels using the multi-timeframe approach")
     parser.add_argument("--threshold_pct", type=float, default=0.015,
                       help="Threshold percentage for price movement to generate labels")
+    parser.add_argument("--num_workers", type=int, default=None,
+                      help="Number of worker processes for data loading (default: auto-detect)")
     
     args = parser.parse_args()
     
@@ -390,7 +419,8 @@ def main():
             data_paths,
             config_path=args.config,
             output_dir=args.output_dir,
-            max_epochs=args.max_epochs
+            max_epochs=args.max_epochs,
+            num_workers=args.num_workers
         )
         
         logger.info("Model training complete.")
