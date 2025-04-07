@@ -1,4 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
+"""
+Script to create a fresh copy of a file
+"""
+
+content = '''#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
@@ -284,3 +290,22 @@ def train_lightning_model(
     logger.info("Training complete")
     
     return model, trainer
+'''
+
+# First, remove the old file
+import os
+
+# Target file path
+file_path = 'crypto_trading_model/lstm_lightning.py'
+
+# Remove the old file if it exists
+if os.path.exists(file_path):
+    print(f"Removing existing file: {file_path}")
+    os.remove(file_path)
+
+# Create a brand new file with proper encoding
+print(f"Creating new file: {file_path}")
+with open(file_path, 'w', encoding='utf-8') as f:
+    f.write(content)
+
+print(f"File {file_path} has been recreated from scratch with UTF-8 encoding") 
