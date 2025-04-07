@@ -5,6 +5,8 @@
 Script to create a clean version of lstm_lightning.py without null bytes
 """
 
+import os
+
 CLEAN_CONTENT = '''#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
