@@ -86,6 +86,26 @@ class MultiTimeframeModel(nn.Module):
         Returns:
         - Tensor with shape (batch_size, num_classes)
         """
+        features = self.extract_features(inputs)
+        
+        # Pass through fully connected layers
+        x = F.relu(self.fc1(self.dropout(features)))
+        x = F.relu(self.fc2(self.dropout(x)))
+        x = self.fc3(x)
+        
+        return x
+    
+    def extract_features(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Extract features from multiple timeframes without final classification
+        
+        Parameters:
+        - inputs: Dictionary mapping timeframe names to input tensors
+                  Each tensor has shape (batch_size, seq_len, input_dim)
+        
+        Returns:
+        - Feature tensor with shape (batch_size, feature_dim)
+        """
         # Process each timeframe through its encoder
         encoded_timeframes = {}
         for tf, encoder in self.encoders.items():
@@ -174,12 +194,35 @@ class MultiTimeframeModel(nn.Module):
             # Simple concatenation of all timeframe encodings
             combined = torch.cat([encoded_timeframes[tf] for tf in self.timeframes], dim=1)
         
-        # Pass through fully connected layers
-        x = F.relu(self.fc1(self.dropout(combined)))
-        x = F.relu(self.fc2(self.dropout(x)))
-        x = self.fc3(x)
+        return combined
+    
+    def predict_probabilities(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Forward pass that returns class probabilities
         
-        return x
+        Parameters:
+        - inputs: Dictionary mapping timeframe names to input tensors
+        
+        Returns:
+        - Tensor with shape (batch_size, num_classes) containing probabilities
+        """
+        logits = self.forward(inputs)
+        return F.softmax(logits, dim=1)
+    
+    def predict_action(self, inputs: Dict[str, torch.Tensor]) -> int:
+        """
+        Predict the best action (for use with RL agents)
+        
+        Parameters:
+        - inputs: Dictionary mapping timeframe names to input tensors
+        
+        Returns:
+        - Action index (0=hold, 1=buy, 2=sell)
+        """
+        with torch.no_grad():
+            logits = self.forward(inputs)
+            probabilities = F.softmax(logits, dim=1)
+            return torch.argmax(probabilities, dim=1).item()
 
 class TimeSeriesTransformer(nn.Module):
     """

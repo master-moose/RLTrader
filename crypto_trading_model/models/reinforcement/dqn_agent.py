@@ -26,6 +26,7 @@ sys.path.append('../..')
 from config import RL_SETTINGS, PATHS
 from environment.trading_env import CryptoTradingEnv
 from models.time_series.lstm_model import TimeSeriesLSTM
+from models.time_series.model import MultiTimeframeModel
 
 # Setup logging
 logging.basicConfig(
@@ -114,7 +115,7 @@ class DQNTradingAgent:
     def __init__(
         self,
         env: gym.Env,
-        time_series_model: Optional[TimeSeriesLSTM] = None,
+        time_series_model: Optional[Union[TimeSeriesLSTM, MultiTimeframeModel]] = None,
         learning_rate: float = 0.0005,
         gamma: float = 0.99,
         epsilon_start: float = 1.0,
@@ -125,7 +126,8 @@ class DQNTradingAgent:
         buffer_capacity: int = 10000,
         hidden_units: List[int] = None,
         double_dqn: bool = True,
-        tensorboard_log: str = None
+        tensorboard_log: str = None,
+        feature_extraction_mode: str = "concat"  # Options: "concat", "guidance", "transfer"
     ):
         """
         Initialize the DQN trading agent.
@@ -134,7 +136,7 @@ class DQNTradingAgent:
         -----------
         env : gym.Env
             Trading environment
-        time_series_model : TimeSeriesLSTM, optional
+        time_series_model : TimeSeriesLSTM or MultiTimeframeModel, optional
             Trained time series model to incorporate predictions
         learning_rate : float
             Learning rate for the optimizer
@@ -158,6 +160,11 @@ class DQNTradingAgent:
             Whether to use Double DQN
         tensorboard_log : str
             Path for TensorBoard logs
+        feature_extraction_mode : str
+            How to use features from time series model
+              - "concat": Concatenate features with state
+              - "guidance": Use predictions as guidance signals
+              - "transfer": Use transfer learning from time series model
         """
         # Environment
         self.env = env
@@ -167,6 +174,13 @@ class DQNTradingAgent:
         # Time series model
         self.time_series_model = time_series_model
         self.use_predictions = time_series_model is not None
+        self.feature_extraction_mode = feature_extraction_mode
+        
+        # Determine the type of time series model
+        self.ts_model_type = None
+        if self.use_predictions:
+            self.ts_model_type = "multitimeframe" if isinstance(time_series_model, MultiTimeframeModel) else "lstm"
+            logger.info(f"Using {self.ts_model_type} time series model for feature extraction")
         
         # Hyperparameters
         self.learning_rate = learning_rate
@@ -181,7 +195,7 @@ class DQNTradingAgent:
         
         # Define model architecture
         if hidden_units is None:
-            hidden_units = [64, 64]
+            hidden_units = [128, 64]
         self.hidden_units = hidden_units
         
         # Initialize replay buffer
@@ -228,11 +242,45 @@ class DQNTradingAgent:
             state_input = Input(shape=self.state_dim)
             state_features = Flatten()(state_input)
             
-            # Add time series prediction input if available
-            prediction_input = Input(shape=(1,))  # Single step prediction
-            
-            # Concatenate state and prediction
-            combined = Concatenate()([state_features, prediction_input])
+            if self.feature_extraction_mode == "concat":
+                # Add time series feature input
+                if self.ts_model_type == "multitimeframe":
+                    # For MultiTimeframeModel, we expect features from extract_features
+                    # Estimate feature size based on model architecture
+                    if hasattr(self.time_series_model, 'hidden_dims'):
+                        feature_size = self.time_series_model.hidden_dims
+                        if hasattr(self.time_series_model, 'bidirectional') and self.time_series_model.bidirectional:
+                            feature_size *= 2
+                        if not hasattr(self.time_series_model, 'attention') or not self.time_series_model.attention:
+                            feature_size *= len(self.time_series_model.timeframes)
+                    else:
+                        # Default if we can't determine
+                        feature_size = 128
+                    
+                    ts_features_input = Input(shape=(feature_size,))
+                else:
+                    # For LSTM model, simpler prediction
+                    ts_features_input = Input(shape=(3,))  # 3 classes: buy, sell, hold
+                
+                # Concatenate state and time series features
+                combined = Concatenate()([state_features, ts_features_input])
+                
+            elif self.feature_extraction_mode == "guidance":
+                # Use time series predictions as guidance signals
+                ts_prediction_input = Input(shape=(3,))  # 3 classes: buy, sell, hold
+                
+                # Process the state with initial layers
+                x = Dense(self.hidden_units[0], activation='relu')(state_features)
+                x = BatchNormalization()(x)
+                
+                # Incorporate prediction guidance
+                combined = Concatenate()([x, ts_prediction_input])
+                
+            elif self.feature_extraction_mode == "transfer":
+                # Create a similar architecture to the time series model
+                # but use it for Q-learning instead
+                combined = state_features
+                # No additional input needed as we're transferring knowledge differently
             
             # Hidden layers with BatchNormalization for better training
             x = combined
@@ -244,26 +292,33 @@ class DQNTradingAgent:
             # Output layer (Q-values for each action)
             outputs = Dense(self.action_dim)(x)
             
-            # Build model
-            model = Model(inputs=[state_input, prediction_input], outputs=outputs)
+            # Build model based on feature extraction mode
+            if self.feature_extraction_mode == "concat":
+                model = Model(inputs=[state_input, ts_features_input], outputs=outputs)
+            elif self.feature_extraction_mode == "guidance":
+                model = Model(inputs=[state_input, ts_prediction_input], outputs=outputs)
+            else:  # "transfer"
+                model = Model(inputs=state_input, outputs=outputs)
+                
         else:
             # Simple sequential model with improved regularization
-            model = Sequential()
-            model.add(Flatten(input_shape=self.state_dim))
-            
-            # Hidden layers with BatchNormalization and Dropout
-            for units in self.hidden_units:
-                model.add(Dense(units, activation='relu'))
-                model.add(BatchNormalization())
-                model.add(Dropout(0.2))  # Add dropout for regularization
-            
-            # Output layer (Q-values for each action)
-            model.add(Dense(self.action_dim))
+            model = Sequential([
+                Input(shape=self.state_dim),
+                Flatten(),
+                *[
+                    Sequential([
+                        Dense(units, activation='relu'),
+                        BatchNormalization(),
+                        Dropout(0.2)
+                    ]) for units in self.hidden_units
+                ],
+                Dense(self.action_dim)
+            ])
         
-        # Compile model with improved settings
+        # Compile model with Huber loss for stability
         model.compile(
-            optimizer=Adam(learning_rate=self.learning_rate, clipnorm=1.0),  # Add gradient clipping
-            loss=Huber(delta=1.0)  # Huber loss is more robust to outliers
+            optimizer=Adam(learning_rate=self.learning_rate),
+            loss=Huber()
         )
         
         return model
@@ -276,48 +331,44 @@ class DQNTradingAgent:
     
     def select_action(self, state, prediction=None, deterministic=False) -> int:
         """
-        Select an action using epsilon-greedy policy.
+        Select action using epsilon-greedy policy
         
         Parameters:
         -----------
         state : np.ndarray
             Current state
         prediction : np.ndarray, optional
-            Price prediction from time series model
+            Prediction from time series model
         deterministic : bool
-            Whether to use a deterministic policy (for evaluation)
+            Whether to use deterministic policy (for evaluation)
             
         Returns:
         --------
         int
             Selected action
         """
-        # Use deterministic policy for evaluation
-        if deterministic:
-            # Get Q-values
-            if self.use_predictions and prediction is not None:
-                q_values = self.q_network.predict([np.expand_dims(state, axis=0), 
-                                                  np.expand_dims(prediction, axis=0)])[0]
-            else:
-                q_values = self.q_network.predict(np.expand_dims(state, axis=0))[0]
-            
-            # Select best action
-            return np.argmax(q_values)
-        
-        # Epsilon-greedy exploration
-        if np.random.random() < self.epsilon:
+        # Use epsilon-greedy strategy for exploration
+        if not deterministic and np.random.random() < self.epsilon:
             # Random action
             return np.random.randint(self.action_dim)
+        
+        # Get Q-values for each action
+        if self.use_predictions:
+            if self.feature_extraction_mode == "concat":
+                if prediction is None:
+                    prediction = self._get_time_series_features(state)
+                q_values = self.q_network.predict([np.array([state]), np.array([prediction])], verbose=0)[0]
+            elif self.feature_extraction_mode == "guidance":
+                if prediction is None:
+                    prediction = self._get_time_series_prediction(state)
+                q_values = self.q_network.predict([np.array([state]), np.array([prediction])], verbose=0)[0]
+            else:  # "transfer"
+                q_values = self.q_network.predict(np.array([state]), verbose=0)[0]
         else:
-            # Get Q-values
-            if self.use_predictions and prediction is not None:
-                q_values = self.q_network.predict([np.expand_dims(state, axis=0), 
-                                                  np.expand_dims(prediction, axis=0)])[0]
-            else:
-                q_values = self.q_network.predict(np.expand_dims(state, axis=0))[0]
-            
-            # Select best action
-            return np.argmax(q_values)
+            q_values = self.q_network.predict(np.array([state]), verbose=0)[0]
+        
+        # Select action with highest Q-value
+        return np.argmax(q_values)
     
     def train(
         self,
@@ -359,7 +410,7 @@ class DQNTradingAgent:
             # Get prediction from time series model
             prediction = None
             if self.use_predictions:
-                prediction = self._get_price_prediction(state)
+                prediction = self._get_time_series_prediction(state)
             
             # Select action
             action = self.select_action(state, prediction)
@@ -434,93 +485,138 @@ class DQNTradingAgent:
         
         return training_history
     
-    def _get_price_prediction(self, state):
+    def _get_time_series_features(self, state):
         """
-        Get price prediction from time series model.
+        Extract features from the time series model
         
         Parameters:
         -----------
         state : np.ndarray
-            Current state of the environment
+            Current state
             
         Returns:
         --------
-        float
-            Price prediction
+        np.ndarray
+            Features from time series model
         """
-        if not self.use_predictions or self.time_series_model is None:
-            return 0.0
-        
-        try:
-            # Extract the price data from the state
-            # This assumes the state contains the price history in a specific format
-            # Adjust this based on your actual environment state structure
+        if self.ts_model_type == "multitimeframe":
+            # For MultiTimeframeModel, we need to reshape state into multiple timeframes
+            # This assumes state contains data for all timeframes concatenated
             
-            # For CryptoTradingEnv, the state typically includes:
-            # 1. Price/OHLCV data
-            # 2. Technical indicators
-            # 3. Position information
+            # This is a simplified example - in practice, would need to:
+            # 1. Reshape state into timeframe-specific tensors
+            # 2. Convert to torch tensors
+            # 3. Call extract_features
+            # 4. Convert result back to numpy
             
-            # Extract the relevant price data
-            env = self.env
-            if hasattr(env, 'prices') and hasattr(env, 'current_step'):
-                # Get the current price window
-                window_start = max(0, env.current_step - env.lookback_window)
-                window_end = env.current_step + 1  # +1 because of Python slicing
+            # Placeholder implementation - in practice, would need to be customized
+            # based on exact state representation in environment
+            try:
+                import torch
                 
-                # Extract the window of prices needed for prediction
-                if hasattr(env, 'data'):
-                    # If the environment has the full data
-                    price_window = env.data.iloc[window_start:window_end][['close']].values
+                # Convert state to proper format for MultiTimeframeModel
+                # This assumes environment provides state in the right format
+                # for extracting timeframe data
+                tf_data = {}
+                feature_dim = self.env.feature_dims  # Assuming env has this attribute
+                
+                for i, tf in enumerate(self.time_series_model.timeframes):
+                    # Calculate start and end indices for this timeframe's data in state
+                    if hasattr(self.env, 'window_size'):
+                        window_size = self.env.window_size
+                    else:
+                        window_size = 50  # default
                     
-                    # Normalize the price window if needed
-                    if hasattr(env, 'normalizer') and env.normalizer is not None:
-                        # Use the environment's normalizer if available
-                        price_window = env.normalizer.transform(price_window)
+                    # Extract and reshape this timeframe's data
+                    start_idx = i * feature_dim[tf] * window_size
+                    end_idx = start_idx + feature_dim[tf] * window_size
+                    
+                    tf_data[tf] = torch.tensor(
+                        state[start_idx:end_idx].reshape(1, window_size, feature_dim[tf]),
+                        dtype=torch.float32
+                    )
+                
+                # Extract features using the time series model
+                with torch.no_grad():
+                    features = self.time_series_model.extract_features(tf_data)
+                    return features.numpy().flatten()
+                    
+            except Exception as e:
+                logger.warning(f"Error extracting features from time series model: {e}")
+                # Fallback: return dummy features
+                if hasattr(self.time_series_model, 'hidden_dims'):
+                    feature_size = self.time_series_model.hidden_dims
+                    if hasattr(self.time_series_model, 'bidirectional') and self.time_series_model.bidirectional:
+                        feature_size *= 2
+                    if not hasattr(self.time_series_model, 'attention') or not self.time_series_model.attention:
+                        feature_size *= len(self.time_series_model.timeframes)
                 else:
-                    # Fallback to the prices array
-                    price_window = env.prices[window_start:window_end]
-                
-                # Get the sequence length required by the model
-                required_seq_length = self.time_series_model.sequence_length
-                
-                # Pad or truncate to match the required sequence length
-                if len(price_window) < required_seq_length:
-                    # Pad with zeros if the window is too short
-                    padding = np.zeros((required_seq_length - len(price_window), price_window.shape[1]))
-                    price_window = np.vstack([padding, price_window])
-                elif len(price_window) > required_seq_length:
-                    # Use only the most recent data
-                    price_window = price_window[-required_seq_length:]
-                
-                # Reshape for the model
-                if hasattr(self.time_series_model, 'input_shape'):
-                    expected_shape = self.time_series_model.input_shape
-                    price_window = price_window.reshape((1, *expected_shape))
-                else:
-                    # Default reshape for sequence models
-                    price_window = price_window.reshape((1, price_window.shape[0], price_window.shape[1]))
-                
-                # Get prediction from the model
-                prediction = self.time_series_model.predict(price_window)
-                
-                # Return the first prediction value
-                return prediction[0][0]  # Assuming prediction shape is (1, forecast_horizon)
-            
-            # Fallback: try to infer from raw state
-            # This is less ideal but may work if the environment structure is unknown
-            logger.warning("Using fallback method for price prediction, might be inaccurate")
-            if len(state.shape) == 1:
-                # Assume the first elements are price-related
-                price_data = state[:min(30, len(state))].reshape(1, -1, 1)
-                prediction = self.time_series_model.predict(price_data)
-                return prediction[0][0]
-            
-        except Exception as e:
-            logger.warning(f"Error getting price prediction: {e}")
+                    feature_size = 128
+                return np.zeros(feature_size)
+        else:
+            # For LSTM model, get prediction and use as features
+            return self._get_time_series_prediction(state)
+    
+    def _get_time_series_prediction(self, state):
+        """
+        Get prediction from time series model
         
-        # Return default value if prediction failed
-        return 0.0
+        Parameters:
+        -----------
+        state : np.ndarray
+            Current state
+            
+        Returns:
+        --------
+        np.ndarray
+            Prediction from time series model (probabilities for buy, sell, hold)
+        """
+        # This method would need to be customized based on the specific
+        # format of your time series model's predictions
+        
+        if self.ts_model_type == "multitimeframe":
+            try:
+                import torch
+                
+                # Convert state to proper format for MultiTimeframeModel
+                # Similar to _get_time_series_features
+                tf_data = {}
+                feature_dim = self.env.feature_dims  # Assuming env has this attribute
+                
+                for i, tf in enumerate(self.time_series_model.timeframes):
+                    # Calculate indices as in _get_time_series_features
+                    if hasattr(self.env, 'window_size'):
+                        window_size = self.env.window_size
+                    else:
+                        window_size = 50  # default
+                    
+                    start_idx = i * feature_dim[tf] * window_size
+                    end_idx = start_idx + feature_dim[tf] * window_size
+                    
+                    tf_data[tf] = torch.tensor(
+                        state[start_idx:end_idx].reshape(1, window_size, feature_dim[tf]),
+                        dtype=torch.float32
+                    )
+                
+                # Get prediction probabilities
+                with torch.no_grad():
+                    probs = self.time_series_model.predict_probabilities(tf_data)
+                    return probs.numpy().flatten()
+                    
+            except Exception as e:
+                logger.warning(f"Error getting prediction from time series model: {e}")
+                # Fallback: return uniform probabilities
+                return np.ones(3) / 3
+                
+        elif self.ts_model_type == "lstm":
+            # Assuming LSTM model has a predict method that returns probabilities
+            try:
+                return self.time_series_model.predict(np.array([state]))[0]
+            except:
+                return np.ones(3) / 3
+        else:
+            # Fallback
+            return np.ones(3) / 3
     
     def _train_step(self):
         """
@@ -536,8 +632,8 @@ class DQNTradingAgent:
         predictions = None
         next_predictions = None
         if self.use_predictions:
-            predictions = np.array([self._get_price_prediction(state) for state in states])
-            next_predictions = np.array([self._get_price_prediction(next_state) for next_state in next_states])
+            predictions = np.array([self._get_time_series_features(state) for state in states])
+            next_predictions = np.array([self._get_time_series_features(next_state) for next_state in next_states])
         
         # Current Q-values
         if self.use_predictions and predictions is not None:
@@ -628,7 +724,7 @@ class DQNTradingAgent:
                 # Get prediction if using time series model
                 prediction = None
                 if self.use_predictions:
-                    prediction = self._get_price_prediction(state)
+                    prediction = self._get_time_series_prediction(state)
                 
                 # Select action deterministically
                 action = self.select_action(state, prediction, deterministic=True)
@@ -690,7 +786,7 @@ class DQNTradingAgent:
         logger.info(f"Agent saved to {path}")
     
     @classmethod
-    def load(cls, path: str, env: gym.Env, time_series_model: Optional[TimeSeriesLSTM] = None):
+    def load(cls, path: str, env: gym.Env, time_series_model: Optional[Union[TimeSeriesLSTM, MultiTimeframeModel]] = None):
         """
         Load a saved agent.
         
@@ -700,7 +796,7 @@ class DQNTradingAgent:
             Path to saved agent
         env : gym.Env
             Trading environment
-        time_series_model : TimeSeriesLSTM, optional
+        time_series_model : TimeSeriesLSTM or MultiTimeframeModel, optional
             Trained time series model
             
         Returns:
@@ -799,7 +895,7 @@ class DQNTradingAgent:
 # Function to create and configure DQN agent
 def create_dqn_agent(
     env: gym.Env,
-    time_series_model: Optional[TimeSeriesLSTM] = None,
+    time_series_model: Optional[Union[TimeSeriesLSTM, MultiTimeframeModel]] = None,
     **kwargs
 ) -> DQNTradingAgent:
     """
@@ -809,7 +905,7 @@ def create_dqn_agent(
     -----------
     env : gym.Env
         Trading environment
-    time_series_model : TimeSeriesLSTM, optional
+    time_series_model : TimeSeriesLSTM or MultiTimeframeModel, optional
         Trained time series model
     **kwargs : dict
         Additional arguments for DQN agent

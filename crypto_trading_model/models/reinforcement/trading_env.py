@@ -43,7 +43,8 @@ class CryptoTradingEnv(gym.Env):
                 transaction_cost: float = 0.001,
                 position_size: float = 0.2,
                 reward_function: str = "pnl",
-                include_position_info: bool = True):
+                include_position_info: bool = True,
+                time_series_model = None):
         """
         Initialize the trading environment
         
@@ -56,6 +57,7 @@ class CryptoTradingEnv(gym.Env):
         - position_size: Size of each position as a percentage of balance
         - reward_function: Type of reward function to use
         - include_position_info: Whether to include position info in state
+        - time_series_model: Pre-trained time series model for feature extraction
         """
         super().__init__()
         
@@ -67,6 +69,7 @@ class CryptoTradingEnv(gym.Env):
         self.position_size = position_size
         self.reward_function = reward_function
         self.include_position_info = include_position_info
+        self.time_series_model = time_series_model
         
         # Verify data structure
         for tf in timeframes:
@@ -85,6 +88,9 @@ class CryptoTradingEnv(gym.Env):
         self.total_feature_dims = sum(self.feature_dims.values()) * self.window_size
         if self.include_position_info:
             self.total_feature_dims += 3  # Position type, position size, unrealized PnL
+        
+        # If using time series model, may need to adjust observation space
+        self.use_time_series_features = (time_series_model is not None)
         
         # Define action and observation spaces
         self.action_space = spaces.Discrete(len(Actions))
@@ -178,6 +184,7 @@ class CryptoTradingEnv(gym.Env):
         - Observation array
         """
         features = []
+        timeframe_data = {}  # Store raw timeframe data for time series model
         
         # Get data from each timeframe
         for tf in self.timeframes:
@@ -186,13 +193,16 @@ class CryptoTradingEnv(gym.Env):
             # Calculate the corresponding index for this timeframe
             tf_minutes = self._get_minutes(tf)
             base_minutes = self._get_minutes(self.base_timeframe)
-            tf_factor = base_minutes / tf_minutes
+            tf_factor = base_minutes / tf_minutes if base_minutes > 0 and tf_minutes > 0 else 1.0
             tf_index = min(len(tf_data) - 1, int(self.current_step * tf_factor))
             
             # Get window of data
             start_idx = max(0, tf_index - self.window_size + 1)
             end_idx = tf_index + 1
             window_data = tf_data.iloc[start_idx:end_idx].values
+            
+            # Store raw window data for time series model
+            timeframe_data[tf] = window_data.copy()
             
             # Normalize the data (simple min-max for now)
             window_data = self._normalize_data(window_data)
@@ -227,7 +237,12 @@ class CryptoTradingEnv(gym.Env):
             features.append(position_info)
         
         # Concatenate all features
-        return np.concatenate(features)
+        observation = np.concatenate(features)
+        
+        # Store timeframe data for time series feature extraction
+        self.timeframe_data = timeframe_data
+        
+        return observation
     
     def _normalize_data(self, data: np.ndarray) -> np.ndarray:
         """
@@ -480,6 +495,102 @@ class CryptoTradingEnv(gym.Env):
     def close(self):
         """Clean up resources"""
         pass
+
+    def get_time_series_features(self):
+        """
+        Get features from the time series model for the current observation
+        
+        Returns:
+        - Feature vector from time series model or None if not available
+        """
+        if not self.use_time_series_features or self.time_series_model is None:
+            return None
+            
+        # This method should be implemented based on the specific time series model
+        # It should use self.timeframe_data that was set in _get_observation
+        
+        try:
+            import torch
+            
+            # Convert timeframe data to format expected by time series model
+            tf_tensors = {}
+            
+            for tf, data in self.timeframe_data.items():
+                # Reshape data for the model (batch_size=1, window_size, features)
+                if len(data) < self.window_size:
+                    # Pad if necessary
+                    padding = np.zeros((self.window_size - len(data), data.shape[1]))
+                    data = np.vstack([padding, data])
+                    
+                # Convert to tensor
+                tf_tensors[tf] = torch.tensor(
+                    data.reshape(1, self.window_size, data.shape[1]),
+                    dtype=torch.float32
+                )
+            
+            # Check if the model has an extract_features method
+            if hasattr(self.time_series_model, 'extract_features'):
+                with torch.no_grad():
+                    features = self.time_series_model.extract_features(tf_tensors)
+                    return features.numpy()
+            
+            # Fallback: try to use forward method
+            elif hasattr(self.time_series_model, 'forward'):
+                with torch.no_grad():
+                    output = self.time_series_model(tf_tensors)
+                    return output.numpy()
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting features from time series model: {e}")
+            
+        return None
+        
+    def get_time_series_prediction(self):
+        """
+        Get trading action prediction from the time series model
+        
+        Returns:
+        - Predicted action probabilities or None if not available
+        """
+        if not self.use_time_series_features or self.time_series_model is None:
+            return None
+            
+        try:
+            import torch
+            
+            # Convert timeframe data to format expected by time series model
+            tf_tensors = {}
+            
+            for tf, data in self.timeframe_data.items():
+                # Reshape data for the model (batch_size=1, window_size, features)
+                if len(data) < self.window_size:
+                    # Pad if necessary
+                    padding = np.zeros((self.window_size - len(data), data.shape[1]))
+                    data = np.vstack([padding, data])
+                    
+                # Convert to tensor
+                tf_tensors[tf] = torch.tensor(
+                    data.reshape(1, self.window_size, data.shape[1]),
+                    dtype=torch.float32
+                )
+            
+            # Check if the model has a predict_probabilities method
+            if hasattr(self.time_series_model, 'predict_probabilities'):
+                with torch.no_grad():
+                    probs = self.time_series_model.predict_probabilities(tf_tensors)
+                    return probs.numpy().flatten()
+            
+            # Fallback: try to use forward method with softmax
+            elif hasattr(self.time_series_model, 'forward'):
+                with torch.no_grad():
+                    logits = self.time_series_model(tf_tensors)
+                    probs = torch.nn.functional.softmax(logits, dim=1)
+                    return probs.numpy().flatten()
+                    
+        except Exception as e:
+            logger.warning(f"Error getting prediction from time series model: {e}")
+            
+        return None
 
 class MultiTimeframeTradingEnv(CryptoTradingEnv):
     """
