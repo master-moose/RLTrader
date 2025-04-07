@@ -86,7 +86,7 @@ FEATURE_SETTINGS = {
 # Time Series Model Configuration
 # ---------------------------------------------------
 TIME_SERIES_SETTINGS = {
-    'sequence_length': 60,            # Number of time steps to look back
+    'sequence_length': 240,            # Number of time steps to look back
     'forecast_horizon': 5,            # Number of steps to predict ahead
     'target_column': 'close',         # Column to predict (usually 'close')
     'model_type': 'lstm',             # Model type: 'lstm', 'bilstm', 'cnn_lstm', 'attention'
@@ -180,7 +180,7 @@ PROGRESSIVE_LEARNING = {
     
     # Default stage configurations
     'time_series': {
-        'sequence_length': 60,
+        'sequence_length': 240,
         'forecast_horizon': 5,
         'target_column': 'close',
         'model_type': 'lstm',
