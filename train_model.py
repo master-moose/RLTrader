@@ -9,6 +9,14 @@ import argparse
 import numpy as np
 import pandas as pd
 
+# Try to import matplotlib for visualizations with a fallback
+try:
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    print("Warning: matplotlib not available, visualizations will be disabled")
+
 # Try to import torch with fallback for NCCL errors
 try:
     import torch
@@ -115,7 +123,7 @@ class TimeSeriesDataset(Dataset):
         - target_column: Column to use as the prediction target
         - feature_columns: List of columns to use as features (None = use all)
         - normalize: Whether to normalize the features
-        - use_cupy: Whether to use CuPy for computations (None = auto-detect)
+        - use_cupy: Whether to use CuPy for computations
         """
         self.data_path = data_path
         self.timeframes = timeframes
@@ -403,6 +411,9 @@ class MultiTimeframeModel(torch.nn.Module):
         self.attention = attention
         self.num_directions = 2 if bidirectional else 1
         
+        # Increased dropout for stronger regularization
+        self.dropout_rate = max(0.3, dropout)  # Ensure dropout is at least 0.3
+        
         # Create encoder LSTMs for each timeframe
         self.encoders = torch.nn.ModuleDict()
         for tf, dim in input_dims.items():
@@ -412,7 +423,7 @@ class MultiTimeframeModel(torch.nn.Module):
                 num_layers=num_layers,
                 batch_first=True,
                 bidirectional=bidirectional,
-                dropout=dropout if num_layers > 1 else 0
+                dropout=self.dropout_rate if num_layers > 1 else 0
             )
         
         # Attention mechanism
@@ -425,11 +436,12 @@ class MultiTimeframeModel(torch.nn.Module):
             for tf in self.timeframes:
                 self.query_vectors[tf] = torch.nn.Parameter(torch.randn(self.attn_hidden_dim))
             
-            # Attention projection
+            # Attention projection with batch normalization
             self.attention_projection = torch.nn.Linear(
                 self.attn_hidden_dim * len(self.timeframes), 
                 self.attn_hidden_dim
             )
+            self.attention_bn = torch.nn.BatchNorm1d(self.attn_hidden_dim)
         
         # Output layers
         if attention:
@@ -438,10 +450,14 @@ class MultiTimeframeModel(torch.nn.Module):
             output_dim = self.attn_hidden_dim * len(self.timeframes)
         
         self.fc1 = torch.nn.Linear(output_dim, hidden_dims)
+        self.bn1 = torch.nn.BatchNorm1d(hidden_dims)
+        
         self.fc2 = torch.nn.Linear(hidden_dims, hidden_dims // 2)
+        self.bn2 = torch.nn.BatchNorm1d(hidden_dims // 2)
+        
         self.fc3 = torch.nn.Linear(hidden_dims // 2, num_classes)
         
-        self.dropout = torch.nn.Dropout(dropout)
+        self.dropout = torch.nn.Dropout(self.dropout_rate)
     
     def forward(self, inputs):
         """
@@ -502,15 +518,31 @@ class MultiTimeframeModel(torch.nn.Module):
             # Concatenate all attended vectors
             concat_encodings = torch.cat(attended_encodings, dim=1)
             
-            # Project to final representation
+            # Project to final representation and apply batch normalization
             combined = self.attention_projection(concat_encodings)
+            if combined.size(0) > 1:  # Batch size must be > 1 for BatchNorm
+                combined = self.attention_bn(combined)
         else:
             # Simple concatenation of all timeframe encodings
             combined = torch.cat([encoded_timeframes[tf] for tf in self.timeframes], dim=1)
         
-        # Pass through fully connected layers
-        x = torch.nn.functional.relu(self.fc1(self.dropout(combined)))
-        x = torch.nn.functional.relu(self.fc2(self.dropout(x)))
+        # Apply clipping to prevent gradient explosion
+        combined = torch.clamp(combined, -10, 10)
+        
+        # Pass through fully connected layers with batch normalization
+        x = self.dropout(combined)
+        x = self.fc1(x)
+        if x.size(0) > 1:  # Batch size must be > 1 for BatchNorm
+            x = self.bn1(x)
+        x = torch.nn.functional.relu(x)
+        
+        x = self.dropout(x)
+        x = self.fc2(x)
+        if x.size(0) > 1:  # Batch size must be > 1 for BatchNorm
+            x = self.bn2(x)
+        x = torch.nn.functional.relu(x)
+        
+        x = self.dropout(x)
         x = self.fc3(x)
         
         return x
@@ -574,6 +606,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         loss.backward()
         backward_end = time.time()
         timing_stats['backward_pass'] += backward_end - backward_start
+        
+        # Apply gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         # Optimization step - measure time
         optim_start = time.time()
@@ -942,7 +977,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     device_cfg = config['training']['device']
     
     # Modify training parameters
-    early_stopping_patience = config.get('early_stopping_patience', 30)  # Increased patience
+    early_stopping_patience = config.get('early_stopping_patience', 50)  # Increased patience from 30 to 50
     optimizer_config = config.get('optimizer', {})
     learning_rate = optimizer_config.get('learning_rate', 0.001)
     weight_decay = optimizer_config.get('weight_decay', 1e-5)
@@ -1035,14 +1070,20 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         total_samples = np.sum(class_counts)
         logger.info(f"Class distribution: {class_counts}")
         
-        # Compute class weights (inverse frequency)
+        # Compute class weights (inverse frequency with a stronger adjustment)
         class_weights = {}
         for cls in range(num_classes):
             if class_counts[cls] > 0:
-                # Weight is inversely proportional to frequency
-                class_weights[cls] = total_samples / (num_classes * class_counts[cls])
+                # Use a stronger weighting scheme (squared inverse frequency)
+                # This gives more emphasis to minority classes
+                class_weights[cls] = (total_samples / (class_counts[cls])) ** 1.5  
             else:
                 class_weights[cls] = 1.0
+                
+        # Normalize weights to prevent extreme values
+        weight_sum = sum(class_weights.values())
+        for cls in class_weights:
+            class_weights[cls] = class_weights[cls] * num_classes / weight_sum
         
         logger.info(f"Using class weights to handle imbalance: {class_weights}")
     else:
@@ -1070,7 +1111,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         optimizer,
         mode='min',
         factor=0.5,  # Reduce by 50% (less aggressive)
-        patience=10,  # Wait longer before reducing
+        patience=15,  # Increased patience from 10 to 15
         min_lr=1e-6,
         verbose=True
     )
@@ -1092,9 +1133,9 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         prev_loss_component = 1.0 / (1.0 + best_val_loss)
         
         # Calculate overall scores (higher is better)
-        # Putting more weight on F1 score to prioritize balanced class performance
-        new_score = 0.3 * loss_component + 0.5 * new_f1 + 0.2 * new_trading_score
-        old_score = 0.3 * prev_loss_component + 0.5 * best_f1_score + 0.2 * best_trading_score
+        # Put more weight on F1 score to prioritize balanced class performance
+        new_score = 0.2 * loss_component + 0.6 * new_f1 + 0.2 * new_trading_score
+        old_score = 0.2 * prev_loss_component + 0.6 * best_f1_score + 0.2 * best_trading_score
         
         return new_score > old_score
     
@@ -1301,8 +1342,11 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         json.dump(throughput_metrics, f, indent=2)
     logger.info(f"Throughput metrics saved to {throughput_path}")
     
-    # Plot trading metrics if available
-    if 'precision' in serializable_history and 'recall' in serializable_history and 'f1' in serializable_history:
+    # Plot trading metrics if available and matplotlib is installed
+    if HAS_MATPLOTLIB and 'precision' in serializable_history and 'recall' in serializable_history and 'f1' in serializable_history:
+        # Create visualizations directory if it doesn't exist
+        os.makedirs(os.path.join(output_dir, 'visualizations'), exist_ok=True)
+        
         plt.figure(figsize=(12, 6))
         epochs = range(1, len(serializable_history['precision']) + 1)
         plt.plot(epochs, serializable_history['precision'], label='Precision')
@@ -1336,6 +1380,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             plt.title('Trading Score Over Time')
             plt.grid(True)
             plt.savefig(os.path.join(output_dir, 'visualizations/trading_score.png'))
+    elif not HAS_MATPLOTLIB:
+        logger.info("Matplotlib not available, skipping visualizations")
     
     return model, history
 
@@ -1347,9 +1393,12 @@ def visualize_throughput(metrics_path, output_dir):
     - metrics_path: Path to the throughput metrics JSON file
     - output_dir: Directory to save the plots
     """
-    try:
-        import matplotlib.pyplot as plt
+    # Check if matplotlib is available
+    if not HAS_MATPLOTLIB:
+        logger.warning("Matplotlib not installed, skipping visualization")
+        return
         
+    try:
         # Load metrics
         with open(metrics_path, 'r') as f:
             metrics = json.load(f)
@@ -1419,8 +1468,6 @@ def visualize_throughput(metrics_path, output_dir):
                 plt.savefig(os.path.join(output_dir, 'learning_rate.png'))
         
         logger.info(f"Throughput visualizations saved to {output_dir}")
-    except ImportError:
-        logger.warning("Matplotlib not installed, skipping visualization")
     except Exception as e:
         logger.error(f"Error creating visualizations: {str(e)}")
 
