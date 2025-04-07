@@ -179,7 +179,8 @@ def train_lightning_model(
     config_path: str,
     max_epochs: int = 100,
     early_stopping_patience: int = 15,
-    verbose: bool = False
+    verbose: bool = False,
+    trainer_class=None
 ):
     """
     Train the model using PyTorch Lightning
@@ -189,6 +190,7 @@ def train_lightning_model(
     - max_epochs: Maximum number of epochs to train
     - early_stopping_patience: Patience for early stopping
     - verbose: Whether to enable verbose logging
+    - trainer_class: Optional custom trainer class to use instead of pl.Trainer
     
     Returns:
     - model: Trained model
@@ -520,16 +522,21 @@ def train_lightning_model(
         name='lightning_logs'
     )
     
-    # Setup trainer with more stable defaults
-    trainer = pl.Trainer(
-        max_epochs=max_epochs,
-        callbacks=callbacks,
-        logger=tb_logger,
-        log_every_n_steps=50,  # Reduced logging frequency
-        accelerator='auto',  # Use GPU if available
-        enable_progress_bar=True,
-        enable_model_summary=True
-    )
+    # Setup trainer - use custom trainer class if provided
+    trainer_kwargs = {
+        'max_epochs': max_epochs,
+        'callbacks': callbacks,
+        'logger': tb_logger,
+        'log_every_n_steps': 50,  # Reduced logging frequency
+        'accelerator': 'auto',  # Use GPU if available
+        'enable_progress_bar': True,
+        'enable_model_summary': True
+    }
+    
+    if trainer_class:
+        trainer = trainer_class(**trainer_kwargs)
+    else:
+        trainer = pl.Trainer(**trainer_kwargs)
     
     # Train model
     logger.info("Starting training")
