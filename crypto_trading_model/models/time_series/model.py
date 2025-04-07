@@ -141,14 +141,25 @@ class MultiTimeframeModel(nn.Module):
                     if tf1 != tf2:
                         # Calculate attention score
                         attn_weight = self.attn_weights[tf1]
-                        attn_score = torch.matmul(
-                            encoded_timeframes[tf2], 
-                            torch.matmul(attn_weight, encoded_timeframes[tf1].unsqueeze(2))
-                        ).squeeze(2)
                         
-                        # Apply attention score
-                        attn_score = F.softmax(attn_score, dim=1).unsqueeze(1)
-                        attended = torch.bmm(attn_score, encoded_timeframes[tf2].unsqueeze(2)).squeeze(2)
+                        # Fix: Reshape the hidden state for correct matrix multiplication
+                        # encoded_timeframes[tf1/2] is of shape [batch_size, hidden_dim]
+                        
+                        # Calculate similarity score
+                        attn_projection = torch.matmul(encoded_timeframes[tf1], attn_weight)  # [batch_size, hidden_dim]
+                        attn_score = torch.bmm(
+                            attn_projection.unsqueeze(1),                 # [batch_size, 1, hidden_dim]
+                            encoded_timeframes[tf2].unsqueeze(2)          # [batch_size, hidden_dim, 1]
+                        ).squeeze(2)  # [batch_size, 1]
+                        
+                        # Apply attention score with softmax
+                        # Note: Since attn_score is [batch_size, 1], we don't need dim parameter for softmax
+                        # Adding a small epsilon to avoid numerical instability
+                        attn_score = torch.sigmoid(attn_score + 1e-6)
+                        
+                        # Scale the tf2 encoding by attention score
+                        attended = attn_score.unsqueeze(1) * encoded_timeframes[tf2].unsqueeze(1)  # [batch_size, 1, hidden_dim]
+                        attended = attended.squeeze(1)  # [batch_size, hidden_dim]
                         
                         # Update the attended vector
                         attended_vector = attended_vector + attended
@@ -158,7 +169,7 @@ class MultiTimeframeModel(nn.Module):
             # Combine attended vectors
             combined = torch.cat(attn_applied, dim=1)
             combined = self.attn_combine(combined)
-            
+        
         else:
             # Simple concatenation of all timeframe encodings
             combined = torch.cat([encoded_timeframes[tf] for tf in self.timeframes], dim=1)
