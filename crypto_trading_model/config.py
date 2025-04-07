@@ -86,13 +86,13 @@ FEATURE_SETTINGS = {
 # Time Series Model Configuration
 # ---------------------------------------------------
 TIME_SERIES_SETTINGS = {
-    'sequence_length': 240,            # Number of time steps to look back
+    'sequence_length': 2016,           # Number of time steps to look back (21 days of 15-min data)
     'forecast_horizon': 5,            # Number of steps to predict ahead
     'target_column': 'close',         # Column to predict (usually 'close')
     'model_type': 'lstm',             # Model type: 'lstm', 'bilstm', 'cnn_lstm', 'attention'
-    'lstm_units': [64, 64],           # Units in LSTM layers
-    'dense_units': [32],              # Units in Dense layers
-    'dropout_rate': 0.2,              # Dropout rate
+    'lstm_units': [128, 128, 64],     # Units in LSTM layers - increased capacity
+    'dense_units': [64],              # Units in Dense layers - increased capacity
+    'dropout_rate': 0.3,              # Dropout rate - increased to prevent overfitting
     'learning_rate': 0.001,           # Learning rate for optimizer
     'batch_size': 256,                # Batch size for training
     'epochs': 50,                     # Number of training epochs
@@ -154,7 +154,7 @@ RL_SETTINGS = {
 # Trading Environment Configuration
 # ---------------------------------------------------
 TRADING_ENV_SETTINGS = {
-    'lookback_window': 20,           # Number of time steps observable by agent
+    'lookback_window': 2016,         # Number of time steps observable by agent (21 days of data)
     'initial_balance': 10000,        # Initial account balance
     'commission': 0.001,             # Transaction cost (as fraction)
     'reward_function': 'profit_and_loss',  # Default reward function
@@ -180,7 +180,7 @@ PROGRESSIVE_LEARNING = {
     
     # Default stage configurations
     'time_series': {
-        'sequence_length': 240,
+        'sequence_length': 2016,        # 21 days of 15-min data
         'forecast_horizon': 5,
         'target_column': 'close',
         'model_type': 'lstm',
