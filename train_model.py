@@ -725,7 +725,12 @@ def calculate_trading_metrics(predictions, targets, device=None):
         unique_classes = xp.unique(xp.concatenate([predictions, targets]))
     
     # Calculate class-specific accuracy
-    with xp.errstate(divide='ignore', invalid='ignore'):
+    # CuPy doesn't have errstate context manager, so handle differently based on array module
+    if xp is np:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            class_accuracy = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
+    else:
+        # For CuPy, just do the division and handle NaNs afterwards
         class_accuracy = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
     
     # Replace NaN values (from division by zero) with zero
