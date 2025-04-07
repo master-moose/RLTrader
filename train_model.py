@@ -471,6 +471,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
             batch_time = time.time() - (data_start if batch_idx > 0 else start_time)
             samples_per_sec = batch_size / (batch_time / 10 if batch_idx % 10 == 0 else batch_time)
             
+            # Get current learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            
             # Add GPU info if available
             gpu_info = ""
             if device.type == 'cuda':
@@ -478,6 +481,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
                 
             logger.info(f"Batch {batch_idx}/{len(dataloader)}: Loss={loss.item():.4f}, "
                        f"Acc={batch_correct/targets.size(0):.4f}, "
+                       f"LR={current_lr:.6f}, "
                        f"Throughput={samples_per_sec:.1f} samples/sec{gpu_info}")
     
     # Calculate epoch metrics
@@ -594,6 +598,10 @@ def calculate_trading_metrics(predictions, targets):
     Returns:
     - Dictionary of metrics
     """
+    # Convert inputs to numpy arrays if they're not already
+    predictions = np.array(predictions)
+    targets = np.array(targets)
+    
     # Calculate precision, recall, and F1 score (macro average)
     precision, recall, f1, _ = precision_recall_fscore_support(
         targets, predictions, average='macro', zero_division=0
@@ -630,12 +638,13 @@ def calculate_trading_metrics(predictions, targets):
     
     trading_score = trading_score / len(predictions)
     
+    # Convert numpy arrays to lists for JSON serialization
     return {
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'trading_score': trading_score,
-        'class_accuracy': class_accuracy,
+        'precision': float(precision),
+        'recall': float(recall),
+        'f1': float(f1),
+        'trading_score': float(trading_score),
+        'class_accuracy': class_accuracy,  # Will be converted to list during JSON serialization
         'unique_classes': unique_classes.tolist()
     }
 
@@ -830,7 +839,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         'trading_score': [],
         'class_accuracy_buy': [],
         'class_accuracy_hold': [],
-        'class_accuracy_sell': []
+        'class_accuracy_sell': [],
+        'learning_rates': []  # Add learning rate tracking
     }
     
     # Track timing of each phase
@@ -841,7 +851,10 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     
     for epoch in range(1, epochs + 1):
         epoch_start_time = time.time()
-        logger.info(f"Epoch {epoch}/{epochs}")
+        
+        # Get current learning rate using get_last_lr()
+        current_lr = optimizer.param_groups[0]['lr']
+        logger.info(f"Epoch {epoch}/{epochs} (Learning Rate: {current_lr:.6f})")
         
         # Train
         train_result = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -862,6 +875,10 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         plateau_scheduler.step(val_loss)
         cosine_scheduler.step()
         
+        # Get updated learning rate
+        new_lr = optimizer.param_groups[0]['lr']
+        logger.info(f"Learning rate updated: {current_lr:.6f} -> {new_lr:.6f}")
+        
         # Save history
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
@@ -871,6 +888,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         history['val_time'].append(val_time)
         history['train_throughput'].append(train_throughput)
         history['val_throughput'].append(val_throughput)
+        history['learning_rates'].append(new_lr)  # Store learning rate in history
         
         # Save trading metrics
         history['precision'].append(val_metrics['precision'])
@@ -944,17 +962,38 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     # Save training history
     history_path = os.path.join(output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        # Convert values to float for JSON serialization
-        serializable_history = {
-            k: [float(val) for val in v] 
-            for k, v in history.items()
-        }
+        # Convert all values to native Python types for JSON serialization
+        serializable_history = {}
+        for k, v in history.items():
+            if isinstance(v, list):
+                # Handle list values (could contain numpy types)
+                serializable_history[k] = []
+                for item in v:
+                    # Convert each item in the list
+                    if hasattr(item, 'tolist'):
+                        # For numpy arrays
+                        serializable_history[k].append(item.tolist())
+                    elif hasattr(item, 'item'):
+                        # For scalar numpy or torch values
+                        serializable_history[k].append(item.item())
+                    else:
+                        # For other types, convert to float if numeric
+                        try:
+                            serializable_history[k].append(float(item))
+                        except (TypeError, ValueError):
+                            # If conversion fails, keep original
+                            serializable_history[k].append(item)
+            else:
+                # Handle non-list values
+                serializable_history[k] = v
+                
         json.dump(serializable_history, f, indent=2)
     logger.info(f"Training history saved to {history_path}")
     
     # Save throughput metrics
     throughput_path = os.path.join(output_dir, 'throughput_metrics.json')
     with open(throughput_path, 'w') as f:
+        # Create serializable metrics by converting numpy arrays to lists
         throughput_metrics = {
             'avg_train_throughput': float(avg_train_throughput),
             'avg_val_throughput': float(avg_val_throughput),
@@ -963,9 +1002,21 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             'total_training_time': float(total_time),
             'avg_epoch_time': float(avg_epoch_time),
             'timing_breakdown': {k: [float(v) for v in vals] for k, vals in timing_breakdown.items()},
-            'gpu_stats': gpu_stats if device.type == 'cuda' else None,
-            'val_metrics': val_metrics
+            'gpu_stats': gpu_stats if device.type == 'cuda' else None
         }
+        
+        # Convert val_metrics to JSON-serializable format
+        serializable_val_metrics = {}
+        for key, value in val_metrics.items():
+            if key == 'class_accuracy' or key == 'unique_classes':
+                # Convert numpy arrays to lists
+                serializable_val_metrics[key] = value.tolist() if hasattr(value, 'tolist') else [float(v) for v in value]
+            else:
+                # Convert scalar values to float
+                serializable_val_metrics[key] = float(value)
+        
+        throughput_metrics['val_metrics'] = serializable_val_metrics
+        
         json.dump(throughput_metrics, f, indent=2)
     logger.info(f"Throughput metrics saved to {throughput_path}")
     
@@ -1068,6 +1119,23 @@ def visualize_throughput(metrics_path, output_dir):
                 plt.ylabel('Memory Usage (MB)')
                 plt.title('GPU Memory Usage')
                 plt.savefig(os.path.join(output_dir, 'gpu_memory.png'))
+                
+        # Load training history to plot learning rate
+        history_path = os.path.join(os.path.dirname(metrics_path), 'training_history.json')
+        if os.path.exists(history_path):
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+                
+            # Plot learning rate if available
+            if 'learning_rates' in history:
+                plt.figure(figsize=(10, 6))
+                plt.plot(history['learning_rates'])
+                plt.xlabel('Epoch')
+                plt.ylabel('Learning Rate')
+                plt.title('Learning Rate Schedule')
+                plt.yscale('log')  # Log scale for better visualization
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, 'learning_rate.png'))
         
         logger.info(f"Throughput visualizations saved to {output_dir}")
     except ImportError:
