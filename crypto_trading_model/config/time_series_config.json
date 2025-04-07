@@ -4,9 +4,9 @@
         "output_dir": "./output/time_series",
         "timeframes": ["15m", "4h", "1d"],
         "sequence_length": {
-            "15m": 192,
-            "4h": 48,
-            "1d": 16
+            "15m": 120,
+            "4h": 30,
+            "1d": 10
         },
         "use_synthetic": true,
         "synthetic_path": "./data/synthetic",
@@ -33,7 +33,7 @@
     },
     "training": {
         "epochs": 200,
-        "batch_size": 128,
+        "batch_size": 96,
         "learning_rate": 0.001,
         "weight_decay": 1e-5,
         "patience": 30,

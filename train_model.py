@@ -638,7 +638,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     
     return avg_loss, accuracy, epoch_time, throughput, timing_stats, gpu_stats if device.type == 'cuda' else None
 
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, num_classes=3):
     """Validate the model"""
     model.eval()
     val_loss = 0
@@ -685,7 +685,7 @@ def validate(model, dataloader, criterion, device):
     accuracy = val_correct / val_total
     
     # Calculate trading-specific metrics
-    metrics = calculate_trading_metrics(all_predictions, all_targets, device)
+    metrics = calculate_trading_metrics(all_predictions, all_targets, device, num_classes=num_classes)
     
     end_time = time.time()
     val_time = end_time - start_time
@@ -710,7 +710,7 @@ def validate(model, dataloader, criterion, device):
     
     return avg_loss, accuracy, val_time, throughput, metrics
 
-def calculate_trading_metrics(predictions, targets, device=None):
+def calculate_trading_metrics(predictions, targets, device=None, num_classes=3):
     """
     Calculate trading-specific metrics
     
@@ -718,6 +718,7 @@ def calculate_trading_metrics(predictions, targets, device=None):
     - predictions: List of model predictions (0=hold, 1=buy, 2=sell)
     - targets: List of actual targets
     - device: The torch device being used (to determine whether to use CuPy)
+    - num_classes: Number of classes in the classification task
     
     Returns:
     - Dictionary of metrics
@@ -732,43 +733,72 @@ def calculate_trading_metrics(predictions, targets, device=None):
     predictions = xp.array(predictions)
     targets = xp.array(targets)
     
+    # Special case: if predictions or targets are all the same value, metrics will be undefined
+    if len(xp.unique(predictions)) <= 1 or len(xp.unique(targets)) <= 1:
+        logger.warning("All predictions or targets are the same class. Metrics will be unreliable.")
+    
     # If using CuPy, need to convert back to NumPy for sklearn metrics
     if xp is cp:
         # Move arrays to CPU to use sklearn
         np_predictions = cp.asnumpy(predictions)
         np_targets = cp.asnumpy(targets)
         
-        # Calculate sklearn metrics with NumPy arrays
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            np_targets, np_predictions, average='macro', zero_division=0
-        )
+        try:
+            # Calculate sklearn metrics with NumPy arrays
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                np_targets, np_predictions, average='macro', zero_division=0
+            )
+        except Exception as e:
+            logger.warning(f"Error calculating precision_recall_fscore: {e}")
+            precision, recall, f1 = 0.0, 0.0, 0.0
         
-        # Calculate confusion matrix
-        conf_matrix = confusion_matrix(np_targets, np_predictions)
-        conf_matrix = xp.array(conf_matrix)  # Convert back to CuPy if needed
+        try:
+            # Calculate confusion matrix
+            conf_matrix = confusion_matrix(np_targets, np_predictions)
+            conf_matrix = xp.array(conf_matrix)  # Convert back to CuPy if needed
+        except Exception as e:
+            logger.warning(f"Error calculating confusion matrix: {e}")
+            # Create a dummy 3x3 confusion matrix with zeros
+            conf_matrix = xp.zeros((num_classes, num_classes))
         
         # Get unique classes
         unique_classes = xp.unique(xp.concatenate([predictions, targets]))
     else:
         # Using NumPy directly
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            targets, predictions, average='macro', zero_division=0
-        )
-        
-        # Calculate confusion matrix
-        conf_matrix = confusion_matrix(targets, predictions)
+        try:
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                targets, predictions, average='macro', zero_division=0
+            )
+        except Exception as e:
+            logger.warning(f"Error calculating precision_recall_fscore: {e}")
+            precision, recall, f1 = 0.0, 0.0, 0.0
+            
+        try:
+            # Calculate confusion matrix
+            conf_matrix = confusion_matrix(targets, predictions)
+        except Exception as e:
+            logger.warning(f"Error calculating confusion matrix: {e}")
+            # Create a dummy 3x3 confusion matrix
+            conf_matrix = xp.zeros((3, 3))
         
         # Get unique classes
         unique_classes = xp.unique(xp.concatenate([predictions, targets]))
     
     # Calculate class-specific accuracy
+    # First make sure the confusion matrix has the right shape for num_classes
+    if conf_matrix.shape[0] < num_classes:
+        # Extend with zeros if some classes are missing
+        extended_conf_matrix = xp.zeros((num_classes, num_classes))
+        extended_conf_matrix[:conf_matrix.shape[0], :conf_matrix.shape[1]] = conf_matrix
+        conf_matrix = extended_conf_matrix
+    
     # CuPy doesn't have errstate context manager, so handle differently based on array module
     if xp is np:
         with np.errstate(divide='ignore', invalid='ignore'):
-            class_accuracy = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
+            class_accuracy = conf_matrix.diagonal() / xp.maximum(conf_matrix.sum(axis=1), 1e-10)
     else:
         # For CuPy, just do the division and handle NaNs afterwards
-        class_accuracy = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
+        class_accuracy = conf_matrix.diagonal() / xp.maximum(conf_matrix.sum(axis=1), 1e-10)
     
     # Replace NaN values (from division by zero) with zero
     class_accuracy = xp.nan_to_num(class_accuracy)
@@ -800,7 +830,7 @@ def calculate_trading_metrics(predictions, targets, device=None):
             else:  # Wrong action
                 trading_score -= 3
     
-    trading_score = trading_score / len(predictions)
+    trading_score = trading_score / max(len(predictions), 1)  # Avoid division by zero
     
     # Convert to CPU for serialization if using CuPy
     if xp is cp:
@@ -813,7 +843,7 @@ def calculate_trading_metrics(predictions, targets, device=None):
         'recall': float(recall),
         'f1': float(f1),
         'trading_score': float(trading_score),
-        'class_accuracy': class_accuracy,  # Will be converted to list during JSON serialization
+        'class_accuracy': class_accuracy.tolist() if hasattr(class_accuracy, 'tolist') else list(class_accuracy),
         'unique_classes': unique_classes.tolist() if hasattr(unique_classes, 'tolist') else list(unique_classes)
     }
 
@@ -983,27 +1013,44 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     # Setup loss and optimizer
     # Calculate class weights based on the training data distribution
     class_counts = torch.zeros(num_classes, dtype=torch.float, device=device)
-    for batch in train_loader:
-        for tf in batch[0]:
-            batch[0][tf] = batch[0][tf].to(device)
-        targets = batch[1].to(device)
-        
-        # Count occurrences of each class
-        for c in range(num_classes):
-            class_counts[c] += (targets == c).sum().item()
+    
+    logger.info("Calculating class distribution for weighted loss...")
+    with torch.no_grad():
+        for batch in train_loader:
+            for tf in batch[0]:
+                batch[0][tf] = batch[0][tf].to(device)
+            targets = batch[1].to(device)
+            
+            # Count occurrences of each class
+            for c in range(num_classes):
+                class_counts[c] += (targets == c).sum().item()
     
     # Calculate inverse class weights (give more weight to underrepresented classes)
-    if class_counts.sum() > 0 and (class_counts > 0).all():
-        class_weights = 1.0 / (class_counts / class_counts.sum())
-        # Normalize weights so they sum to num_classes
-        class_weights = class_weights * (num_classes / class_weights.sum())
+    total_samples = class_counts.sum().item()
+    if total_samples > 0:
+        # Calculate class frequencies
+        class_frequencies = class_counts / total_samples
+        logger.info(f"Class frequencies: {class_frequencies.cpu().numpy()}")
+        
+        # Handle zero counts with a small epsilon
+        epsilon = 1e-6
+        class_frequencies = torch.clamp(class_frequencies, min=epsilon)
+        
+        # Calculate weights as inverse of frequency, with a maximum cap
+        class_weights = 1.0 / class_frequencies
+        max_weight = 10.0  # Cap the maximum weight to avoid numerical instability
+        class_weights = torch.clamp(class_weights, max=max_weight)
+        
+        # Normalize weights to have a reasonable scale
+        class_weights = class_weights / class_weights.sum() * num_classes
+        
         logger.info(f"Using class weights for loss function: {class_weights.cpu().numpy()}")
     else:
-        logger.warning("Could not calculate proper class weights, some classes have zero samples. Using uniform weights.")
+        logger.warning("No samples found in data loader! Using uniform weights.")
         class_weights = torch.ones(num_classes, dtype=torch.float, device=device)
     
     # Create weighted loss function
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights, reduction='mean')
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Learning rate scheduler - using both ReduceLROnPlateau and cosine annealing
@@ -1099,7 +1146,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             timing_breakdown[f'train_{key}'].append(value)
         
         # Validate
-        val_loss, val_acc, val_time, val_throughput, val_metrics = validate(model, val_loader, criterion, device)
+        val_loss, val_acc, val_time, val_throughput, val_metrics = validate(model, val_loader, criterion, device, num_classes=num_classes)
         logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Time: {val_time:.2f} seconds, Val Throughput: {val_throughput:.2f} samples/second")
         
         # Update learning rate
