@@ -522,11 +522,12 @@ class MultiTimeframeModel(torch.nn.Module):
             # Simplified attention mechanism
             self.attn_hidden_dim = hidden_dims * self.num_directions
             
-            # Query vectors for each timeframe with Xavier initialization
+            # Query vectors for each timeframe with proper initialization
             self.query_vectors = torch.nn.ParameterDict()
             for tf in self.timeframes:
                 param = torch.nn.Parameter(torch.zeros(self.attn_hidden_dim))
-                torch.nn.init.xavier_uniform_(param)
+                # Use normal_ instead of xavier_uniform_ for 1D tensors
+                torch.nn.init.normal_(param, mean=0.0, std=0.02)
                 self.query_vectors[tf] = param
             
             # Attention projection with layer normalization
