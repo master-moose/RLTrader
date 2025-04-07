@@ -21,7 +21,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.models.time_series.trainer import TimeSeriesDataset, collate_fn
 
-# Set up logging
+# Set up logging - cleaned version, no null bytes
 logger = logging.getLogger(__name__)
 
 class LightningTimeSeriesModel(pl.LightningModule):
