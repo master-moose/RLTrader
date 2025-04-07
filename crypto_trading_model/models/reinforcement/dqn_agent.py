@@ -13,7 +13,7 @@ import logging
 import gym
 import tensorflow as tf
 from tensorflow.keras.models import Model, Sequential, load_model
-from tensorflow.keras.layers import Dense, Input, Flatten, Concatenate
+from tensorflow.keras.layers import Dense, Input, Flatten, Concatenate, BatchNormalization, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import Huber
 import matplotlib.pyplot as plt
@@ -234,10 +234,12 @@ class DQNTradingAgent:
             # Concatenate state and prediction
             combined = Concatenate()([state_features, prediction_input])
             
-            # Hidden layers
+            # Hidden layers with BatchNormalization for better training
             x = combined
             for units in self.hidden_units:
                 x = Dense(units, activation='relu')(x)
+                x = BatchNormalization()(x)
+                x = Dropout(0.2)(x)  # Add dropout for regularization
             
             # Output layer (Q-values for each action)
             outputs = Dense(self.action_dim)(x)
@@ -245,21 +247,23 @@ class DQNTradingAgent:
             # Build model
             model = Model(inputs=[state_input, prediction_input], outputs=outputs)
         else:
-            # Simple sequential model
+            # Simple sequential model with improved regularization
             model = Sequential()
             model.add(Flatten(input_shape=self.state_dim))
             
-            # Hidden layers
+            # Hidden layers with BatchNormalization and Dropout
             for units in self.hidden_units:
                 model.add(Dense(units, activation='relu'))
+                model.add(BatchNormalization())
+                model.add(Dropout(0.2))  # Add dropout for regularization
             
             # Output layer (Q-values for each action)
             model.add(Dense(self.action_dim))
         
-        # Compile model
+        # Compile model with improved settings
         model.compile(
-            optimizer=Adam(learning_rate=self.learning_rate),
-            loss=Huber()
+            optimizer=Adam(learning_rate=self.learning_rate, clipnorm=1.0),  # Add gradient clipping
+            loss=Huber(delta=1.0)  # Huber loss is more robust to outliers
         )
         
         return model
@@ -520,74 +524,78 @@ class DQNTradingAgent:
     
     def _train_step(self):
         """
-        Perform a single training step on a batch from the replay buffer.
+        Perform a single training step.
         """
-        # Sample batch from replay buffer
+        if len(self.buffer) < self.batch_size:
+            return
+        
+        # Sample from replay buffer
         states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
         
-        # Get predictions if using time series model
+        # Get predictions from time series model if available
         predictions = None
         next_predictions = None
         if self.use_predictions:
-            # Get predictions for current and next states
             predictions = np.array([self._get_price_prediction(state) for state in states])
-            next_predictions = np.array([self._get_price_prediction(state) for state in next_states])
-            
-            # Reshape to (batch_size, 1)
-            predictions = predictions.reshape(-1, 1)
-            next_predictions = next_predictions.reshape(-1, 1)
+            next_predictions = np.array([self._get_price_prediction(next_state) for next_state in next_states])
         
-        # Compute target Q-values
-        if self.double_dqn:
-            # Double DQN: use online network to select actions, target network to evaluate
-            if self.use_predictions and next_predictions is not None:
-                # Select actions using online network
-                online_q_values = self.q_network.predict([next_states, next_predictions])
-                next_actions = np.argmax(online_q_values, axis=1)
-                
-                # Evaluate using target network
-                target_q_values = self.target_network.predict([next_states, next_predictions])
-                target_q_values = np.array([target_q_values[i, next_actions[i]] for i in range(len(next_actions))])
-            else:
-                # Select actions using online network
-                online_q_values = self.q_network.predict(next_states)
-                next_actions = np.argmax(online_q_values, axis=1)
-                
-                # Evaluate using target network
-                target_q_values = self.target_network.predict(next_states)
-                target_q_values = np.array([target_q_values[i, next_actions[i]] for i in range(len(next_actions))])
-        else:
-            # Standard DQN: use target network to select and evaluate
-            if self.use_predictions and next_predictions is not None:
-                target_q_values = np.max(self.target_network.predict([next_states, next_predictions]), axis=1)
-            else:
-                target_q_values = np.max(self.target_network.predict(next_states), axis=1)
-        
-        # Compute target values
-        targets = rewards + self.gamma * target_q_values * (1 - dones)
-        
-        # Get current Q-values
+        # Current Q-values
         if self.use_predictions and predictions is not None:
             current_q = self.q_network.predict([states, predictions])
         else:
             current_q = self.q_network.predict(states)
         
-        # Create target Q-value matrix
+        # Target Q-values
+        if self.use_predictions and next_predictions is not None:
+            if self.double_dqn:
+                # Double DQN: use online network for action selection
+                online_q = self.q_network.predict([next_states, next_predictions])
+                best_actions = np.argmax(online_q, axis=1)
+                
+                # Use target network for Q-value estimation
+                target_q = self.target_network.predict([next_states, next_predictions])
+                next_q = np.array([target_q[i, action] for i, action in enumerate(best_actions)])
+            else:
+                # Standard DQN
+                next_q = np.amax(self.target_network.predict([next_states, next_predictions]), axis=1)
+        else:
+            if self.double_dqn:
+                # Double DQN: use online network for action selection
+                online_q = self.q_network.predict(next_states)
+                best_actions = np.argmax(online_q, axis=1)
+                
+                # Use target network for Q-value estimation
+                target_q = self.target_network.predict(next_states)
+                next_q = np.array([target_q[i, action] for i, action in enumerate(best_actions)])
+            else:
+                # Standard DQN
+                next_q = np.amax(self.target_network.predict(next_states), axis=1)
+        
+        # Compute targets with reward normalization to improve stability
+        rewards = np.clip(rewards, -10.0, 10.0)  # Clip rewards to prevent extreme values
+        targets = rewards + (1 - dones) * self.gamma * next_q
+        
+        # Update only the Q-values for actions taken (Bellman update)
         target_q = current_q.copy()
+        
+        # Use vectorized operations
         for i in range(len(actions)):
             target_q[i, actions[i]] = targets[i]
+        
+        # Train the model with a lower batch size if needed for stability
+        actual_batch_size = min(self.batch_size, 32)  # Smaller batches can be more stable
         
         # Train the model
         if self.use_predictions and predictions is not None:
             history = self.q_network.fit(
                 [states, predictions], target_q, 
-                batch_size=self.batch_size, 
+                batch_size=actual_batch_size, 
                 verbose=0
             )
         else:
             history = self.q_network.fit(
                 states, target_q, 
-                batch_size=self.batch_size, 
+                batch_size=actual_batch_size, 
                 verbose=0
             )
         

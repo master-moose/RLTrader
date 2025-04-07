@@ -941,6 +941,15 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     patience = config['training']['patience']
     device_cfg = config['training']['device']
     
+    # Modify training parameters
+    early_stopping_patience = config.get('early_stopping_patience', 30)  # Increased patience
+    optimizer_config = config.get('optimizer', {})
+    learning_rate = optimizer_config.get('learning_rate', 0.001)
+    weight_decay = optimizer_config.get('weight_decay', 1e-5)
+    
+    # Ensure there's a validation set for early stopping
+    val_ratio = config.get('validation_ratio', 0.2)
+    
     # Determine data paths
     if use_synthetic:
         train_path = os.path.join(synthetic_path, 'train_data.h5')
@@ -1010,65 +1019,48 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
     
-    # Setup loss and optimizer
-    # Calculate class weights based on the training data distribution
-    class_counts = torch.zeros(num_classes, dtype=torch.float, device=device)
-    
-    logger.info("Calculating class distribution for weighted loss...")
-    with torch.no_grad():
-        for batch in train_loader:
-            for tf in batch[0]:
-                batch[0][tf] = batch[0][tf].to(device)
-            targets = batch[1].to(device)
-            
-            # Count occurrences of each class
-            for c in range(num_classes):
-                class_counts[c] += (targets == c).sum().item()
-    
-    # Calculate inverse class weights (give more weight to underrepresented classes)
-    total_samples = class_counts.sum().item()
-    if total_samples > 0:
-        # Calculate class frequencies
-        class_frequencies = class_counts / total_samples
-        logger.info(f"Class frequencies: {class_frequencies.cpu().numpy()}")
+    # Calculate class weights to address imbalance (hold, buy, sell)
+    # This section should be after data is loaded and before model training
+    if num_classes > 1:  # Classification task
+        class_counts = np.bincount(np.argmax(train_loader.dataset.targets.cpu().numpy(), axis=1))
+        total_samples = len(train_loader.dataset)
         
-        # Handle zero counts with a small epsilon
-        epsilon = 1e-6
-        class_frequencies = torch.clamp(class_frequencies, min=epsilon)
+        # Compute class weights (inverse frequency)
+        class_weights = {}
+        for cls in range(num_classes):
+            if cls in class_counts and class_counts[cls] > 0:
+                # Weight is inversely proportional to frequency
+                class_weights[cls] = total_samples / (num_classes * class_counts[cls])
+            else:
+                class_weights[cls] = 1.0
         
-        # Calculate weights as inverse of frequency, with a maximum cap
-        class_weights = 1.0 / class_frequencies
-        max_weight = 10.0  # Cap the maximum weight to avoid numerical instability
-        class_weights = torch.clamp(class_weights, max=max_weight)
-        
-        # Normalize weights to have a reasonable scale
-        class_weights = class_weights / class_weights.sum() * num_classes
-        
-        logger.info(f"Using class weights for loss function: {class_weights.cpu().numpy()}")
+        logger.info(f"Using class weights to handle imbalance: {class_weights}")
     else:
-        logger.warning("No samples found in data loader! Using uniform weights.")
-        class_weights = torch.ones(num_classes, dtype=torch.float, device=device)
+        class_weights = None
     
-    # Create weighted loss function
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights, reduction='mean')
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    # Create criterion with weights for classification
+    if num_classes > 1 and class_weights:
+        criterion = torch.nn.CrossEntropyLoss(
+            weight=torch.tensor([class_weights[i] for i in range(num_classes)], device=device)
+        )
+    else:
+        criterion = torch.nn.CrossEntropyLoss() if num_classes > 1 else torch.nn.MSELoss()
     
-    # Learning rate scheduler - using both ReduceLROnPlateau and cosine annealing
-    # First, reduce LR when validation loss plateaus
-    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=config['training']['scheduler_factor'],
-        patience=config['training']['scheduler_patience'],
-        verbose=True
+    # Setup optimizer with weight decay for regularization
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay  # L2 regularization
     )
     
-    # Also use cosine annealing with warm restarts to help escape local minima
-    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    # Learning rate scheduler with slower decay
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        T_0=10,  # Restart every 10 epochs
-        T_mult=2,  # Multiply period by 2 after each restart
-        eta_min=1e-6  # Minimum learning rate
+        mode='min',
+        factor=0.5,  # Reduce by 50% (less aggressive)
+        patience=10,  # Wait longer before reducing
+        min_lr=1e-6,
+        verbose=True
     )
     
     # Early stopping
@@ -1150,8 +1142,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Time: {val_time:.2f} seconds, Val Throughput: {val_throughput:.2f} samples/second")
         
         # Update learning rate
-        plateau_scheduler.step(val_loss)
-        cosine_scheduler.step()
+        scheduler.step(val_loss)
         
         # Get updated learning rate
         new_lr = optimizer.param_groups[0]['lr']
@@ -1201,7 +1192,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             logger.info(f"No improvement for {no_improve_epochs} epochs")
         
         # Early stopping
-        if no_improve_epochs >= patience:
+        if no_improve_epochs >= early_stopping_patience:
             logger.info(f"Early stopping triggered after {epoch} epochs")
             break
     

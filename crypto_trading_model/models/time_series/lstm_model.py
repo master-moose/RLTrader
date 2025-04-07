@@ -145,9 +145,12 @@ class TimeSeriesLSTM:
         # LSTM layers
         for i, units in enumerate(self.lstm_units):
             return_sequences = i < len(self.lstm_units) - 1
+            # Apply LSTM
             model.add(LSTM(units, return_sequences=return_sequences))
-            model.add(BatchNormalization())
+            # Apply Dropout before BatchNorm (better regularization)
             model.add(Dropout(self.dropout_rate))
+            # Then apply BatchNorm
+            model.add(BatchNormalization())
         
         # Dense layers
         for units in self.dense_units:
@@ -334,47 +337,61 @@ class TimeSeriesLSTM:
     
     def _get_default_callbacks(self):
         """
-        Get default callbacks for training.
+        Create default callbacks for training.
         
         Returns:
         --------
         List
-            List of callbacks
+            List of keras callbacks
         """
-        # Create model directory if it doesn't exist
-        os.makedirs(PATHS['time_series_models'], exist_ok=True)
+        # Create output directory if it doesn't exist
+        os.makedirs(PATHS.get('model_checkpoints', 'checkpoints'), exist_ok=True)
         
-        # Create log directory for TensorBoard
-        log_dir = os.path.join(PATHS['logs'], 'tensorboard', 
-                              f"{self.model_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # Early stopping
+        # Create early stopping with better patience and monitoring
         early_stopping = EarlyStopping(
             monitor='val_loss',
-            patience=TIME_SERIES_MODEL_SETTINGS['early_stopping_patience'],
-            restore_best_weights=True
+            patience=30,  # Increase patience to avoid stopping too early
+            mode='min',
+            restore_best_weights=True,
+            verbose=1
         )
         
-        # Model checkpoint
+        # Checkpoint callback to save the best model
+        checkpoint_path = os.path.join(
+            PATHS.get('model_checkpoints', 'checkpoints'), 
+            f"lstm_model_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.h5"
+        )
+        
         model_checkpoint = ModelCheckpoint(
-            os.path.join(PATHS['time_series_models'], f"{self.model_type}_best.h5"),
+            filepath=checkpoint_path,
+            save_best_only=True,
             monitor='val_loss',
-            save_best_only=True
+            mode='min',
+            verbose=1
         )
         
-        # Learning rate reduction
+        # Learning rate scheduler with slower decay
         reduce_lr = ReduceLROnPlateau(
             monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-6
+            factor=0.5,  # Reduce by half
+            patience=10,  # Wait longer before reducing
+            min_lr=1e-6,
+            verbose=1
         )
         
-        # TensorBoard
+        # Create TensorBoard callback
+        log_dir = os.path.join(
+            PATHS.get('logs', 'logs'), 
+            'tensorboard', 
+            f"lstm_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        
+        os.makedirs(log_dir, exist_ok=True)
+        
         tensorboard = TensorBoard(
             log_dir=log_dir,
-            histogram_freq=1
+            histogram_freq=1,
+            update_freq='epoch'
         )
         
         return [early_stopping, model_checkpoint, reduce_lr, tensorboard]
@@ -700,6 +717,41 @@ def prepare_time_series_data(
     y_train, y_test = y[:train_size], y[train_size:]
     
     return X_train, y_train, X_test, y_test, (target_mean, target_std)
+
+def weighted_categorical_crossentropy(class_weights):
+    """
+    Create a weighted categorical crossentropy loss function
+    to address class imbalance.
+    
+    Parameters:
+    -----------
+    class_weights : dict or list
+        Weights for each class
+        
+    Returns:
+    --------
+    function
+        Weighted loss function
+    """
+    def loss(y_true, y_pred):
+        # Standard categorical crossentropy
+        loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+        
+        # Apply weights
+        if isinstance(class_weights, dict):
+            # Dictionary of class_idx -> weight
+            weights = tf.reduce_sum(y_true * tf.convert_to_tensor(
+                [class_weights.get(i, 1.0) for i in range(y_true.shape[-1])], 
+                dtype=tf.float32), axis=-1)
+        else:
+            # List of weights for each class
+            weights = tf.reduce_sum(y_true * tf.convert_to_tensor(
+                class_weights, dtype=tf.float32), axis=-1)
+            
+        # Multiply loss by weights
+        return loss * weights
+        
+    return loss
 
 # Usage example
 if __name__ == "__main__":
