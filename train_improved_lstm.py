@@ -14,6 +14,7 @@ import torch
 import pandas as pd
 import h5py
 import matplotlib.pyplot as plt
+import shutil
 from sklearn.utils.class_weight import compute_class_weight
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -58,17 +59,30 @@ def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
         
         # Process each split
         for split_name, file_path in [('train', train_path), ('val', val_path), ('test', test_path)]:
-            # Load data from HDF5
-            with pd.HDFStore(file_path, mode='r') as store:
-                # Extract timeframes
-                timeframes = [key.strip('/') for key in store.keys()]
+            try:
+                # Create a temporary path for the modified file
+                temp_path = file_path + '.tmp'
                 
-                # Create a dictionary to hold dataframes for each timeframe
+                # Load data from HDF5 using pandas for better compatibility
+                timeframes = []
                 data_dict = {}
-                for tf in timeframes:
-                    data_dict[tf] = store[f'/{tf}']
                 
+                # Read the data in read-only mode
+                logger.info(f"Reading {split_name} data from {file_path}...")
+                with pd.HDFStore(file_path, mode='r') as store:
+                    # Extract timeframes
+                    timeframes = [key.strip('/') for key in store.keys()]
+                    
+                    # Create a dictionary to hold dataframes for each timeframe
+                    for tf in timeframes:
+                        data_dict[tf] = store[f'/{tf}']
+                
+                if not timeframes:
+                    logger.warning(f"No timeframes found in {file_path}, skipping.")
+                    continue
+                    
                 # Calculate multi-timeframe signals
+                logger.info(f"Calculating signals for {split_name} data...")
                 lookforward_periods = {'15m': 16, '4h': 4, '1d': 1}
                 multi_tf_signals = calculate_multi_timeframe_signal(
                     data_dict,
@@ -81,57 +95,84 @@ def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
                 signal_mapping = {-1: 0, 0: 1, 1: 2}
                 mapped_signals = multi_tf_signals.map(signal_mapping)
                 
-                # Update labels in the datasets
-                with h5py.File(file_path, 'r+') as f:
-                    # Update primary timeframe
-                    if '15m' in f:
-                        try:
-                            # Get table data
-                            table_data = f['15m']['table']
-                            
-                            # Create a copy of the data
-                            data_copy = table_data[:]
-                            
-                            # Update price_direction field
-                            data_copy['price_direction'] = mapped_signals.values
-                            
-                            # Replace the dataset
-                            del f['15m']['table']
-                            f['15m'].create_dataset('table', data=data_copy)
-                            
-                            logger.info(f"Updated price_direction in {split_name}/15m")
-                        except Exception as e:
-                            logger.error(f"Error updating 15m data: {str(e)}")
-                    
-                    # Update other timeframes by downsampling
-                    for tf, step in [('4h', 16), ('1d', 96)]:
-                        if tf in f:
+                # Update the dataframes with new labels
+                logger.info(f"Updating labels for {split_name} data...")
+                
+                # Update primary timeframe
+                if '15m' in data_dict:
+                    data_dict['15m']['price_direction'] = mapped_signals
+                
+                # Update other timeframes by downsampling
+                for tf, step in [('4h', 16), ('1d', 96)]:
+                    if tf in data_dict:
+                        # Get indices for downsampling
+                        tf_indices = list(range(0, len(mapped_signals), step))
+                        if len(tf_indices) > len(data_dict[tf]):
+                            tf_indices = tf_indices[:len(data_dict[tf])]
+                        
+                        # Downsample signals
+                        downsampled_signals = mapped_signals.iloc[tf_indices].values
+                        
+                        # Update price_direction field (only up to the available length)
+                        length = min(len(data_dict[tf]), len(downsampled_signals))
+                        data_dict[tf]['price_direction'].iloc[:length] = downsampled_signals[:length]
+                
+                # Save the updated dataframes to a new HDF5 file
+                logger.info(f"Saving updated {split_name} data to {temp_path}...")
+                with pd.HDFStore(temp_path, mode='w') as store:
+                    for tf, df in data_dict.items():
+                        store.put(f'/{tf}', df, format='table', data_columns=True)
+                
+                # Replace the original file with the updated one
+                logger.info(f"Replacing {file_path} with updated data...")
+                # Make sure the file handle is closed before trying to replace it
+                import gc
+                gc.collect()  # Force garbage collection to release file handles
+                
+                # In some environments, os.replace might fail due to permissions
+                # Use a more robust approach
+                try:
+                    # First try a direct replacement
+                    os.replace(temp_path, file_path)
+                except Exception as e:
+                    logger.warning(f"Direct replacement failed: {str(e)}, trying backup method")
+                    # Create a backup of the original file
+                    backup_path = file_path + '.bak'
+                    try:
+                        # Copy the original file to backup if it doesn't exist yet
+                        if not os.path.exists(backup_path):
+                            shutil.copy2(file_path, backup_path)
+                        
+                        # Remove the original file
+                        os.remove(file_path)
+                        
+                        # Copy the temp file to the original location
+                        shutil.copy2(temp_path, file_path)
+                        
+                        # Clean up temp file
+                        os.remove(temp_path)
+                        
+                        logger.info(f"Successfully replaced {file_path} using backup method")
+                    except Exception as e2:
+                        logger.error(f"Backup replacement method also failed: {str(e2)}")
+                        # Try to restore from backup if the original was deleted
+                        if not os.path.exists(file_path) and os.path.exists(backup_path):
                             try:
-                                # Get table data
-                                table_data = f[tf]['table']
-                                
-                                # Create a copy of the data
-                                data_copy = table_data[:]
-                                
-                                # Get indices for downsampling
-                                tf_indices = list(range(0, len(mapped_signals), step))
-                                if len(tf_indices) > len(data_copy):
-                                    tf_indices = tf_indices[:len(data_copy)]
-                                
-                                # Downsample signals
-                                downsampled_signals = mapped_signals.iloc[tf_indices].values
-                                
-                                # Update price_direction field (only up to the available length)
-                                length = min(len(data_copy), len(downsampled_signals))
-                                data_copy['price_direction'][:length] = downsampled_signals[:length]
-                                
-                                # Replace the dataset
-                                del f[tf]['table']
-                                f[tf].create_dataset('table', data=data_copy)
-                                
-                                logger.info(f"Updated price_direction in {split_name}/{tf}")
-                            except Exception as e:
-                                logger.error(f"Error updating {tf} data: {str(e)}")
+                                shutil.copy2(backup_path, file_path)
+                                logger.info(f"Restored original file from backup")
+                            except:
+                                logger.error(f"Failed to restore from backup")
+                        raise
+                
+                logger.info(f"Successfully updated {split_name} data.")
+            except Exception as e:
+                logger.error(f"Error updating {split_name} data: {str(e)}")
+                # Clean up temporary file if it exists
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
     
     # Return paths to the data files
     return {
@@ -157,34 +198,45 @@ def analyze_label_distribution(data_path):
     # Initialize results
     results = {'distribution': {}, 'class_weights': {}}
     
-    # Extract labels from each timeframe
-    with h5py.File(data_path, 'r') as f:
-        for tf in f.keys():
-            if 'table' in f[tf]:
-                # Get table data
-                table_data = f[tf]['table'][:]
-                
-                # Extract price_direction field
-                if 'price_direction' in table_data.dtype.names:
-                    labels = table_data['price_direction']
+    try:
+        # Extract labels from each timeframe using pandas
+        with pd.HDFStore(data_path, mode='r') as store:
+            timeframes = [key.strip('/') for key in store.keys()]
+            
+            for tf in timeframes:
+                try:
+                    # Load the dataframe
+                    df = store[f'/{tf}']
                     
-                    # Count occurrences
-                    values, counts = np.unique(labels, return_counts=True)
-                    
-                    # Store distribution
-                    distribution = {int(val): int(count) for val, count in zip(values, counts)}
-                    results['distribution'][tf] = distribution
-                    
-                    # Calculate class weights
-                    try:
-                        class_weights = compute_class_weight(
-                            class_weight='balanced',
-                            classes=np.unique(labels),
-                            y=labels
-                        )
-                        results['class_weights'][tf] = {int(cls): float(weight) for cls, weight in zip(np.unique(labels), class_weights)}
-                    except Exception as e:
-                        logger.warning(f"Could not compute class weights for {tf}: {str(e)}")
+                    # Extract price_direction field
+                    if 'price_direction' in df.columns:
+                        labels = df['price_direction'].values
+                        
+                        # Count occurrences
+                        values, counts = np.unique(labels, return_counts=True)
+                        
+                        # Store distribution
+                        distribution = {int(val): int(count) for val, count in zip(values, counts)}
+                        results['distribution'][tf] = distribution
+                        
+                        # Log distribution
+                        logger.info(f"Label distribution in {tf}: {distribution}")
+                        
+                        # Calculate class weights
+                        try:
+                            class_weights = compute_class_weight(
+                                class_weight='balanced',
+                                classes=np.unique(labels),
+                                y=labels
+                            )
+                            results['class_weights'][tf] = {int(cls): float(weight) for cls, weight in zip(np.unique(labels), class_weights)}
+                            logger.info(f"Class weights for {tf}: {results['class_weights'][tf]}")
+                        except Exception as e:
+                            logger.warning(f"Could not compute class weights for {tf}: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Error analyzing labels for timeframe {tf}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error analyzing label distribution: {str(e)}")
     
     return results
 
@@ -292,18 +344,49 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
         name='lstm_improved'
     )
     
+    # Extract relevant parameters for training
+    train_data_path = data_paths['train_path']
+    val_data_path = data_paths['val_path']
+    
+    # Filter training parameters to only include those expected by train_lightning_model
+    training_params = {
+        'batch_size': config['training_params'].get('batch_size', 128),
+        'learning_rate': config['training_params'].get('learning_rate', 0.0005),
+        'weight_decay': config['training_params'].get('weight_decay', 1e-4),
+    }
+    
+    # Extract model parameters
+    model_params = config['model_params']
+    
     # Train the model
     logger.info("Starting model training...")
-    model, trainer = train_lightning_model(
-        config_path=config_path,
-        max_epochs=max_epochs,
-        early_stopping_patience=config['training_params']['early_stopping_patience'],
-        verbose=True,
-        callbacks=[early_stopping, checkpoint_callback, lr_monitor],
-        logger=tensorboard_logger,
-        class_weights=class_weights,
-        **config['training_params']
-    )
+    try:
+        model, trainer = train_lightning_model(
+            train_data_path=train_data_path,
+            val_data_path=val_data_path,
+            output_dir=output_dir,
+            model_params=model_params,
+            max_epochs=max_epochs,
+            early_stopping_patience=config['training_params']['early_stopping_patience'],
+            verbose=True,
+            callbacks=[early_stopping, checkpoint_callback, lr_monitor],
+            logger=tensorboard_logger,
+            class_weights=class_weights,
+            **training_params
+        )
+    except TypeError as e:
+        logger.error(f"Error with function parameters: {str(e)}")
+        logger.info("Falling back to simpler parameter set...")
+        
+        # Fallback to a simpler parameter set if the function doesn't accept all our parameters
+        model, trainer = train_lightning_model(
+            train_data_path=train_data_path,
+            val_data_path=val_data_path,
+            output_dir=output_dir,
+            max_epochs=max_epochs,
+            early_stopping_patience=config['training_params']['early_stopping_patience'],
+            verbose=True
+        )
     
     # Save the model
     model_path = os.path.join(output_dir, 'final_model.pt')
