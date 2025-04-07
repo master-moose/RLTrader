@@ -95,9 +95,10 @@ class LightningTimeSeriesModel(pl.LightningModule):
         # Remove label from inputs
         labels = batch.pop('label')
         
-        # Debug shapes
-        for tf, tensor in batch.items():
-            logger.info(f"Input tensor shape for {tf}: {tensor.shape}")
+        # Debug shapes only for the first batch and first epoch
+        if batch_idx == 0 and self.current_epoch == 0:
+            for tf, tensor in batch.items():
+                logger.info(f"Input tensor shape for {tf}: {tensor.shape}")
         
         outputs = self(batch)
         loss = self.criterion(outputs, labels)
@@ -116,8 +117,8 @@ class LightningTimeSeriesModel(pl.LightningModule):
         # Remove label from inputs
         labels = batch.pop('label')
         
-        # Debug shapes
-        if batch_idx == 0:  # Only log for the first batch
+        # Debug shapes only once during first epoch
+        if batch_idx == 0 and self.current_epoch == 0:
             for tf, tensor in batch.items():
                 logger.info(f"Validation input tensor shape for {tf}: {tensor.shape}")
         
@@ -176,8 +177,9 @@ class LightningTimeSeriesModel(pl.LightningModule):
 
 def train_lightning_model(
     config_path: str,
-    max_epochs: int = 200,
-    early_stopping_patience: int = 30
+    max_epochs: int = 100,
+    early_stopping_patience: int = 15,
+    verbose: bool = False
 ):
     """
     Train the model using PyTorch Lightning
@@ -186,6 +188,7 @@ def train_lightning_model(
     - config_path: Path to configuration JSON file
     - max_epochs: Maximum number of epochs to train
     - early_stopping_patience: Patience for early stopping
+    - verbose: Whether to enable verbose logging
     
     Returns:
     - model: Trained model
@@ -240,14 +243,15 @@ def train_lightning_model(
         
         # Load training data
         with h5py.File(train_data_path, 'r') as f:
-            # Print file structure for debugging
-            logger.info(f"HDF5 file structure for {train_data_path}:")
-            def print_structure(name, obj):
-                if isinstance(obj, h5py.Dataset):
-                    logger.info(f"  Dataset: {name}, Shape: {obj.shape}, Type: {obj.dtype}")
-                elif isinstance(obj, h5py.Group):
-                    logger.info(f"  Group: {name}")
-            f.visititems(print_structure)
+            # Print file structure only in verbose mode
+            if verbose:
+                logger.info(f"HDF5 file structure for {train_data_path}:")
+                def print_structure(name, obj):
+                    if isinstance(obj, h5py.Dataset):
+                        logger.info(f"  Dataset: {name}, Shape: {obj.shape}, Type: {obj.dtype}")
+                    elif isinstance(obj, h5py.Group):
+                        logger.info(f"  Group: {name}")
+                f.visititems(print_structure)
             
             # The data is organized as timeframes with tables
             # Extract the data from the main tables, not the _i_table indices
@@ -257,11 +261,13 @@ def train_lightning_model(
             for tf in f.keys():
                 if isinstance(f[tf], h5py.Group) and 'table' in f[tf]:
                     timeframes.append(tf)
-                    logger.info(f"Loading timeframe: {tf}")
+                    if verbose:
+                        logger.info(f"Loading timeframe: {tf}")
                     try:
                         # Access the main table, which contains all features as a structured array
                         table_data = f[tf]['table'][:]
-                        logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
+                        if verbose:
+                            logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
                         
                         # Convert structured array to separate tensors
                         for field_name in table_data.dtype.names:
@@ -270,7 +276,8 @@ def train_lightning_model(
                                 train_data[feature_name] = torch.tensor(
                                     table_data[field_name], dtype=torch.float32
                                 )
-                                logger.info(f"    Added feature: {feature_name}, Shape: {train_data[feature_name].shape}")
+                                if verbose:
+                                    logger.info(f"    Added feature: {feature_name}, Shape: {train_data[feature_name].shape}")
                     except Exception as e:
                         logger.error(f"Error loading timeframe {tf}: {str(e)}")
             
@@ -288,7 +295,8 @@ def train_lightning_model(
                         train_labels = torch.tensor(valid_labels, dtype=torch.long)
                         if np.any(raw_labels != valid_labels):
                             logger.warning(f"Some training labels were outside valid range [0, {num_classes-1}] and have been clipped")
-                        logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {train_labels.shape}")
+                        if verbose:
+                            logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {train_labels.shape}")
                     else:
                         logger.warning(f"No price_direction field found in {primary_tf}, generating dummy labels")
                         train_labels = torch.zeros(len(table_data), dtype=torch.long)
@@ -303,9 +311,10 @@ def train_lightning_model(
         
         # Load validation data with the same approach
         with h5py.File(val_data_path, 'r') as f:
-            # Print file structure for debugging
-            logger.info(f"HDF5 file structure for {val_data_path}:")
-            f.visititems(print_structure)
+            # Print file structure only in verbose mode
+            if verbose:
+                logger.info(f"HDF5 file structure for {val_data_path}:")
+                f.visititems(print_structure)
             
             # Extract the data from the tables
             val_data = {}
@@ -314,11 +323,13 @@ def train_lightning_model(
             for tf in f.keys():
                 if isinstance(f[tf], h5py.Group) and 'table' in f[tf]:
                     timeframes.append(tf)
-                    logger.info(f"Loading timeframe: {tf}")
+                    if verbose:
+                        logger.info(f"Loading timeframe: {tf}")
                     try:
                         # Access the main table, which contains all features
                         table_data = f[tf]['table'][:]
-                        logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
+                        if verbose:
+                            logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
                         
                         # Convert structured array to separate tensors
                         for field_name in table_data.dtype.names:
@@ -327,7 +338,8 @@ def train_lightning_model(
                                 val_data[feature_name] = torch.tensor(
                                     table_data[field_name], dtype=torch.float32
                                 )
-                                logger.info(f"    Added feature: {feature_name}, Shape: {val_data[feature_name].shape}")
+                                if verbose:
+                                    logger.info(f"    Added feature: {feature_name}, Shape: {val_data[feature_name].shape}")
                     except Exception as e:
                         logger.error(f"Error loading timeframe {tf}: {str(e)}")
             
@@ -344,7 +356,8 @@ def train_lightning_model(
                         val_labels = torch.tensor(valid_labels, dtype=torch.long)
                         if np.any(raw_labels != valid_labels):
                             logger.warning(f"Some validation labels were outside valid range [0, {num_classes-1}] and have been clipped")
-                        logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {val_labels.shape}")
+                        if verbose:
+                            logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {val_labels.shape}")
                     else:
                         logger.warning(f"No price_direction field found in {primary_tf}, generating dummy labels")
                         val_labels = torch.zeros(len(table_data), dtype=torch.long)
@@ -376,21 +389,25 @@ def train_lightning_model(
                 self.data_length = len(labels)
                 for key, tensor in data.items():
                     if len(tensor) < self.data_length:
-                        logger.warning(f"Feature {key} has length {len(tensor)}, shorter than labels with length {self.data_length}.")
+                        if verbose:
+                            logger.warning(f"Feature {key} has length {len(tensor)}, shorter than labels with length {self.data_length}.")
                         self.data_length = min(self.data_length, len(tensor))
                 
                 # Truncate all tensors to the minimum length
                 for key, tensor in data.items():
                     if len(tensor) > self.data_length:
-                        logger.warning(f"Feature {key} has length {len(tensor)}, truncating to {self.data_length}.")
+                        if verbose:
+                            logger.warning(f"Feature {key} has length {len(tensor)}, truncating to {self.data_length}.")
                         self.data[key] = tensor[:self.data_length]
                 
                 # Truncate labels to match
                 if len(self.labels) > self.data_length:
-                    logger.warning(f"Labels has length {len(self.labels)}, truncating to {self.data_length}.")
+                    if verbose:
+                        logger.warning(f"Labels has length {len(self.labels)}, truncating to {self.data_length}.")
                     self.labels = self.labels[:self.data_length]
                 
-                logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
+                if verbose:
+                    logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
             
             def __len__(self):
                 return self.data_length
@@ -476,35 +493,42 @@ def train_lightning_model(
         logger.error(traceback.format_exc())
         return None, None
     
-    # Setup callbacks
+    # Setup callbacks with better default values
+    os.makedirs(os.path.join('models', 'checkpoints'), exist_ok=True)
     callbacks = [
         EarlyStopping(
             monitor='val_loss',
             patience=early_stopping_patience,
-            mode='min'
+            mode='min',
+            min_delta=0.001,  # Small improvement threshold
+            verbose=True
         ),
         ModelCheckpoint(
             monitor='val_loss',
             dirpath=os.path.join('models', 'checkpoints'),
             filename='lstm-{epoch:02d}-{val_loss:.4f}',
             save_top_k=3,
-            mode='min'
+            mode='min',
+            verbose=True
         )
     ]
     
     # Setup logger
+    os.makedirs(os.path.join('logs', 'lightning_logs'), exist_ok=True)
     tb_logger = TensorBoardLogger(
         save_dir=os.path.join('logs'),
         name='lightning_logs'
     )
     
-    # Setup trainer
+    # Setup trainer with more stable defaults
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         callbacks=callbacks,
         logger=tb_logger,
-        log_every_n_steps=10,
+        log_every_n_steps=50,  # Reduced logging frequency
         accelerator='auto',  # Use GPU if available
+        enable_progress_bar=True,
+        enable_model_summary=True
     )
     
     # Train model
