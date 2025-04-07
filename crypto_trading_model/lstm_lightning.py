@@ -94,6 +94,11 @@ class LightningTimeSeriesModel(pl.LightningModule):
         """Training step"""
         # Remove label from inputs
         labels = batch.pop('label')
+        
+        # Debug shapes
+        for tf, tensor in batch.items():
+            logger.info(f"Input tensor shape for {tf}: {tensor.shape}")
+        
         outputs = self(batch)
         loss = self.criterion(outputs, labels)
         
@@ -110,6 +115,12 @@ class LightningTimeSeriesModel(pl.LightningModule):
         """Validation step"""
         # Remove label from inputs
         labels = batch.pop('label')
+        
+        # Debug shapes
+        if batch_idx == 0:  # Only log for the first batch
+            for tf, tensor in batch.items():
+                logger.info(f"Validation input tensor shape for {tf}: {tensor.shape}")
+        
         outputs = self(batch)
         loss = self.criterion(outputs, labels)
         
@@ -181,6 +192,11 @@ def train_lightning_model(
     - model: Trained model
     - trainer: Lightning trainer
     """
+    # Enable tensor cores for better performance on CUDA devices
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision('high')
+        logger.info("Set float32 matmul precision to 'high' for tensor cores")
+    
     logger.info("Starting PyTorch Lightning model training")
     logger.info(f"Config path: {config_path}")
     logger.info(f"Max epochs: {max_epochs}")
@@ -360,10 +376,13 @@ def train_lightning_model(
                         for feature in self.timeframes[tf]
                     ])
                     
-                    # Reshape to (1, num_features) - adding sequence length dimension for LSTM
-                    # LSTM expects (batch_size, seq_len, input_size)
-                    # In DataLoader this will be batched to (batch_size, 1, num_features)
-                    sample[tf] = features.unsqueeze(0).transpose(0, 1)
+                    # LSTM expects input shape (batch_size, seq_len, input_size)
+                    # For a single sample, we need shape (seq_len, input_size)
+                    # Since we only have one time step per sample, seq_len=1
+                    # input_size = number of features
+                    # The features tensor is currently shape (num_features,)
+                    # We need to reshape to (1, num_features) for the LSTM
+                    sample[tf] = features.unsqueeze(0)  # Add sequence dimension -> (1, num_features)
                 
                 sample['label'] = self.labels[idx]
                 return sample
