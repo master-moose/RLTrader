@@ -354,10 +354,16 @@ def train_lightning_model(
                 # Organize data by timeframe for model consumption
                 sample = {}
                 for tf in self.timeframes:
-                    sample[tf] = torch.stack([
+                    # Stack features into a tensor of shape (num_features,)
+                    features = torch.stack([
                         self.data[f"{tf}_{feature}"][idx] 
                         for feature in self.timeframes[tf]
                     ])
+                    
+                    # Reshape to (1, num_features) - adding sequence length dimension for LSTM
+                    # LSTM expects (batch_size, seq_len, input_size)
+                    # In DataLoader this will be batched to (batch_size, 1, num_features)
+                    sample[tf] = features.unsqueeze(0).transpose(0, 1)
                 
                 sample['label'] = self.labels[idx]
                 return sample

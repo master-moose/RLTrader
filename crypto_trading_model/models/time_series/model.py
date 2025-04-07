@@ -95,9 +95,24 @@ class MultiTimeframeModel(nn.Module):
                 
                 # Get the final hidden state(s)
                 if self.bidirectional:
-                    # Concatenate the last hidden state from both directions
-                    final_hidden = torch.cat((hidden[-2], hidden[-1]), dim=1)
+                    # Fix: Check hidden dimensions and reshape correctly
+                    # hidden shape is (num_layers * num_directions, batch_size, hidden_size)
+                    batch_size = hidden.size(1)
+                    
+                    # Reshape to get the last layer from both directions
+                    if hidden.size(0) >= 2:  # we have at least 2 hidden states (forward and backward)
+                        # Last layer, forward direction
+                        forward = hidden[-2, :, :]
+                        # Last layer, backward direction
+                        backward = hidden[-1, :, :]
+                        
+                        # Concatenate along the feature dimension
+                        final_hidden = torch.cat([forward, backward], dim=1)
+                    else:
+                        # If for some reason we only have one direction, just use it
+                        final_hidden = hidden.view(batch_size, -1)
                 else:
+                    # For unidirectional, just take the last layer's hidden state
                     final_hidden = hidden[-1]
                 
                 encoded_timeframes[tf] = final_hidden
