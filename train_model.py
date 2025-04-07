@@ -1022,13 +1022,23 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     # Calculate class weights to address imbalance (hold, buy, sell)
     # This section should be after data is loaded and before model training
     if num_classes > 1:  # Classification task
-        class_counts = np.bincount(np.argmax(train_loader.dataset.targets.cpu().numpy(), axis=1))
-        total_samples = len(train_loader.dataset)
+        # Extract targets from the dataloader instead of directly from dataset
+        logger.info("Computing class distribution for weighting...")
+        class_counts = np.zeros(num_classes, dtype=np.int32)
+        
+        # Iterate through the training loader to count class occurrences
+        for batch in train_loader:
+            targets = batch[1].cpu().numpy()
+            for c in range(num_classes):
+                class_counts[c] += np.sum(targets == c)
+        
+        total_samples = np.sum(class_counts)
+        logger.info(f"Class distribution: {class_counts}")
         
         # Compute class weights (inverse frequency)
         class_weights = {}
         for cls in range(num_classes):
-            if cls in class_counts and class_counts[cls] > 0:
+            if class_counts[cls] > 0:
                 # Weight is inversely proportional to frequency
                 class_weights[cls] = total_samples / (num_classes * class_counts[cls])
             else:
