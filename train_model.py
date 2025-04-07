@@ -1726,41 +1726,80 @@ def visualize_throughput(metrics_path, output_dir):
     except Exception as e:
         logger.error(f"Error creating visualizations: {str(e)}")
 
+# Add import for Lightning implementation
+from crypto_trading_model.lstm_lightning import train_lightning_model
+
 def main():
-    """Main entry point for model training."""
-    parser = argparse.ArgumentParser(description="Train time series model for cryptocurrency trading")
-    parser.add_argument("--config", type=str, default="crypto_trading_model/config/time_series_config.json",
-                      help="Path to configuration file")
-    parser.add_argument("--visualize", action="store_true", 
-                      help="Generate visualizations of throughput metrics")
-    parser.add_argument("--disable_mp", action="store_true",
-                      help="Disable multiprocessing for data loading")
+    """Main function to run script with command line arguments"""
+    parser = argparse.ArgumentParser(description='Train a time series model')
+    parser.add_argument('--config', type=str, default='crypto_trading_model/config/time_series_config.json',
+                       help='Path to config file')
+    parser.add_argument('--disable-mp', action='store_true',
+                      help='Disable multiprocessing')
+    # Add Lightning option
+    parser.add_argument('--lightning', action='store_true',
+                      help='Use PyTorch Lightning implementation')
+    parser.add_argument('--max-epochs', type=int, default=200,
+                      help='Maximum number of epochs to train (for Lightning)')
+    parser.add_argument('--patience', type=int, default=30,
+                      help='Early stopping patience (for Lightning)')
     
     args = parser.parse_args()
     
-    # Setup directories
-    setup_directories()
+    # Configure logging
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, 'model_training.log')
     
-    # Force single-process mode on Windows with CuPy
-    if sys.platform.startswith('win') and HAS_CUPY:
-        # Set environment variable for PyTorch dataloader
-        os.environ["OMP_NUM_THREADS"] = "1"
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
-        # Set global flag to disable multiprocessing in DataLoader
-        args.disable_mp = True
-        logger.warning("Windows with CuPy detected: multiprocessing disabled to avoid pickling errors")
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
     
-    # Train the model
-    model, history = train_model(args.config, disable_mp=args.disable_mp)
+    # Log system info
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"PyTorch version: {torch.__version__}")
     
-    # Generate visualizations if requested
-    if args.visualize:
-        config = load_config(args.config)
-        output_dir = config['data']['output_dir']
-        metrics_path = os.path.join(output_dir, 'throughput_metrics.json')
-        visualize_throughput(metrics_path, os.path.join(output_dir, 'visualizations'))
+    # Try to get CPU info
+    try:
+        import cpuinfo
+        cpu_info = cpuinfo.get_cpu_info()
+        logger.info(f"CPU: {cpu_info['brand_raw']}")
+    except:
+        logger.warning("Could not get CPU info")
     
-    logger.info("Model training complete.")
+    # Get PyTorch thread settings
+    logger.info(f"PyTorch number of threads: {torch.get_num_threads()}")
+    logger.info(f"PyTorch number of interop threads: {torch.get_num_interop_threads()}")
+    
+    # Check if using Lightning implementation
+    if args.lightning:
+        logger.info("Using PyTorch Lightning implementation")
+        train_lightning_model(
+            config_path=args.config,
+            max_epochs=args.max_epochs,
+            early_stopping_patience=args.patience
+        )
+    else:
+        # Original implementation
+        logger.info("Using original implementation")
+        model, history = train_model(args.config, disable_mp=args.disable_mp)
+        
+        # Visualize throughput if possible
+        try:
+            output_dir = os.path.join('output', 'time_series')
+            throughput_path = os.path.join(output_dir, 'throughput_metrics.json')
+            viz_output_dir = os.path.join(output_dir, 'visualizations')
+            os.makedirs(viz_output_dir, exist_ok=True)
+            visualize_throughput(throughput_path, viz_output_dir)
+        except Exception as e:
+            logger.error(f"Error visualizing throughput: {str(e)}")
+        
+        logger.info("Model training complete.")
 
 if __name__ == "__main__":
     main() 
