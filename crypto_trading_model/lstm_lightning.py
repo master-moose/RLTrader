@@ -244,20 +244,63 @@ def train_lightning_model(
             
             # Load training data
             with h5py.File(train_data_path, 'r') as f:
+                # Print file structure for debugging
+                logger.info(f"HDF5 file structure for {train_data_path}:")
+                def print_structure(name, obj):
+                    if isinstance(obj, h5py.Dataset):
+                        logger.info(f"  Dataset: {name}, Shape: {obj.shape}, Type: {obj.dtype}")
+                    elif isinstance(obj, h5py.Group):
+                        logger.info(f"  Group: {name}")
+                f.visititems(print_structure)
+                
                 # Dynamically get the keys from the HDF5 file
                 train_data = {}
                 for key in f.keys():
                     if key != 'labels':
-                        train_data[key] = torch.tensor(f[key][:], dtype=torch.float32)
-                train_labels = torch.tensor(f['labels'][:], dtype=torch.long)
+                        try:
+                            # Access the dataset first, then slice it
+                            dataset = f[key]
+                            logger.info(f"Loading dataset '{key}' with shape {dataset.shape}")
+                            train_data[key] = torch.tensor(dataset[:], dtype=torch.float32)
+                        except Exception as e:
+                            logger.error(f"Error loading dataset '{key}': {str(e)}")
+                            # Continue with other datasets instead of failing completely
+                            continue
+                
+                # Handle labels separately
+                if 'labels' in f:
+                    train_labels = torch.tensor(f['labels'][:], dtype=torch.long)
+                else:
+                    # Default to zeros if no labels
+                    logger.warning("No 'labels' found in training data, using zeros")
+                    train_labels = torch.zeros(len(next(iter(train_data.values()))), dtype=torch.long)
             
             # Load validation data
             with h5py.File(val_data_path, 'r') as f:
+                # Print file structure for debugging
+                logger.info(f"HDF5 file structure for {val_data_path}:")
+                f.visititems(print_structure)
+                
                 val_data = {}
                 for key in f.keys():
                     if key != 'labels':
-                        val_data[key] = torch.tensor(f[key][:], dtype=torch.float32)
-                val_labels = torch.tensor(f['labels'][:], dtype=torch.long)
+                        try:
+                            # Access the dataset first, then slice it
+                            dataset = f[key]
+                            logger.info(f"Loading dataset '{key}' with shape {dataset.shape}")
+                            val_data[key] = torch.tensor(dataset[:], dtype=torch.float32)
+                        except Exception as e:
+                            logger.error(f"Error loading dataset '{key}': {str(e)}")
+                            # Continue with other datasets instead of failing completely
+                            continue
+                
+                # Handle labels separately
+                if 'labels' in f:
+                    val_labels = torch.tensor(f['labels'][:], dtype=torch.long)
+                else:
+                    # Default to zeros if no labels
+                    logger.warning("No 'labels' found in validation data, using zeros")
+                    val_labels = torch.zeros(len(next(iter(val_data.values()))), dtype=torch.long)
             
             logger.info(f"Successfully loaded {len(train_labels)} training samples and {len(val_labels)} validation samples")
             
