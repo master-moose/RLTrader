@@ -100,7 +100,8 @@ def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
                 
                 # Update primary timeframe
                 if '15m' in data_dict:
-                    data_dict['15m']['price_direction'] = mapped_signals
+                    # Assign values using loc to avoid SettingWithCopyWarning
+                    data_dict['15m'].loc[:, 'price_direction'] = mapped_signals
                 
                 # Update other timeframes by downsampling
                 for tf, step in [('4h', 16), ('1d', 96)]:
@@ -115,7 +116,8 @@ def prepare_dataset(data_dir, regenerate_labels=True, threshold_pct=0.015):
                         
                         # Update price_direction field (only up to the available length)
                         length = min(len(data_dict[tf]), len(downsampled_signals))
-                        data_dict[tf]['price_direction'].iloc[:length] = downsampled_signals[:length]
+                        # Use explicit DataFrame.loc access to avoid SettingWithCopyWarning
+                        data_dict[tf].loc[data_dict[tf].index[:length], 'price_direction'] = downsampled_signals[:length]
                 
                 # Save the updated dataframes to a new HDF5 file
                 logger.info(f"Saving updated {split_name} data to {temp_path}...")
