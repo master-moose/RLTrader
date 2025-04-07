@@ -1051,7 +1051,9 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     # Create criterion with weights for classification
     if num_classes > 1 and class_weights:
         criterion = torch.nn.CrossEntropyLoss(
-            weight=torch.tensor([class_weights[i] for i in range(num_classes)], device=device)
+            weight=torch.tensor([class_weights[i] for i in range(num_classes)], 
+                               dtype=torch.float32,  # Explicitly use float32 to match model outputs
+                               device=device)
         )
     else:
         criterion = torch.nn.CrossEntropyLoss() if num_classes > 1 else torch.nn.MSELoss()
