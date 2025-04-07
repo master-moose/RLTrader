@@ -194,11 +194,6 @@ def train_lightning_model(
     
     # Extract model parameters from config
     model_params = config.get('model', {})
-    input_dims = model_params.get('feature_dims', {
-        '15m': 32,
-        '4h': 32,
-        '1d': 32
-    })
     hidden_dims = model_params.get('hidden_dims', 128)
     num_layers = model_params.get('num_layers', 2)
     dropout = model_params.get('dropout', 0.2)
@@ -211,142 +206,209 @@ def train_lightning_model(
     learning_rate = training_params.get('learning_rate', 0.001)
     weight_decay = training_params.get('weight_decay', 1e-5)
     
-    # Create Lightning model
-    model = LightningTimeSeriesModel(
-        input_dims=input_dims,
-        hidden_dims=hidden_dims,
-        num_layers=num_layers,
-        dropout=dropout,
-        bidirectional=bidirectional,
-        attention=attention,
-        num_classes=num_classes,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay
-    )
-    
     # Setup data
-    # Note: This is a placeholder. You'll need to implement the data loading
-    # specific to your application
-    
-    # For example, assuming your config has data paths:
     data_params = config.get('data', {})
     train_data_path = data_params.get('train_data_path', '')
     val_data_path = data_params.get('val_data_path', '')
     batch_size = config.get('training', {}).get('batch_size', 32)
     
-    if train_data_path and val_data_path:
-        # Load data
-        logger.info(f"Loading data from {train_data_path} and {val_data_path}")
-        try:
-            import h5py
-            import numpy as np
-            from torch.utils.data import TensorDataset, DataLoader
-            
-            # Load training data
-            with h5py.File(train_data_path, 'r') as f:
-                # Print file structure for debugging
-                logger.info(f"HDF5 file structure for {train_data_path}:")
-                def print_structure(name, obj):
-                    if isinstance(obj, h5py.Dataset):
-                        logger.info(f"  Dataset: {name}, Shape: {obj.shape}, Type: {obj.dtype}")
-                    elif isinstance(obj, h5py.Group):
-                        logger.info(f"  Group: {name}")
-                f.visititems(print_structure)
-                
-                # Dynamically get the keys from the HDF5 file
-                train_data = {}
-                for key in f.keys():
-                    if key != 'labels':
-                        try:
-                            # Access the dataset first, then slice it
-                            dataset = f[key]
-                            logger.info(f"Loading dataset '{key}' with shape {dataset.shape}")
-                            train_data[key] = torch.tensor(dataset[:], dtype=torch.float32)
-                        except Exception as e:
-                            logger.error(f"Error loading dataset '{key}': {str(e)}")
-                            # Continue with other datasets instead of failing completely
-                            continue
-                
-                # Handle labels separately
-                if 'labels' in f:
-                    train_labels = torch.tensor(f['labels'][:], dtype=torch.long)
-                else:
-                    # Default to zeros if no labels
-                    logger.warning("No 'labels' found in training data, using zeros")
-                    train_labels = torch.zeros(len(next(iter(train_data.values()))), dtype=torch.long)
-            
-            # Load validation data
-            with h5py.File(val_data_path, 'r') as f:
-                # Print file structure for debugging
-                logger.info(f"HDF5 file structure for {val_data_path}:")
-                f.visititems(print_structure)
-                
-                val_data = {}
-                for key in f.keys():
-                    if key != 'labels':
-                        try:
-                            # Access the dataset first, then slice it
-                            dataset = f[key]
-                            logger.info(f"Loading dataset '{key}' with shape {dataset.shape}")
-                            val_data[key] = torch.tensor(dataset[:], dtype=torch.float32)
-                        except Exception as e:
-                            logger.error(f"Error loading dataset '{key}': {str(e)}")
-                            # Continue with other datasets instead of failing completely
-                            continue
-                
-                # Handle labels separately
-                if 'labels' in f:
-                    val_labels = torch.tensor(f['labels'][:], dtype=torch.long)
-                else:
-                    # Default to zeros if no labels
-                    logger.warning("No 'labels' found in validation data, using zeros")
-                    val_labels = torch.zeros(len(next(iter(val_data.values()))), dtype=torch.long)
-            
-            logger.info(f"Successfully loaded {len(train_labels)} training samples and {len(val_labels)} validation samples")
-            
-            # Create datasets
-            class TimeSeriesDataset(torch.utils.data.Dataset):
-                def __init__(self, data, labels):
-                    self.data = data
-                    self.labels = labels
-                
-                def __len__(self):
-                    return len(self.labels)
-                
-                def __getitem__(self, idx):
-                    sample = {k: v[idx] for k, v in self.data.items()}
-                    sample['label'] = self.labels[idx]
-                    return sample
-            
-            train_dataset = TimeSeriesDataset(train_data, train_labels)
-            val_dataset = TimeSeriesDataset(val_data, val_labels)
-            
-            # Create DataLoaders
-            train_dataloader = DataLoader(
-                train_dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=4,
-                pin_memory=True
-            )
-            
-            val_dataloader = DataLoader(
-                val_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=4,
-                pin_memory=True
-            )
-            
-            logger.info(f"Created data loaders with batch size {batch_size}")
-            
-        except Exception as e:
-            logger.error(f"Error loading data: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None, None
-    else:
+    if not train_data_path or not val_data_path:
         logger.warning("No data paths provided in config, skipping data loading")
+        return None, None
+    
+    # Load data
+    logger.info(f"Loading data from {train_data_path} and {val_data_path}")
+    try:
+        import h5py
+        import numpy as np
+        from torch.utils.data import TensorDataset, DataLoader
+        
+        # Load training data
+        with h5py.File(train_data_path, 'r') as f:
+            # Print file structure for debugging
+            logger.info(f"HDF5 file structure for {train_data_path}:")
+            def print_structure(name, obj):
+                if isinstance(obj, h5py.Dataset):
+                    logger.info(f"  Dataset: {name}, Shape: {obj.shape}, Type: {obj.dtype}")
+                elif isinstance(obj, h5py.Group):
+                    logger.info(f"  Group: {name}")
+            f.visititems(print_structure)
+            
+            # The data is organized as timeframes with tables
+            # Extract the data from the main tables, not the _i_table indices
+            train_data = {}
+            timeframes = []
+            
+            for tf in f.keys():
+                if isinstance(f[tf], h5py.Group) and 'table' in f[tf]:
+                    timeframes.append(tf)
+                    logger.info(f"Loading timeframe: {tf}")
+                    try:
+                        # Access the main table, which contains all features as a structured array
+                        table_data = f[tf]['table'][:]
+                        logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
+                        
+                        # Convert structured array to separate tensors
+                        for field_name in table_data.dtype.names:
+                            if field_name != 'index':  # Skip the index field
+                                feature_name = f"{tf}_{field_name}"
+                                train_data[feature_name] = torch.tensor(
+                                    table_data[field_name], dtype=torch.float32
+                                )
+                                logger.info(f"    Added feature: {feature_name}, Shape: {train_data[feature_name].shape}")
+                    except Exception as e:
+                        logger.error(f"Error loading timeframe {tf}: {str(e)}")
+            
+            # Create labels from price direction in the shortest timeframe
+            # Assuming labels will be based on price_direction field of the first timeframe
+            if timeframes:
+                primary_tf = timeframes[0]
+                try:
+                    table_data = f[primary_tf]['table'][:]
+                    if 'price_direction' in table_data.dtype.names:
+                        train_labels = torch.tensor(table_data['price_direction'], dtype=torch.long)
+                        logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {train_labels.shape}")
+                    else:
+                        logger.warning(f"No price_direction field found in {primary_tf}, generating dummy labels")
+                        train_labels = torch.zeros(len(table_data), dtype=torch.long)
+                except Exception as e:
+                    logger.error(f"Error loading labels: {str(e)}")
+                    train_labels = torch.zeros(len(next(iter(train_data.values()))), dtype=torch.long)
+            else:
+                logger.warning("No valid timeframes found, generating dummy labels")
+                train_labels = torch.zeros(len(next(iter(train_data.values())) if train_data else 0), dtype=torch.long)
+            
+            logger.info(f"Created training dataset with {len(train_data)} features and {len(train_labels)} samples")
+        
+        # Load validation data with the same approach
+        with h5py.File(val_data_path, 'r') as f:
+            # Print file structure for debugging
+            logger.info(f"HDF5 file structure for {val_data_path}:")
+            f.visititems(print_structure)
+            
+            # Extract the data from the tables
+            val_data = {}
+            timeframes = []
+            
+            for tf in f.keys():
+                if isinstance(f[tf], h5py.Group) and 'table' in f[tf]:
+                    timeframes.append(tf)
+                    logger.info(f"Loading timeframe: {tf}")
+                    try:
+                        # Access the main table, which contains all features
+                        table_data = f[tf]['table'][:]
+                        logger.info(f"  Found table with shape {table_data.shape} and type {table_data.dtype}")
+                        
+                        # Convert structured array to separate tensors
+                        for field_name in table_data.dtype.names:
+                            if field_name != 'index':  # Skip the index field
+                                feature_name = f"{tf}_{field_name}"
+                                val_data[feature_name] = torch.tensor(
+                                    table_data[field_name], dtype=torch.float32
+                                )
+                                logger.info(f"    Added feature: {feature_name}, Shape: {val_data[feature_name].shape}")
+                    except Exception as e:
+                        logger.error(f"Error loading timeframe {tf}: {str(e)}")
+            
+            # Create labels from price direction as we did for training data
+            if timeframes:
+                primary_tf = timeframes[0]
+                try:
+                    table_data = f[primary_tf]['table'][:]
+                    if 'price_direction' in table_data.dtype.names:
+                        val_labels = torch.tensor(table_data['price_direction'], dtype=torch.long)
+                        logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {val_labels.shape}")
+                    else:
+                        logger.warning(f"No price_direction field found in {primary_tf}, generating dummy labels")
+                        val_labels = torch.zeros(len(table_data), dtype=torch.long)
+                except Exception as e:
+                    logger.error(f"Error loading labels: {str(e)}")
+                    val_labels = torch.zeros(len(next(iter(val_data.values()))), dtype=torch.long)
+            else:
+                logger.warning("No valid timeframes found, generating dummy labels")
+                val_labels = torch.zeros(len(next(iter(val_data.values())) if val_data else 0), dtype=torch.long)
+            
+            logger.info(f"Created validation dataset with {len(val_data)} features and {len(val_labels)} samples")
+        
+        # Create datasets
+        class TimeSeriesDataset(torch.utils.data.Dataset):
+            def __init__(self, data, labels):
+                self.data = data
+                self.labels = labels
+                
+                # Group features by timeframe
+                self.timeframes = {}
+                for key in data.keys():
+                    if '_' in key:
+                        tf, feature = key.split('_', 1)
+                        if tf not in self.timeframes:
+                            self.timeframes[tf] = []
+                        self.timeframes[tf].append(feature)
+                
+                logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())}")
+            
+            def __len__(self):
+                return len(self.labels)
+            
+            def __getitem__(self, idx):
+                # Organize data by timeframe for model consumption
+                sample = {}
+                for tf in self.timeframes:
+                    sample[tf] = torch.stack([
+                        self.data[f"{tf}_{feature}"][idx] 
+                        for feature in self.timeframes[tf]
+                    ])
+                
+                sample['label'] = self.labels[idx]
+                return sample
+        
+        train_dataset = TimeSeriesDataset(train_data, train_labels)
+        val_dataset = TimeSeriesDataset(val_data, val_labels)
+        
+        # Create DataLoaders
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        logger.info(f"Created data loaders with batch size {batch_size}")
+        
+        # Determine input dimensions from actual data
+        input_dims = {}
+        for tf in train_dataset.timeframes:
+            # Number of features for this timeframe
+            input_dims[tf] = len(train_dataset.timeframes[tf])
+        
+        logger.info(f"Computed input dimensions from data: {input_dims}")
+        
+        # Create Lightning model
+        model = LightningTimeSeriesModel(
+            input_dims=input_dims,
+            hidden_dims=hidden_dims,
+            num_layers=num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional,
+            attention=attention,
+            num_classes=num_classes,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay
+        )
+        
+    except Exception as e:
+        logger.error(f"Error loading data: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None, None
     
     # Setup callbacks
