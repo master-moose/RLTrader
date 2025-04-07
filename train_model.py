@@ -14,6 +14,7 @@ from pathlib import Path
 import tables
 import time
 from collections import defaultdict
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
 # Configure logging
 logging.basicConfig(
@@ -505,6 +506,10 @@ def validate(model, dataloader, criterion, device):
     val_correct = 0
     val_total = 0
     
+    # For trading metrics
+    all_predictions = []
+    all_targets = []
+    
     start_time = time.time()
     total_samples = 0
     
@@ -531,10 +536,17 @@ def validate(model, dataloader, criterion, device):
             batch_correct = (predicted == targets).sum().item()
             val_correct += batch_correct
             val_total += targets.size(0)
+            
+            # Store predictions and targets for additional metrics
+            all_predictions.extend(predicted.cpu().numpy())
+            all_targets.extend(targets.cpu().numpy())
     
     # Calculate validation metrics
     avg_loss = val_loss / len(dataloader)
     accuracy = val_correct / val_total
+    
+    # Calculate trading-specific metrics
+    metrics = calculate_trading_metrics(all_predictions, all_targets)
     
     end_time = time.time()
     val_time = end_time - start_time
@@ -543,12 +555,121 @@ def validate(model, dataloader, criterion, device):
     throughput = total_samples / val_time
     logger.info(f"Validation throughput: {throughput:.2f} samples/second")
     
-    return avg_loss, accuracy, val_time, throughput
+    # Log trading metrics
+    logger.info(f"Trading metrics - Precision: {metrics['precision']:.4f}, Recall: {metrics['recall']:.4f}, F1: {metrics['f1']:.4f}")
+    
+    # Log class breakdown, safely handling missing classes
+    class_logs = []
+    class_names = ["Hold", "Buy", "Sell"]
+    for i, name in enumerate(class_names):
+        if i < len(metrics['class_accuracy']):
+            class_logs.append(f"{name}: {metrics['class_accuracy'][i]:.4f}")
+        else:
+            class_logs.append(f"{name}: N/A (no samples)")
+    
+    logger.info(f"Class breakdown - {', '.join(class_logs)}")
+    
+    return avg_loss, accuracy, val_time, throughput, metrics
+
+def calculate_trading_metrics(predictions, targets):
+    """
+    Calculate trading-specific metrics
+    
+    Parameters:
+    - predictions: List of model predictions (0=hold, 1=buy, 2=sell)
+    - targets: List of actual targets
+    
+    Returns:
+    - Dictionary of metrics
+    """
+    # Calculate precision, recall, and F1 score (macro average)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        targets, predictions, average='macro', zero_division=0
+    )
+    
+    # Get unique classes present in the data
+    unique_classes = np.unique(np.concatenate([predictions, targets]))
+    
+    # Calculate class-specific accuracy
+    conf_matrix = confusion_matrix(targets, predictions)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        class_accuracy = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
+    
+    # Replace NaN values (from division by zero) with zero
+    class_accuracy = np.nan_to_num(class_accuracy)
+    
+    # Calculate additional trading metrics
+    # A basic trading score: higher weight for correctly predicting buy/sell signals
+    # and lower penalty for mispredicting hold signals
+    trading_score = 0
+    for pred, target in zip(predictions, targets):
+        if pred == target:
+            if target in [1, 2]:  # Buy or Sell
+                trading_score += 2  # Higher weight for correct buy/sell
+            else:  # Hold
+                trading_score += 1
+        else:
+            if target == 0 and pred in [1, 2]:  # Predicted action when should hold
+                trading_score -= 1
+            elif target in [1, 2] and pred == 0:  # Missed an action
+                trading_score -= 2
+            else:  # Wrong action
+                trading_score -= 3
+    
+    trading_score = trading_score / len(predictions)
+    
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'trading_score': trading_score,
+        'class_accuracy': class_accuracy,
+        'unique_classes': unique_classes.tolist()
+    }
+
+def check_gpu_availability():
+    """Check if a GPU is available and return information about it"""
+    if torch.cuda.is_available():
+        gpu_count = torch.cuda.device_count()
+        gpu_name = torch.cuda.get_device_name(0) if gpu_count > 0 else "Unknown"
+        cuda_version = torch.version.cuda
+        
+        logger.info(f"GPU detected: {gpu_name} (CUDA {cuda_version})")
+        logger.info(f"Number of GPUs available: {gpu_count}")
+        
+        # Get memory info if possible
+        try:
+            total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+            logger.info(f"GPU memory: {total_mem:.2f} GB")
+        except:
+            logger.info("Could not retrieve GPU memory information")
+            
+        return True, gpu_name
+    else:
+        logger.warning("No GPU detected, using CPU")
+        return False, None
+
+def configure_gpu_settings():
+    """Configure settings for optimal GPU performance"""
+    if torch.cuda.is_available():
+        # Enable cuDNN benchmark mode for optimal performance
+        # This will benchmark several algorithms and select the fastest
+        torch.backends.cudnn.benchmark = True
+        
+        # Set device precision
+        torch.set_float32_matmul_precision('high')
+        
+        logger.info("Configured GPU settings for optimal performance")
 
 def train_model(config_path="crypto_trading_model/config/time_series_config.json"):
     """Train the time series model using parameters from config file"""
     # Load configuration
     config = load_config(config_path)
+    
+    # Check for GPU availability
+    gpu_available, gpu_name = check_gpu_availability()
+    if gpu_available:
+        configure_gpu_settings()
     
     # Extract parameters
     data_path = config['data']['data_path']
@@ -573,7 +694,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     learning_rate = config['training']['learning_rate']
     weight_decay = config['training']['weight_decay']
     patience = config['training']['patience']
-    device = config['training']['device']
+    device_cfg = config['training']['device']
     
     # Determine data paths
     if use_synthetic:
@@ -612,13 +733,16 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         logger.error(f"Unsupported model type: {model_type}")
         sys.exit(1)
     
-    # Setup device
-    if device == 'cuda' and torch.cuda.is_available():
+    # Setup device - use CUDA if available and configured, else CPU
+    if device_cfg == 'cuda' and torch.cuda.is_available():
         device = torch.device('cuda')
         logger.info("Using CUDA for training")
     else:
         device = torch.device('cpu')
-        logger.info("Using CPU for training")
+        if device_cfg == 'cuda' and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available, falling back to CPU")
+        else:
+            logger.info("Using CPU for training")
     
     model.to(device)
     
@@ -631,8 +755,9 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    # Learning rate scheduler - using both ReduceLROnPlateau and cosine annealing
+    # First, reduce LR when validation loss plateaus
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='min', 
         factor=config['training']['scheduler_factor'],
@@ -640,10 +765,35 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         verbose=True
     )
     
+    # Also use cosine annealing with warm restarts to help escape local minima
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=10,  # Restart every 10 epochs
+        T_mult=2,  # Multiply period by 2 after each restart
+        eta_min=1e-6  # Minimum learning rate
+    )
+    
     # Early stopping
     best_val_loss = float('inf')
+    best_f1_score = 0.0
+    best_trading_score = float('-inf')
     best_model_state = None
     no_improve_epochs = 0
+    
+    # Function to check if we have improvement based on multiple metrics
+    def is_improvement(new_loss, new_f1, new_trading_score):
+        # Weighted combination of metrics (lower is better for loss, higher is better for F1 and trading score)
+        # We convert each to a value where higher is better
+        loss_component = 1.0 / (1.0 + new_loss)  # Transform loss so higher is better
+        
+        # Previous best
+        prev_loss_component = 1.0 / (1.0 + best_val_loss)
+        
+        # Calculate overall scores (higher is better)
+        new_score = 0.5 * loss_component + 0.3 * new_f1 + 0.2 * new_trading_score
+        old_score = 0.5 * prev_loss_component + 0.3 * best_f1_score + 0.2 * best_trading_score
+        
+        return new_score > old_score
     
     # Performance metrics tracking
     total_training_time = 0
@@ -661,7 +811,14 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         'train_time': [],
         'val_time': [],
         'train_throughput': [],
-        'val_throughput': []
+        'val_throughput': [],
+        'precision': [],
+        'recall': [],
+        'f1': [],
+        'trading_score': [],
+        'class_accuracy_buy': [],
+        'class_accuracy_hold': [],
+        'class_accuracy_sell': []
     }
     
     # Track timing of each phase
@@ -686,11 +843,12 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             timing_breakdown[f'train_{key}'].append(value)
         
         # Validate
-        val_loss, val_acc, val_time, val_throughput = validate(model, val_loader, criterion, device)
+        val_loss, val_acc, val_time, val_throughput, val_metrics = validate(model, val_loader, criterion, device)
         logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Time: {val_time:.2f} seconds, Val Throughput: {val_throughput:.2f} samples/second")
         
         # Update learning rate
-        scheduler.step(val_loss)
+        plateau_scheduler.step(val_loss)
+        cosine_scheduler.step()
         
         # Save history
         history['train_loss'].append(train_loss)
@@ -702,6 +860,18 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         history['train_throughput'].append(train_throughput)
         history['val_throughput'].append(val_throughput)
         
+        # Save trading metrics
+        history['precision'].append(val_metrics['precision'])
+        history['recall'].append(val_metrics['recall'])
+        history['f1'].append(val_metrics['f1'])
+        history['trading_score'].append(val_metrics['trading_score'])
+        
+        # Safely get class accuracies, using 0.0 if not available
+        class_acc = val_metrics['class_accuracy']
+        history['class_accuracy_hold'].append(class_acc[0] if 0 < len(class_acc) else 0.0)
+        history['class_accuracy_buy'].append(class_acc[1] if 1 < len(class_acc) else 0.0)
+        history['class_accuracy_sell'].append(class_acc[2] if 2 < len(class_acc) else 0.0)
+        
         # Update throughput history
         throughput_history['train'].append(train_throughput)
         throughput_history['val'].append(val_throughput)
@@ -711,8 +881,10 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         total_training_time += epoch_time
         
         # Check for improvement
-        if val_loss < best_val_loss:
+        if is_improvement(val_loss, val_metrics['f1'], val_metrics['trading_score']):
             best_val_loss = val_loss
+            best_f1_score = val_metrics['f1']
+            best_trading_score = val_metrics['trading_score']
             best_model_state = model.state_dict().copy()
             no_improve_epochs = 0
             logger.info(f"New best validation loss: {best_val_loss:.4f}")
@@ -779,10 +951,47 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             'total_training_time': float(total_time),
             'avg_epoch_time': float(avg_epoch_time),
             'timing_breakdown': {k: [float(v) for v in vals] for k, vals in timing_breakdown.items()},
-            'gpu_stats': gpu_stats if device.type == 'cuda' else None
+            'gpu_stats': gpu_stats if device.type == 'cuda' else None,
+            'val_metrics': val_metrics
         }
         json.dump(throughput_metrics, f, indent=2)
     logger.info(f"Throughput metrics saved to {throughput_path}")
+    
+    # Plot trading metrics if available
+    if 'precision' in serializable_history and 'recall' in serializable_history and 'f1' in serializable_history:
+        plt.figure(figsize=(12, 6))
+        epochs = range(1, len(serializable_history['precision']) + 1)
+        plt.plot(epochs, serializable_history['precision'], label='Precision')
+        plt.plot(epochs, serializable_history['recall'], label='Recall')
+        plt.plot(epochs, serializable_history['f1'], label='F1 Score')
+        plt.xlabel('Epoch')
+        plt.ylabel('Score')
+        plt.title('Trading Metrics Over Time')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(output_dir, 'visualizations/trading_metrics.png'))
+        
+        # Plot class-specific accuracy
+        plt.figure(figsize=(12, 6))
+        plt.plot(epochs, serializable_history['class_accuracy_buy'], label='Buy Accuracy')
+        plt.plot(epochs, serializable_history['class_accuracy_hold'], label='Hold Accuracy')
+        plt.plot(epochs, serializable_history['class_accuracy_sell'], label='Sell Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.title('Class-Specific Accuracy Over Time')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(output_dir, 'visualizations/class_accuracy.png'))
+        
+        # Plot trading score
+        if 'trading_score' in serializable_history:
+            plt.figure(figsize=(12, 6))
+            plt.plot(epochs, serializable_history['trading_score'])
+            plt.xlabel('Epoch')
+            plt.ylabel('Score')
+            plt.title('Trading Score Over Time')
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, 'visualizations/trading_score.png'))
     
     return model, history
 
