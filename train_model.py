@@ -8,13 +8,26 @@ import logging
 import argparse
 import numpy as np
 import pandas as pd
-import torch
-from torch.utils.data import Dataset, DataLoader
+
+# Try to import torch with fallback for NCCL errors
+try:
+    import torch
+    from torch.utils.data import Dataset, DataLoader
+    TORCH_IMPORT_ERROR = None
+except ImportError as e:
+    TORCH_IMPORT_ERROR = str(e)
+    # We'll handle this later
+
 from pathlib import Path
 import tables
 import time
 from collections import defaultdict
-from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+
+# Try to import sklearn metrics
+try:
+    from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+except ImportError:
+    print("Warning: sklearn not available, some metrics will be disabled")
 
 # Try to import CuPy for GPU accelerated array operations if CUDA is available
 try:
@@ -26,10 +39,10 @@ except ImportError:
     cp = np  # Fallback to NumPy
     logger_message = "CuPy not available, falling back to NumPy"
 
-# Function to use the appropriate array library based on device
+# Function to use the appropriate array module based on device
 def get_array_module(device):
     """Return the appropriate array module (NumPy or CuPy) based on device"""
-    if device.type == 'cuda' and HAS_CUPY:
+    if device and device.type == 'cuda' and HAS_CUPY:
         return cp
     return np
 
@@ -42,6 +55,22 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('crypto_trading_model.training')
+
+# If there was a torch import error, log it now
+if TORCH_IMPORT_ERROR:
+    logger.error(f"Error importing PyTorch: {TORCH_IMPORT_ERROR}")
+    logger.warning("If this is an NCCL error, will try to continue with CPU-only mode")
+    
+    # Try importing torch again with CPU-only mode
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Hide GPUs
+    try:
+        import torch
+        from torch.utils.data import Dataset, DataLoader
+        logger.info("Successfully imported PyTorch in CPU-only mode")
+    except ImportError as e:
+        logger.error(f"Still couldn't import PyTorch: {e}")
+        logger.error("Exiting...")
+        sys.exit(1)
 
 def setup_directories():
     """Create necessary output directories for the model training results."""
@@ -748,6 +777,11 @@ def calculate_trading_metrics(predictions, targets, device=None):
 
 def check_gpu_availability():
     """Check if a GPU is available and return information about it"""
+    # If we're in forced CPU mode due to NCCL errors, return false
+    if 'CUDA_VISIBLE_DEVICES' in os.environ and os.environ['CUDA_VISIBLE_DEVICES'] == '':
+        logger.info("Running in CPU-only mode due to CUDA/NCCL initialization issues")
+        return False, None
+    
     if torch.cuda.is_available():
         gpu_count = torch.cuda.device_count()
         gpu_name = torch.cuda.get_device_name(0) if gpu_count > 0 else "Unknown"
@@ -782,6 +816,10 @@ def check_gpu_availability():
 
 def configure_gpu_settings():
     """Configure settings for optimal GPU performance"""
+    # Skip if we're in forced CPU mode
+    if 'CUDA_VISIBLE_DEVICES' in os.environ and os.environ['CUDA_VISIBLE_DEVICES'] == '':
+        return
+        
     if torch.cuda.is_available():
         # Enable cuDNN benchmark mode for optimal performance
         # This will benchmark several algorithms and select the fastest
@@ -791,6 +829,8 @@ def configure_gpu_settings():
         torch.set_float32_matmul_precision('high')
         
         logger.info("Configured GPU settings for optimal performance")
+    else:
+        logger.warning("Cannot configure GPU settings - CUDA not available")
 
 def train_model(config_path="crypto_trading_model/config/time_series_config.json", disable_mp=False):
     """Train the time series model using parameters from config file"""
@@ -801,6 +841,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     gpu_available, gpu_name = check_gpu_availability()
     if gpu_available:
         configure_gpu_settings()
+    else:
+        logger.warning("Training will run on CPU, which may be significantly slower")
     
     # Extract parameters
     data_path = config['data']['data_path']
@@ -838,7 +880,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     logger.info(f"Training with data: {train_path}, {val_path}")
     
     # Setup device - use CUDA if available and configured, else CPU
-    if device_cfg == 'cuda' and torch.cuda.is_available():
+    if device_cfg == 'cuda' and torch.cuda.is_available() and ('CUDA_VISIBLE_DEVICES' not in os.environ or os.environ['CUDA_VISIBLE_DEVICES'] != ''):
         device = torch.device('cuda')
         logger.info("Using CUDA for training")
         # Use CuPy for array operations if available
@@ -854,6 +896,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         use_cupy = False  # Don't use CuPy with CPU
         if device_cfg == 'cuda' and not torch.cuda.is_available():
             logger.warning("CUDA requested but not available, falling back to CPU")
+        elif 'CUDA_VISIBLE_DEVICES' in os.environ and os.environ['CUDA_VISIBLE_DEVICES'] == '':
+            logger.warning("CUDA disabled due to initialization errors, using CPU")
         else:
             logger.info("Using CPU for training")
     
