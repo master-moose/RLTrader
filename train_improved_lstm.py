@@ -365,6 +365,12 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
     # Train the model
     logger.info("Starting model training...")
     try:
+        # We don't need to pass num_workers explicitly since it's already in the config
+        # The train_lightning_model function will read it from there
+        # Just note in the logs that we're using the config value
+        if num_workers is not None:
+            logger.info(f"Using {num_workers} workers as configured in the config file")
+        
         # Call train_lightning_model with the parameters it expects
         model, trainer = train_lightning_model(
             config_path=config_path,
