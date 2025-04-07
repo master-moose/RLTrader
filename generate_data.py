@@ -53,11 +53,11 @@ def load_config(config_path):
         logger.error(f"Error loading config from {config_path}: {str(e)}")
         sys.exit(1)
 
-def generate_synthetic_data(num_samples=140000, output_dir='data/synthetic', config_path=None):
+def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', config_path=None):
     """Generate synthetic data for training.
     
     Parameters:
-    - num_samples: Number of 15-minute intervals to generate
+    - num_samples: Number of 15-minute intervals to generate (default: 525600 for 15 years)
     - output_dir: Directory to save the HDF5 files
     - config_path: Optional path to a configuration file
     """
@@ -106,7 +106,7 @@ def generate_synthetic_data(num_samples=140000, output_dir='data/synthetic', con
     
     # Create a date range
     date_range = pd.date_range(
-        start='2020-01-01', 
+        start='2010-01-01', 
         periods=num_samples,
         freq='15min'
     )
@@ -342,8 +342,8 @@ def create_and_save_splits(dataset, train_ratio, val_ratio, test_ratio, shuffle,
 def main():
     """Main entry point for data generation."""
     parser = argparse.ArgumentParser(description="Generate synthetic data for cryptocurrency trading model")
-    parser.add_argument("--num_samples", type=int, default=140000,
-                      help="Number of 15-minute samples to generate (default: 140000 for ~4 years)")
+    parser.add_argument("--num_samples", type=int, default=525600,
+                      help="Number of 15-minute samples to generate (default: 525600 for ~15 years)")
     parser.add_argument("--output_dir", type=str, default="data/synthetic",
                       help="Directory where the data will be saved (default: data/synthetic)")
     parser.add_argument("--config", type=str, help="Path to configuration file")

@@ -284,7 +284,7 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
             "training": {
                 "learning_rate": 0.0005,
                 "weight_decay": 1e-4,
-                "batch_size": 128
+                "batch_size": 256
             },
             "data": {
                 "train_data_path": data_paths['train_path'],

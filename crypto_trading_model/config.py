@@ -86,7 +86,7 @@ FEATURE_SETTINGS = {
 # Time Series Model Configuration
 # ---------------------------------------------------
 TIME_SERIES_SETTINGS = {
-    'sequence_length': 20,            # Number of time steps to look back
+    'sequence_length': 60,            # Number of time steps to look back
     'forecast_horizon': 5,            # Number of steps to predict ahead
     'target_column': 'close',         # Column to predict (usually 'close')
     'model_type': 'lstm',             # Model type: 'lstm', 'bilstm', 'cnn_lstm', 'attention'
@@ -94,7 +94,7 @@ TIME_SERIES_SETTINGS = {
     'dense_units': [32],              # Units in Dense layers
     'dropout_rate': 0.2,              # Dropout rate
     'learning_rate': 0.001,           # Learning rate for optimizer
-    'batch_size': 64,                 # Batch size for training
+    'batch_size': 256,                # Batch size for training
     'epochs': 50,                     # Number of training epochs
     'early_stopping_patience': 10,    # Patience for early stopping
     'validation_split': 0.2,          # Fraction of data to use for validation
@@ -180,7 +180,7 @@ PROGRESSIVE_LEARNING = {
     
     # Default stage configurations
     'time_series': {
-        'sequence_length': 20,
+        'sequence_length': 60,
         'forecast_horizon': 5,
         'target_column': 'close',
         'model_type': 'lstm',
