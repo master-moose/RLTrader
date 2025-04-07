@@ -10,6 +10,7 @@ import pandas as pd
 import tables
 from pathlib import Path
 import argparse
+from crypto_trading_model.data_processing.feature_engineering import calculate_multi_timeframe_signal
 
 # Configure logging
 logging.basicConfig(
@@ -232,6 +233,33 @@ def generate_synthetic_data(num_samples=140000, output_dir='data/synthetic', con
         '4h': df_4h,
         '1d': df_1d
     }
+    
+    # Generate advanced trading signals using multi-timeframe approach
+    try:
+        logger.info("Calculating advanced multi-timeframe signals...")
+        multi_tf_signals = calculate_multi_timeframe_signal(
+            dataset,
+            primary_tf='15m',
+            threshold_pct=0.015,  # 1.5% threshold for significant moves
+            lookforward_periods={'15m': 16, '4h': 4, '1d': 1}  # Look forward periods for each timeframe
+        )
+        
+        # Replace the price_direction in the primary timeframe with the enhanced version
+        dataset['15m']['price_direction'] = multi_tf_signals
+        
+        # Create versions for higher timeframes by downsampling
+        # 4-hour timeframe (1 4h candle = 16 15m candles)
+        df_4h_indices = list(range(0, len(dataset['15m']), 16))
+        dataset['4h']['price_direction'] = multi_tf_signals.iloc[df_4h_indices].values
+        
+        # Daily timeframe (1 day candle = 96 15m candles)
+        df_1d_indices = list(range(0, len(dataset['15m']), 96))
+        dataset['1d']['price_direction'] = multi_tf_signals.iloc[df_1d_indices].values
+        
+        logger.info("Successfully updated price_direction with multi-timeframe signals")
+    except Exception as e:
+        logger.error(f"Error calculating multi-timeframe signals: {str(e)}")
+        logger.info("Falling back to standard price_direction calculation")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)

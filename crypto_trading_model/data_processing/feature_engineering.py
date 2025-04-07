@@ -216,4 +216,119 @@ def calculate_multi_timeframe_trend(aligned_data: Dict[str, pd.DataFrame],
     # Normalize
     weighted_trend = weighted_trend / weight_sum
     
-    return weighted_trend 
+    return weighted_trend
+
+def calculate_advanced_price_direction(df, threshold_pct=0.01, lookforward_periods=3):
+    """
+    Calculate advanced price direction labels based on future price movement.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        DataFrame with OHLCV data
+    threshold_pct : float
+        Minimum percentage move required to classify as up/down
+    lookforward_periods : int
+        Number of periods to look forward for price movement
+        
+    Returns:
+    --------
+    pd.Series
+        Series with price direction labels:
+        1 = upward move (buy)
+        0 = no significant move (hold)
+        -1 = downward move (sell)
+    """
+    # Calculate future price changes
+    future_close = df['close'].shift(-lookforward_periods)
+    price_change_pct = (future_close - df['close']) / df['close']
+    
+    # Apply thresholds to determine direction
+    direction = np.zeros(len(df))
+    direction[price_change_pct > threshold_pct] = 1     # Buy signal
+    direction[price_change_pct < -threshold_pct] = -1   # Sell signal
+    
+    # Fill NaN values at the end (where we don't have future data)
+    direction = pd.Series(direction, index=df.index)
+    direction.fillna(0, inplace=True)
+    
+    return direction
+
+def calculate_multi_timeframe_signal(data_dict, primary_tf='15m', threshold_pct=0.01, 
+                                     lookforward_periods={'15m': 12, '4h': 3, '1d': 1}):
+    """
+    Generate trading signals using information from multiple timeframes.
+    
+    Parameters:
+    -----------
+    data_dict : Dict[str, pd.DataFrame]
+        Dictionary of DataFrames for each timeframe
+    primary_tf : str
+        Primary timeframe to use for signal generation
+    threshold_pct : float
+        Minimum percentage move required to classify as up/down
+    lookforward_periods : Dict[str, int]
+        Number of periods to look forward for each timeframe
+        
+    Returns:
+    --------
+    pd.Series
+        Series with trading signals aligned to the primary timeframe:
+        1 = buy signal
+        0 = hold signal
+        -1 = sell signal
+    """
+    # Extract primary dataframe
+    primary_df = data_dict[primary_tf]
+    
+    # Calculate signals for each timeframe
+    signals = {}
+    for tf, df in data_dict.items():
+        if tf in lookforward_periods:
+            # Calculate direction for this timeframe
+            direction = calculate_advanced_price_direction(
+                df, 
+                threshold_pct=threshold_pct, 
+                lookforward_periods=lookforward_periods[tf]
+            )
+            signals[tf] = direction
+    
+    # Create a common timestamp index based on primary timeframe
+    common_index = primary_df.index
+    
+    # Align all signals to primary timeframe
+    aligned_signals = {}
+    for tf, signal in signals.items():
+        if tf == primary_tf:
+            aligned_signals[tf] = signal
+        else:
+            # Resample signal to match primary timeframe
+            resampled = signal.reindex(common_index, method='ffill')
+            aligned_signals[tf] = resampled
+    
+    # Combine signals with weights (higher timeframes get more weight)
+    weights = {'15m': 1.0, '4h': 2.0, '1d': 3.0}
+    
+    # Initialize combined signal
+    combined_signal = pd.Series(0.0, index=common_index)
+    total_weight = 0
+    
+    # Weighted sum of signals
+    for tf, signal in aligned_signals.items():
+        weight = weights.get(tf, 1.0)  # Default weight is 1.0
+        combined_signal += signal * weight
+        total_weight += weight
+    
+    # Normalize by total weight
+    if total_weight > 0:
+        combined_signal = combined_signal / total_weight
+    
+    # Discretize the combined signal
+    discretized = np.zeros(len(combined_signal))
+    buy_threshold = 0.2   # Adjusted threshold for stronger buy signals
+    sell_threshold = -0.2  # Adjusted threshold for stronger sell signals
+    
+    discretized[combined_signal > buy_threshold] = 1
+    discretized[combined_signal < sell_threshold] = -1
+    
+    return pd.Series(discretized, index=common_index) 

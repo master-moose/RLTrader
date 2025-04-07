@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
+import torch.nn.functional as F
 
 # Import from local modules
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
@@ -39,7 +40,17 @@ class LightningTimeSeriesModel(pl.LightningModule):
         attention: bool = True,
         num_classes: int = 3,
         learning_rate: float = 0.001,
-        weight_decay: float = 1e-5
+        weight_decay: float = 1e-5,
+        use_batch_norm: bool = True,
+        use_residual: bool = True,
+        embedding_dim: int = None,
+        class_weights: list = None,
+        warm_up_steps: int = 100,
+        lr_scheduler_factor: float = 0.5,
+        lr_scheduler_patience: int = 10,
+        mixup_alpha: float = 0.2,
+        use_focal_loss: bool = False,
+        focal_gamma: float = 2.0
     ):
         """
         Initialize the model
@@ -64,6 +75,26 @@ class LightningTimeSeriesModel(pl.LightningModule):
             Learning rate for optimization
         weight_decay : float
             Weight decay for regularization
+        use_batch_norm : bool
+            Whether to use batch normalization
+        use_residual : bool
+            Whether to use residual connections
+        embedding_dim : int
+            Dimension for initial feature embedding or None
+        class_weights : list
+            Optional weights for each class to handle imbalance
+        warm_up_steps : int
+            Number of warmup steps for learning rate scheduler
+        lr_scheduler_factor : float
+            Factor to reduce learning rate by on plateau
+        lr_scheduler_patience : int
+            Patience for learning rate scheduler
+        mixup_alpha : float
+            Alpha parameter for mixup data augmentation or 0 to disable
+        use_focal_loss : bool
+            Whether to use focal loss instead of cross entropy
+        focal_gamma : float
+            Gamma parameter for focal loss
         """
         super().__init__()
         self.save_hyperparameters()
@@ -76,104 +107,244 @@ class LightningTimeSeriesModel(pl.LightningModule):
             dropout=dropout,
             bidirectional=bidirectional,
             attention=attention,
-            num_classes=num_classes
+            num_classes=num_classes,
+            use_batch_norm=use_batch_norm,
+            use_residual=use_residual,
+            embedding_dim=embedding_dim
         )
-        
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss()
         
         # Store hyperparameters
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.num_classes = num_classes
+        self.mixup_alpha = mixup_alpha
+        self.use_focal_loss = use_focal_loss
+        self.focal_gamma = focal_gamma
+        self.warm_up_steps = warm_up_steps
+        self.lr_scheduler_factor = lr_scheduler_factor
+        self.lr_scheduler_patience = lr_scheduler_patience
+        
+        # Setup loss function with class weighting if provided
+        if class_weights is not None:
+            self.class_weights = torch.tensor(class_weights, dtype=torch.float32)
+        else:
+            self.class_weights = None
+            
+        # Track metrics for each class
+        self.class_names = ['Sell', 'Hold', 'Buy'] if num_classes == 3 else [f'Class_{i}' for i in range(num_classes)]
+        self.train_metrics = pl.metrics.MetricCollection({
+            'accuracy': pl.metrics.Accuracy(num_classes=num_classes, average='macro'),
+            'precision': pl.metrics.Precision(num_classes=num_classes, average='macro'),
+            'recall': pl.metrics.Recall(num_classes=num_classes, average='macro'),
+            'f1': pl.metrics.F1Score(num_classes=num_classes, average='macro')
+        })
+        self.val_metrics = self.train_metrics.clone(prefix='val_')
+        
+        # Initialize loss function
+        self._init_loss_function()
+        
+    def _init_loss_function(self):
+        """Initialize the appropriate loss function based on configuration"""
+        if self.use_focal_loss:
+            def focal_loss(logits, target):
+                # Convert logits to probabilities
+                probs = F.softmax(logits, dim=1)
+                # Get probability of correct class
+                pt = probs.gather(1, target.unsqueeze(1)).squeeze(1)
+                # Apply weights if provided
+                if self.class_weights is not None:
+                    weights = self.class_weights.to(target.device)
+                    class_weights = weights.gather(0, target)
+                    loss = -class_weights * (1 - pt) ** self.focal_gamma * torch.log(pt + 1e-10)
+                else:
+                    loss = -(1 - pt) ** self.focal_gamma * torch.log(pt + 1e-10)
+                return loss.mean()
+            
+            self.criterion = focal_loss
+        else:
+            # Standard cross entropy with optional class weights
+            self.criterion = nn.CrossEntropyLoss(
+                weight=self.class_weights if self.class_weights is not None else None
+            )
     
     def forward(self, inputs):
         """Forward pass"""
         return self.model(inputs)
     
+    def mixup_data(self, inputs, labels):
+        """Apply mixup data augmentation"""
+        if self.mixup_alpha <= 0 or not self.training:
+            return inputs, labels, labels, 1.0
+        
+        # Generate mixup coefficient
+        lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+        
+        # Get batch size
+        batch_size = labels.size(0)
+        
+        # Generate permutation
+        index = torch.randperm(batch_size).to(labels.device)
+        
+        # Mix inputs for each timeframe
+        mixed_inputs = {}
+        for tf, tensor in inputs.items():
+            mixed_inputs[tf] = lam * tensor + (1 - lam) * tensor[index]
+        
+        # Return mixed inputs and labels
+        return mixed_inputs, labels, labels[index], lam
+    
+    def mixup_criterion(self, pred, y_a, y_b, lam):
+        """Apply mixup to the criterion"""
+        return lam * self.criterion(pred, y_a) + (1 - lam) * self.criterion(pred, y_b)
+    
     def training_step(self, batch, batch_idx):
-        """Training step"""
+        """Training step with mixup data augmentation and improved logging"""
         # Remove label from inputs
         labels = batch.pop('label')
         
-        # Debug shapes only for the first batch and first epoch
-        if batch_idx == 0 and self.current_epoch == 0:
-            for tf, tensor in batch.items():
-                logger.info(f"Input tensor shape for {tf}: {tensor.shape}")
+        # Apply mixup if enabled
+        if self.mixup_alpha > 0:
+            inputs, labels_a, labels_b, lam = self.mixup_data(batch, labels)
+            outputs = self(inputs)
+            loss = self.mixup_criterion(outputs, labels_a, labels_b, lam)
+            # For metrics, use the dominant label
+            _, predicted = torch.max(outputs, 1)
+            labels_for_metrics = labels_a  # Use primary labels for metrics
+        else:
+            # Standard forward pass
+            outputs = self(batch)
+            loss = self.criterion(outputs, labels)
+            _, predicted = torch.max(outputs, 1)
+            labels_for_metrics = labels
         
-        outputs = self(batch)
-        loss = self.criterion(outputs, labels)
-        
-        # Log metrics
-        _, predicted = torch.max(outputs, 1)
-        accuracy = (predicted == labels).float().mean()
-        
+        # Update and log metrics
+        metrics = self.train_metrics(predicted, labels_for_metrics)
         self.log('train_loss', loss, prog_bar=True)
-        self.log('train_acc', accuracy, prog_bar=True)
+        self.log_dict(metrics, prog_bar=True)
+        
+        # Track per-class accuracy
+        for i, class_name in enumerate(self.class_names):
+            class_mask = labels_for_metrics == i
+            if class_mask.sum() > 0:
+                class_correct = (predicted[class_mask] == labels_for_metrics[class_mask]).float().mean()
+                self.log(f'train_acc_{class_name}', class_correct, prog_bar=False)
         
         return loss
     
     def validation_step(self, batch, batch_idx):
-        """Validation step"""
+        """Validation step with improved metrics"""
         # Remove label from inputs
         labels = batch.pop('label')
         
-        # Debug shapes only once during first epoch
-        if batch_idx == 0 and self.current_epoch == 0:
-            for tf, tensor in batch.items():
-                logger.info(f"Validation input tensor shape for {tf}: {tensor.shape}")
-        
+        # Forward pass
         outputs = self(batch)
         loss = self.criterion(outputs, labels)
         
-        # Log metrics
+        # Calculate and log metrics
         _, predicted = torch.max(outputs, 1)
-        accuracy = (predicted == labels).float().mean()
+        metrics = self.val_metrics(predicted, labels)
         
         self.log('val_loss', loss, prog_bar=True)
-        self.log('val_acc', accuracy, prog_bar=True)
+        self.log_dict(metrics, prog_bar=True)
         
-        return {'val_loss': loss, 'val_acc': accuracy}
+        # Track per-class accuracy
+        for i, class_name in enumerate(self.class_names):
+            class_mask = labels == i
+            if class_mask.sum() > 0:
+                class_correct = (predicted[class_mask] == labels[class_mask]).float().mean()
+                self.log(f'val_acc_{class_name}', class_correct, prog_bar=False)
+                
+        # Log confusion matrix every N validation steps
+        if batch_idx == 0 and self.current_epoch % 5 == 0:
+            # Create confusion matrix
+            conf_matrix = torch.zeros(self.num_classes, self.num_classes, dtype=torch.long, device=self.device)
+            for t, p in zip(labels.view(-1), predicted.view(-1)):
+                conf_matrix[t.long(), p.long()] += 1
+                
+            # Convert to numpy for logging
+            conf_matrix_np = conf_matrix.cpu().numpy()
+            
+            # Log normalized confusion matrix
+            cm_norm = conf_matrix_np / (conf_matrix_np.sum(axis=1, keepdims=True) + 1e-10)
+            
+            for i, class_name_i in enumerate(self.class_names):
+                for j, class_name_j in enumerate(self.class_names):
+                    self.logger.experiment.add_scalar(
+                        f'confusion_matrix/val_{class_name_i}_predicted_as_{class_name_j}',
+                        cm_norm[i, j],
+                        self.current_epoch
+                    )
+        
+        return {'val_loss': loss, 'val_metrics': metrics}
     
     def test_step(self, batch, batch_idx):
         """Test step"""
         # Remove label from inputs
         labels = batch.pop('label')
+        
+        # Forward pass
         outputs = self(batch)
         loss = self.criterion(outputs, labels)
         
-        # Log metrics
+        # Calculate metrics
         _, predicted = torch.max(outputs, 1)
         accuracy = (predicted == labels).float().mean()
         
         self.log('test_loss', loss)
         self.log('test_acc', accuracy)
         
-        return {'test_loss': loss, 'test_acc': accuracy}
+        # Store predictions for later analysis
+        return {
+            'test_loss': loss,
+            'test_acc': accuracy,
+            'predictions': predicted.detach(),
+            'labels': labels.detach(),
+            'outputs': outputs.detach()
+        }
     
     def configure_optimizers(self):
-        """Configure optimizers and schedulers"""
-        optimizer = optim.Adam(
+        """Configure optimizers with warmup and cosine scheduling"""
+        # Adam optimizer with weight decay
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.learning_rate,
-            weight_decay=self.weight_decay
+            weight_decay=self.weight_decay,
+            amsgrad=True
         )
         
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.5,
-            patience=5
-        )
+        # Create scheduler with warmup
+        schedulers = []
         
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "val_loss",
-                "interval": "epoch",
-                "frequency": 1
+        # Learning rate warmup
+        if self.warm_up_steps > 0:
+            warmup_scheduler = {
+                'scheduler': torch.optim.lr_scheduler.LambdaLR(
+                    optimizer,
+                    lambda epoch: min(1.0, epoch / self.warm_up_steps)
+                ),
+                'interval': 'step',
+                'frequency': 1,
+                'name': 'warmup'
             }
+            schedulers.append(warmup_scheduler)
+        
+        # LR scheduler for after warmup
+        main_scheduler = {
+            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode='min',
+                factor=self.lr_scheduler_factor,
+                patience=self.lr_scheduler_patience,
+                verbose=True
+            ),
+            "monitor": "val_loss",
+            "interval": "epoch",
+            "frequency": 1,
+            "name": "plateau"
         }
+        schedulers.append(main_scheduler)
+        
+        return [optimizer], schedulers
 
 def train_lightning_model(
     config_path: str,
