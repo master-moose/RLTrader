@@ -15,10 +15,12 @@
     "train_ratio": 0.7,
     "val_ratio": 0.15,
     "test_ratio": 0.15,
-    "shuffle": true,
+    "shuffle": false,
     "output_dir": "./data/synthetic",
     "timeframes": ["15m", "4h", "1d"],
     "create_multi_timeframe": true,
     "noise_level": 0.05,
-    "volatility_profile": "medium"
+    "volatility_profile": "medium",
+    "output_format": "hdf5",
+    "hdf5_filename": "synthetic_dataset.h5"
 } 

@@ -7,3 +7,33 @@
 2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: output/backtest
 2025-04-07 19:02:21,578 - crypto_trading_model - INFO - Created directory: logs
 2025-04-07 19:02:21,578 - crypto_trading_model - INFO - Directory setup complete.
+2025-04-07 19:10:40,549 - crypto_trading_model - INFO - Created directory: data/raw
+2025-04-07 19:10:40,558 - crypto_trading_model - INFO - Created directory: data/processed
+2025-04-07 19:10:40,558 - crypto_trading_model - INFO - Created directory: data/synthetic
+2025-04-07 19:10:40,558 - crypto_trading_model - INFO - Created directory: output/time_series
+2025-04-07 19:10:40,558 - crypto_trading_model - INFO - Created directory: output/reinforcement
+2025-04-07 19:10:40,558 - crypto_trading_model - INFO - Created directory: output/ensemble
+2025-04-07 19:10:40,558 - crypto_trading_model - INFO - Created directory: output/backtest
+2025-04-07 19:10:40,566 - crypto_trading_model - INFO - Created directory: logs
+2025-04-07 19:10:40,566 - crypto_trading_model - INFO - Directory setup complete.
+2025-04-07 19:19:35,154 - crypto_trading_model - INFO - Created directory: data/raw
+2025-04-07 19:19:35,159 - crypto_trading_model - INFO - Created directory: data/processed
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Created directory: data/synthetic
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Created directory: output/time_series
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Created directory: output/reinforcement
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Created directory: output/ensemble
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Created directory: output/backtest
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Created directory: logs
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Directory setup complete.
+2025-04-07 19:19:35,160 - crypto_trading_model - INFO - Generating 140000 samples of synthetic data...
+2025-04-07 19:19:35,269 - crypto_trading_model - INFO - Generated dataframes: 15m (140000 rows), 4h (8750 rows), 1d (1459 rows)
+2025-04-07 19:19:37,479 - crypto_trading_model - INFO - Saved 15m data to data/synthetic\synthetic_dataset_15m.csv
+2025-04-07 19:19:39,379 - crypto_trading_model - INFO - Split 15m data: train=98000, val=21000, test=21000
+2025-04-07 19:19:39,527 - crypto_trading_model - INFO - Saved 4h data to data/synthetic\synthetic_dataset_4h.csv
+2025-04-07 19:19:39,648 - crypto_trading_model - INFO - Split 4h data: train=6125, val=1312, test=1313
+2025-04-07 19:19:39,679 - crypto_trading_model - INFO - Saved 1d data to data/synthetic\synthetic_dataset_1d.csv
+2025-04-07 19:19:39,709 - crypto_trading_model - INFO - Split 1d data: train=1021, val=218, test=220
+2025-04-07 19:19:39,709 - crypto_trading_model - INFO - Synthetic data generation complete.
+2025-04-07 19:19:39,709 - crypto_trading_model - INFO - Training LSTM model...
+2025-04-07 19:19:39,709 - crypto_trading_model - INFO - LSTM model training complete. This is a placeholder.
+2025-04-07 19:19:39,709 - crypto_trading_model - INFO - Process complete.

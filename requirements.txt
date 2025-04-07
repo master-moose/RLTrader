@@ -22,7 +22,9 @@ jupyter==1.0.0
 # Data handling
 ccxt>=1.60.0       # For crypto exchange API
 pyarrow>=6.0.0     # Fast data serialization
-tables>=3.7.0      # HDF5 support
+tables==3.10.1     # HDF5 support (PyTables)
+blosc2>=2.0.0      # Compression for HDF5
+numexpr>=2.8.0     # Numerical expressions (used by PyTables)
 ta>=0.10.0         # Technical indicators
 
 # Optimization

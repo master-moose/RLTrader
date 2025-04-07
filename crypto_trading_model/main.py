@@ -51,41 +51,43 @@ def load_config(config_path):
 
 def generate_synthetic_data(config_path):
     """Generate synthetic data for training."""
+    # Use relative import for the local module
     from synthetic_data.dataset_builder import build_synthetic_dataset, save_dataset, create_train_val_test_split
     
     config = load_config(config_path)
     logger.info("Starting synthetic data generation...")
     
     # Extract configuration parameters
-    num_samples = config['data_settings']['num_samples']
-    pattern_distribution = config['data_settings']['pattern_distribution']
-    include_indicators = config['data_settings']['include_indicators']
-    output_dir = config['data_settings']['output_dir']
-    timeframes = config['timeframe_settings']['timeframes']
-    multi_timeframe = config['timeframe_settings']['multi_timeframe']
+    num_samples = config['num_samples']
+    pattern_distribution = config['pattern_distribution']
+    include_indicators = config['include_indicators']
+    output_dir = config['output_dir']
+    
+    logger.info(f"Generating {num_samples} samples with pattern distribution: {pattern_distribution}")
     
     # Generate synthetic dataset
     dataset = build_synthetic_dataset(
         num_samples=num_samples,
         pattern_distribution=pattern_distribution,
-        include_indicators=include_indicators
+        with_indicators=include_indicators
     )
     
     # Save the dataset
     save_dataset(dataset, output_dir=output_dir)
     
     # Create train/val/test splits
-    train_ratio = config['training_settings']['train_ratio']
-    val_ratio = config['training_settings']['val_ratio']
-    test_ratio = config['training_settings']['test_ratio']
-    shuffle = config['training_settings']['shuffle']
+    train_ratio = config['train_ratio']
+    val_ratio = config['val_ratio']
+    test_ratio = config['test_ratio']
+    shuffle = config['shuffle']
     
     create_train_val_test_split(
-        dataset_dir=output_dir,
+        dataset=dataset,
         train_ratio=train_ratio,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
-        shuffle=shuffle
+        shuffle=shuffle,
+        output_dir=output_dir
     )
     
     logger.info(f"Synthetic data generation complete. Data saved to {output_dir}")
@@ -93,7 +95,7 @@ def generate_synthetic_data(config_path):
 def train_time_series_model(config_path):
     """Train the time series prediction model."""
     from models.time_series.model import MultiTimeframeModel, TimeSeriesTransformer, TimeSeriesForecaster
-    from models.time_series.trainer import train_time_series_model, TimeSeriesDataset, plot_training_history
+    from models.time_series.trainer import TimeSeriesDataset, train_time_series_model, plot_training_history
     import torch
     from torch.utils.data import DataLoader
     import pandas as pd
@@ -103,36 +105,37 @@ def train_time_series_model(config_path):
     logger.info("Starting time series model training...")
     
     # Extract configuration parameters
-    data_dir = config['data_settings']['data_dir']
-    output_dir = config['data_settings']['output_dir']
-    timeframes = config['data_settings']['timeframes']
-    seq_length = config['data_settings']['sequence_length']
-    forecast_steps = config['data_settings']['forecast_steps']
+    data_path = config['data']['data_path']
+    output_dir = config['data']['output_dir']
+    timeframes = config['data']['timeframes']
+    seq_length = config['data']['sequence_length']
+    use_synthetic = config['data']['use_synthetic']
+    synthetic_path = config['data']['synthetic_path']
     
     # Model settings
-    model_type = config['model_settings']['model_type']
-    hidden_dims = config['model_settings']['hidden_dims']
-    num_layers = config['model_settings']['num_layers']
-    dropout = config['model_settings']['dropout']
-    bidirectional = config['model_settings']['bidirectional']
-    attention = config['model_settings']['attention']
-    feature_dims = config['model_settings']['feature_dims']
+    model_type = config['model']['type']
+    hidden_dims = config['model']['hidden_dims']
+    num_layers = config['model']['num_layers']
+    dropout = config['model']['dropout']
+    bidirectional = config['model']['bidirectional']
+    attention = config['model']['attention']
+    feature_dims = config['model']['feature_dims']
     
     # Training settings
-    epochs = config['training_settings']['epochs']
-    batch_size = config['training_settings']['batch_size']
-    learning_rate = config['training_settings']['learning_rate']
-    weight_decay = config['training_settings']['weight_decay']
-    patience = config['training_settings']['patience']
-    device = config['training_settings']['device']
+    epochs = config['training']['epochs']
+    batch_size = config['training']['batch_size']
+    learning_rate = config['training']['learning_rate']
+    weight_decay = config['training']['weight_decay']
+    patience = config['training']['patience']
+    device = config['training']['device']
     
     # Load data
     train_data = {}
     val_data = {}
     
     for timeframe in timeframes:
-        train_data[timeframe] = pd.read_csv(f"{data_dir}/train_{timeframe}.csv")
-        val_data[timeframe] = pd.read_csv(f"{data_dir}/val_{timeframe}.csv")
+        train_data[timeframe] = pd.read_csv(f"{data_path}/train_{timeframe}.csv")
+        val_data[timeframe] = pd.read_csv(f"{data_path}/val_{timeframe}.csv")
     
     # Create datasets
     train_dataset = TimeSeriesDataset(train_data, seq_length, forecast_steps)

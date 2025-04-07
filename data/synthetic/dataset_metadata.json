@@ -1,0 +1,45 @@
+{
+  "creation_date": "2025-04-07T19:29:09.010780",
+  "timeframes": [
+    "15m",
+    "4h",
+    "1d"
+  ],
+  "rows_per_timeframe": {
+    "15m": 140000,
+    "4h": 8750,
+    "1d": 1459
+  },
+  "columns": {
+    "15m": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "sma_7",
+      "sma_25",
+      "rsi_14"
+    ],
+    "4h": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "sma_7",
+      "sma_25",
+      "rsi_14"
+    ],
+    "1d": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume",
+      "sma_7",
+      "sma_25",
+      "rsi_14"
+    ]
+  }
+}

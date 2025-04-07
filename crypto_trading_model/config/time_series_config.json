@@ -8,7 +8,10 @@
         "synthetic_path": "./data/synthetic",
         "forecast_steps": 5,
         "threshold": 0.005,
-        "forecast_horizon": null
+        "forecast_horizon": null,
+        "target_column": "close",
+        "feature_columns": null,
+        "normalize": true
     },
     "model": {
         "type": "multi_timeframe",
@@ -21,7 +24,8 @@
             "15m": 32,
             "4h": 32,
             "1d": 32
-        }
+        },
+        "num_classes": 3
     },
     "training": {
         "epochs": 100,
