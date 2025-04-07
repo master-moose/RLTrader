@@ -271,27 +271,22 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
     else:
         # Default configuration
         config = {
-            "model_params": {
+            "model": {
                 "hidden_dims": 256,
                 "num_layers": 3,
                 "dropout": 0.3,
                 "bidirectional": True,
                 "attention": True,
-                "use_batch_norm": True,
-                "use_residual": True,
-                "embedding_dim": 64
+                "num_classes": 3
             },
-            "training_params": {
+            "training": {
                 "learning_rate": 0.0005,
                 "weight_decay": 1e-4,
-                "batch_size": 128,
-                "early_stopping_patience": 20,
-                "warm_up_steps": 100,
-                "lr_scheduler_factor": 0.5,
-                "lr_scheduler_patience": 10,
-                "mixup_alpha": 0.2,
-                "use_focal_loss": True,
-                "focal_gamma": 2.0
+                "batch_size": 128
+            },
+            "data": {
+                "train_data_path": data_paths['train_path'],
+                "val_data_path": data_paths['val_path']
             }
         }
         
@@ -324,7 +319,7 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
     # Create callbacks
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=config['training_params']['early_stopping_patience'],
+        patience=20,  # Using a fixed patience value
         mode='min'
     )
     
@@ -338,62 +333,29 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
     
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     
-    # Create logger
-    tensorboard_logger = TensorBoardLogger(
-        save_dir=os.path.join(output_dir, 'logs'),
-        name='lstm_improved'
-    )
-    
-    # Extract relevant parameters for training
-    train_data_path = data_paths['train_path']
-    val_data_path = data_paths['val_path']
-    
-    # Filter training parameters to only include those expected by train_lightning_model
-    training_params = {
-        'batch_size': config['training_params'].get('batch_size', 128),
-        'learning_rate': config['training_params'].get('learning_rate', 0.0005),
-        'weight_decay': config['training_params'].get('weight_decay', 1e-4),
-    }
-    
-    # Extract model parameters
-    model_params = config['model_params']
-    
     # Train the model
     logger.info("Starting model training...")
     try:
+        # Call train_lightning_model with the parameters it expects
         model, trainer = train_lightning_model(
-            train_data_path=train_data_path,
-            val_data_path=val_data_path,
-            output_dir=output_dir,
-            model_params=model_params,
+            config_path=config_path,
             max_epochs=max_epochs,
-            early_stopping_patience=config['training_params']['early_stopping_patience'],
-            verbose=True,
-            callbacks=[early_stopping, checkpoint_callback, lr_monitor],
-            logger=tensorboard_logger,
-            class_weights=class_weights,
-            **training_params
-        )
-    except TypeError as e:
-        logger.error(f"Error with function parameters: {str(e)}")
-        logger.info("Falling back to simpler parameter set...")
-        
-        # Fallback to a simpler parameter set if the function doesn't accept all our parameters
-        model, trainer = train_lightning_model(
-            train_data_path=train_data_path,
-            val_data_path=val_data_path,
-            output_dir=output_dir,
-            max_epochs=max_epochs,
-            early_stopping_patience=config['training_params']['early_stopping_patience'],
+            early_stopping_patience=20,
             verbose=True
         )
-    
-    # Save the model
-    model_path = os.path.join(output_dir, 'final_model.pt')
-    torch.save(model.model.state_dict(), model_path)
-    logger.info(f"Saved final model to {model_path}")
-    
-    return model
+        
+        # Save the model
+        if model:
+            model_path = os.path.join(output_dir, 'final_model.pt')
+            torch.save(model.model.state_dict(), model_path)
+            logger.info(f"Saved final model to {model_path}")
+        else:
+            logger.error("Training failed to return a valid model")
+            
+        return model
+    except Exception as e:
+        logger.error(f"Error during model training: {str(e)}")
+        return None
 
 def main():
     """Main entry point for training the improved LSTM model."""
