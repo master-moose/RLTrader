@@ -86,13 +86,13 @@ FEATURE_SETTINGS = {
 # Time Series Model Configuration
 # ---------------------------------------------------
 TIME_SERIES_SETTINGS = {
-    'sequence_length': 2016,           # Number of time steps to look back (21 days of 15-min data)
+    'sequence_length': 8640,           # Number of time steps to look back (90 days of 15-min data)
     'forecast_horizon': 5,            # Number of steps to predict ahead
     'target_column': 'close',         # Column to predict (usually 'close')
     'model_type': 'lstm',             # Model type: 'lstm', 'bilstm', 'cnn_lstm', 'attention'
-    'lstm_units': [128, 128, 64],     # Units in LSTM layers - increased capacity
-    'dense_units': [64],              # Units in Dense layers - increased capacity
-    'dropout_rate': 0.3,              # Dropout rate - increased to prevent overfitting
+    'lstm_units': [256, 256, 128, 64], # Units in LSTM layers - increased for 90-day sequences
+    'dense_units': [128, 64],         # Units in Dense layers - increased for better representation
+    'dropout_rate': 0.4,              # Dropout rate - increased to prevent overfitting with larger model
     'learning_rate': 0.001,           # Learning rate for optimizer
     'batch_size': 256,                # Batch size for training
     'epochs': 50,                     # Number of training epochs
@@ -154,7 +154,7 @@ RL_SETTINGS = {
 # Trading Environment Configuration
 # ---------------------------------------------------
 TRADING_ENV_SETTINGS = {
-    'lookback_window': 2016,         # Number of time steps observable by agent (21 days of data)
+    'lookback_window': 8640,         # Number of time steps observable by agent (90 days of data)
     'initial_balance': 10000,        # Initial account balance
     'commission': 0.001,             # Transaction cost (as fraction)
     'reward_function': 'profit_and_loss',  # Default reward function
@@ -180,7 +180,7 @@ PROGRESSIVE_LEARNING = {
     
     # Default stage configurations
     'time_series': {
-        'sequence_length': 2016,        # 21 days of 15-min data
+        'sequence_length': 8640,        # 90 days of 15-min data
         'forecast_horizon': 5,
         'target_column': 'close',
         'model_type': 'lstm',
