@@ -20,7 +20,8 @@ class MultiTimeframeModel(nn.Module):
                 num_layers: int = 2,
                 dropout: float = 0.2,
                 bidirectional: bool = True,
-                attention: bool = True):
+                attention: bool = True,
+                num_classes: int = 3):
         """
         Initialize the multi-timeframe model
         
@@ -31,6 +32,7 @@ class MultiTimeframeModel(nn.Module):
         - dropout: Dropout probability
         - bidirectional: Whether to use bidirectional LSTM/GRU
         - attention: Whether to use attention mechanism
+        - num_classes: Number of output classes (default: 3 for buy, sell, hold)
         """
         super().__init__()
         
@@ -39,6 +41,7 @@ class MultiTimeframeModel(nn.Module):
         self.bidirectional = bidirectional
         self.attention = attention
         self.num_directions = 2 if bidirectional else 1
+        self.num_classes = num_classes
         
         # Create encoder LSTMs for each timeframe
         self.encoders = nn.ModuleDict()
@@ -68,7 +71,7 @@ class MultiTimeframeModel(nn.Module):
         
         self.fc1 = nn.Linear(output_dim, hidden_dims)
         self.fc2 = nn.Linear(hidden_dims, hidden_dims // 2)
-        self.fc3 = nn.Linear(hidden_dims // 2, 3)  # 3 classes: buy, sell, hold
+        self.fc3 = nn.Linear(hidden_dims // 2, self.num_classes)  # Classes: buy, sell, hold
         
         self.dropout = nn.Dropout(dropout)
     
