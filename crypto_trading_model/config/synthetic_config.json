@@ -1,5 +1,5 @@
 {
-    "num_samples": 1000,
+    "num_samples": 140000,
     "pattern_distribution": {
         "uptrend": 0.25,
         "downtrend": 0.25,
