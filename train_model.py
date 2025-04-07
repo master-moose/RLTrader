@@ -12,6 +12,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 import tables
+import time
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(
@@ -384,24 +386,64 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     epoch_correct = 0
     epoch_total = 0
     
+    start_time = time.time()
+    
+    # Detailed timing metrics
+    timing_stats = {
+        'data_transfer': 0.0,
+        'forward_pass': 0.0,
+        'backward_pass': 0.0,
+        'optimization': 0.0
+    }
+    
+    # GPU memory tracking
+    gpu_memory_usage = []
+    
+    total_samples = 0
+    
     for batch_idx, (features, targets) in enumerate(dataloader):
+        # Track GPU memory if using CUDA
+        if device.type == 'cuda':
+            gpu_memory_usage.append(torch.cuda.memory_allocated(device) / (1024 * 1024))  # MB
+            
+        # Track number of samples
+        batch_size = targets.size(0)
+        total_samples += batch_size
+        
+        # Measure data transfer time
+        data_start = time.time()
+        
         # Move data to device
         for tf in features:
             features[tf] = features[tf].to(device)
         targets = targets.to(device)
         
+        data_end = time.time()
+        timing_stats['data_transfer'] += data_end - data_start
+        
         # Zero the gradients
         optimizer.zero_grad()
         
-        # Forward pass
+        # Forward pass - measure time
+        forward_start = time.time()
         outputs = model(features)
+        forward_end = time.time()
+        timing_stats['forward_pass'] += forward_end - forward_start
         
         # Calculate loss
         loss = criterion(outputs, targets)
         
-        # Backward pass and optimize
+        # Backward pass and optimize - measure time
+        backward_start = time.time()
         loss.backward()
+        backward_end = time.time()
+        timing_stats['backward_pass'] += backward_end - backward_start
+        
+        # Optimization step - measure time
+        optim_start = time.time()
         optimizer.step()
+        optim_end = time.time()
+        timing_stats['optimization'] += optim_end - optim_start
         
         # Track statistics
         epoch_loss += loss.item()
@@ -413,13 +455,48 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         epoch_total += targets.size(0)
         
         if batch_idx % 10 == 0:
-            logger.info(f"Batch {batch_idx}/{len(dataloader)}: Loss={loss.item():.4f}, Acc={batch_correct/targets.size(0):.4f}")
+            batch_time = time.time() - (data_start if batch_idx > 0 else start_time)
+            samples_per_sec = batch_size / (batch_time / 10 if batch_idx % 10 == 0 else batch_time)
+            
+            # Add GPU info if available
+            gpu_info = ""
+            if device.type == 'cuda':
+                gpu_info = f", GPU Mem: {torch.cuda.memory_allocated(device) / (1024 * 1024):.1f}MB"
+                
+            logger.info(f"Batch {batch_idx}/{len(dataloader)}: Loss={loss.item():.4f}, "
+                       f"Acc={batch_correct/targets.size(0):.4f}, "
+                       f"Throughput={samples_per_sec:.1f} samples/sec{gpu_info}")
     
     # Calculate epoch metrics
     avg_loss = epoch_loss / len(dataloader)
     accuracy = epoch_correct / epoch_total
     
-    return avg_loss, accuracy
+    end_time = time.time()
+    epoch_time = end_time - start_time
+    
+    # Calculate throughput
+    throughput = total_samples / epoch_time
+    
+    # Add GPU stats if available
+    gpu_stats = {}
+    if device.type == 'cuda':
+        gpu_stats = {
+            'avg_memory_usage_mb': sum(gpu_memory_usage) / len(gpu_memory_usage) if gpu_memory_usage else 0,
+            'peak_memory_usage_mb': max(gpu_memory_usage) if gpu_memory_usage else 0,
+            'gpu_utilization': None  # Placeholder, not easily accessible from PyTorch
+        }
+        # Log GPU memory usage
+        logger.info(f"GPU Memory: Avg={gpu_stats['avg_memory_usage_mb']:.1f}MB, Peak={gpu_stats['peak_memory_usage_mb']:.1f}MB")
+    
+    # Log timing breakdown
+    logger.info(f"Epoch time breakdown: "
+               f"Data transfer: {timing_stats['data_transfer']:.2f}s ({timing_stats['data_transfer']/epoch_time*100:.1f}%), "
+               f"Forward: {timing_stats['forward_pass']:.2f}s ({timing_stats['forward_pass']/epoch_time*100:.1f}%), "
+               f"Backward: {timing_stats['backward_pass']:.2f}s ({timing_stats['backward_pass']/epoch_time*100:.1f}%), "
+               f"Optimization: {timing_stats['optimization']:.2f}s ({timing_stats['optimization']/epoch_time*100:.1f}%)")
+    logger.info(f"Overall throughput: {throughput:.2f} samples/second")
+    
+    return avg_loss, accuracy, epoch_time, throughput, timing_stats, gpu_stats if device.type == 'cuda' else None
 
 def validate(model, dataloader, criterion, device):
     """Validate the model"""
@@ -428,8 +505,15 @@ def validate(model, dataloader, criterion, device):
     val_correct = 0
     val_total = 0
     
+    start_time = time.time()
+    total_samples = 0
+    
     with torch.no_grad():
         for features, targets in dataloader:
+            # Track number of samples
+            batch_size = targets.size(0)
+            total_samples += batch_size
+            
             # Move data to device
             for tf in features:
                 features[tf] = features[tf].to(device)
@@ -452,7 +536,14 @@ def validate(model, dataloader, criterion, device):
     avg_loss = val_loss / len(dataloader)
     accuracy = val_correct / val_total
     
-    return avg_loss, accuracy
+    end_time = time.time()
+    val_time = end_time - start_time
+    
+    # Calculate throughput
+    throughput = total_samples / val_time
+    logger.info(f"Validation throughput: {throughput:.2f} samples/second")
+    
+    return avg_loss, accuracy, val_time, throughput
 
 def train_model(config_path="crypto_trading_model/config/time_series_config.json"):
     """Train the time series model using parameters from config file"""
@@ -531,6 +622,11 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     
     model.to(device)
     
+    # Count model parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+    
     # Setup loss and optimizer
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -549,24 +645,49 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     best_model_state = None
     no_improve_epochs = 0
     
+    # Performance metrics tracking
+    total_training_time = 0
+    throughput_history = {
+        'train': [],
+        'val': []
+    }
+    
     # Training loop
     history = {
         'train_loss': [],
         'train_acc': [],
         'val_loss': [],
-        'val_acc': []
+        'val_acc': [],
+        'train_time': [],
+        'val_time': [],
+        'train_throughput': [],
+        'val_throughput': []
     }
     
+    # Track timing of each phase
+    timing_breakdown = defaultdict(list)
+    
+    # Record training start time
+    training_start_time = time.time()
+    
     for epoch in range(1, epochs + 1):
+        epoch_start_time = time.time()
         logger.info(f"Epoch {epoch}/{epochs}")
         
         # Train
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-        logger.info(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
+        train_result = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc, train_time, train_throughput, train_timing, gpu_stats = (
+            train_result if len(train_result) == 6 else train_result + (None,)
+        )
+        logger.info(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Train Time: {train_time:.2f} seconds, Train Throughput: {train_throughput:.2f} samples/second")
+        
+        # Save timing breakdown
+        for key, value in train_timing.items():
+            timing_breakdown[f'train_{key}'].append(value)
         
         # Validate
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
-        logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        val_loss, val_acc, val_time, val_throughput = validate(model, val_loader, criterion, device)
+        logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val Time: {val_time:.2f} seconds, Val Throughput: {val_throughput:.2f} samples/second")
         
         # Update learning rate
         scheduler.step(val_loss)
@@ -576,6 +697,18 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         history['train_acc'].append(train_acc)
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
+        history['train_time'].append(train_time)
+        history['val_time'].append(val_time)
+        history['train_throughput'].append(train_throughput)
+        history['val_throughput'].append(val_throughput)
+        
+        # Update throughput history
+        throughput_history['train'].append(train_throughput)
+        throughput_history['val'].append(val_throughput)
+        
+        # Track total training time
+        epoch_time = time.time() - epoch_start_time
+        total_training_time += epoch_time
         
         # Check for improvement
         if val_loss < best_val_loss:
@@ -591,6 +724,17 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         if no_improve_epochs >= patience:
             logger.info(f"Early stopping triggered after {epoch} epochs")
             break
+    
+    # Calculate training statistics
+    total_time = time.time() - training_start_time
+    avg_epoch_time = total_training_time / epoch
+    avg_train_throughput = sum(throughput_history['train']) / len(throughput_history['train'])
+    avg_val_throughput = sum(throughput_history['val']) / len(throughput_history['val'])
+    
+    logger.info(f"Training completed in {total_time:.2f} seconds")
+    logger.info(f"Average epoch time: {avg_epoch_time:.2f} seconds")
+    logger.info(f"Average training throughput: {avg_train_throughput:.2f} samples/second")
+    logger.info(f"Average validation throughput: {avg_val_throughput:.2f} samples/second")
     
     # Load best model
     if best_model_state is not None:
@@ -624,13 +768,99 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         json.dump(serializable_history, f, indent=2)
     logger.info(f"Training history saved to {history_path}")
     
+    # Save throughput metrics
+    throughput_path = os.path.join(output_dir, 'throughput_metrics.json')
+    with open(throughput_path, 'w') as f:
+        throughput_metrics = {
+            'avg_train_throughput': float(avg_train_throughput),
+            'avg_val_throughput': float(avg_val_throughput),
+            'train_throughput_history': [float(t) for t in throughput_history['train']],
+            'val_throughput_history': [float(t) for t in throughput_history['val']],
+            'total_training_time': float(total_time),
+            'avg_epoch_time': float(avg_epoch_time),
+            'timing_breakdown': {k: [float(v) for v in vals] for k, vals in timing_breakdown.items()},
+            'gpu_stats': gpu_stats if device.type == 'cuda' else None
+        }
+        json.dump(throughput_metrics, f, indent=2)
+    logger.info(f"Throughput metrics saved to {throughput_path}")
+    
     return model, history
+
+def visualize_throughput(metrics_path, output_dir):
+    """
+    Visualize throughput metrics from training
+    
+    Parameters:
+    - metrics_path: Path to the throughput metrics JSON file
+    - output_dir: Directory to save the plots
+    """
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Load metrics
+        with open(metrics_path, 'r') as f:
+            metrics = json.load(f)
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Plot throughput history
+        plt.figure(figsize=(10, 6))
+        plt.plot(metrics['train_throughput_history'], label='Training')
+        plt.plot(metrics['val_throughput_history'], label='Validation')
+        plt.xlabel('Epoch')
+        plt.ylabel('Samples/second')
+        plt.title('Training Throughput')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(output_dir, 'throughput_history.png'))
+        
+        # Plot timing breakdown
+        if 'timing_breakdown' in metrics:
+            # Calculate average time per category
+            avg_timing = {
+                k.replace('train_', ''): sum(v) / len(v)
+                for k, v in metrics['timing_breakdown'].items()
+            }
+            
+            # Plot pie chart of time distribution
+            plt.figure(figsize=(10, 10))
+            plt.pie(
+                avg_timing.values(),
+                labels=avg_timing.keys(),
+                autopct='%1.1f%%',
+                startangle=90
+            )
+            plt.axis('equal')
+            plt.title('Training Time Breakdown')
+            plt.savefig(os.path.join(output_dir, 'time_breakdown.png'))
+        
+        # Plot GPU metrics if available
+        if metrics.get('gpu_stats') and isinstance(metrics['gpu_stats'], dict):
+            plt.figure(figsize=(10, 6))
+            
+            # If we have memory usage data
+            if 'avg_memory_usage_mb' in metrics['gpu_stats']:
+                plt.bar(['Average', 'Peak'], 
+                       [metrics['gpu_stats']['avg_memory_usage_mb'], 
+                        metrics['gpu_stats']['peak_memory_usage_mb']])
+                plt.ylabel('Memory Usage (MB)')
+                plt.title('GPU Memory Usage')
+                plt.savefig(os.path.join(output_dir, 'gpu_memory.png'))
+        
+        logger.info(f"Throughput visualizations saved to {output_dir}")
+    except ImportError:
+        logger.warning("Matplotlib not installed, skipping visualization")
+    except Exception as e:
+        logger.error(f"Error creating visualizations: {str(e)}")
 
 def main():
     """Main entry point for model training."""
     parser = argparse.ArgumentParser(description="Train time series model for cryptocurrency trading")
     parser.add_argument("--config", type=str, default="crypto_trading_model/config/time_series_config.json",
                       help="Path to configuration file")
+    parser.add_argument("--visualize", action="store_true", 
+                      help="Generate visualizations of throughput metrics")
     
     args = parser.parse_args()
     
@@ -639,6 +869,13 @@ def main():
     
     # Train the model
     model, history = train_model(args.config)
+    
+    # Generate visualizations if requested
+    if args.visualize:
+        config = load_config(args.config)
+        output_dir = config['data']['output_dir']
+        metrics_path = os.path.join(output_dir, 'throughput_metrics.json')
+        visualize_throughput(metrics_path, os.path.join(output_dir, 'visualizations'))
     
     logger.info("Model training complete.")
 
