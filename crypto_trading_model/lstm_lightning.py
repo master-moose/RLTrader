@@ -372,12 +372,25 @@ def train_lightning_model(
                             self.timeframes[tf] = []
                         self.timeframes[tf].append(feature)
                 
-                logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())}")
+                # Verify all features have the same length as labels
+                self.data_length = len(labels)
+                for key, tensor in data.items():
+                    if len(tensor) != self.data_length:
+                        logger.warning(f"Feature {key} has length {len(tensor)}, but labels has length {self.data_length}. Truncating.")
+                        # Truncate to the smaller size to avoid index errors
+                        if len(tensor) > self.data_length:
+                            self.data[key] = tensor[:self.data_length]
+                
+                logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
             
             def __len__(self):
-                return len(self.labels)
+                return self.data_length
             
             def __getitem__(self, idx):
+                # Ensure index is in bounds
+                if idx >= self.data_length:
+                    raise IndexError(f"Index {idx} is out of bounds for dataset with length {self.data_length}")
+                
                 # Organize data by timeframe for model consumption
                 sample = {}
                 for tf in self.timeframes:
