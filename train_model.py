@@ -16,6 +16,23 @@ import time
 from collections import defaultdict
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
+# Try to import CuPy for GPU accelerated array operations if CUDA is available
+try:
+    import cupy as cp
+    HAS_CUPY = True
+    logger_message = "CuPy imported successfully, will use GPU-accelerated array operations"
+except ImportError:
+    HAS_CUPY = False
+    cp = np  # Fallback to NumPy
+    logger_message = "CuPy not available, falling back to NumPy"
+
+# Function to use the appropriate array library based on device
+def get_array_module(device):
+    """Return the appropriate array module (NumPy or CuPy) based on device"""
+    if device.type == 'cuda' and HAS_CUPY:
+        return cp
+    return np
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -57,7 +74,8 @@ class TimeSeriesDataset(Dataset):
                  sequence_length: dict = None,
                  target_column: str = 'close',
                  feature_columns: list = None,
-                 normalize: bool = True):
+                 normalize: bool = True,
+                 use_cupy: bool = None):
         """
         Initialize the dataset
         
@@ -68,9 +86,15 @@ class TimeSeriesDataset(Dataset):
         - target_column: Column to use as the prediction target
         - feature_columns: List of columns to use as features (None = use all)
         - normalize: Whether to normalize the features
+        - use_cupy: Whether to use CuPy for computations (None = auto-detect)
         """
         self.data_path = data_path
         self.timeframes = timeframes
+        
+        # Determine whether to use CuPy
+        self.use_cupy = use_cupy if use_cupy is not None else HAS_CUPY
+        # Get appropriate array module
+        self.xp = cp if self.use_cupy and HAS_CUPY else np
         
         # Handle sequence_length as either dict or int
         if isinstance(sequence_length, dict):
@@ -91,6 +115,10 @@ class TimeSeriesDataset(Dataset):
             # Check available timeframes in the store
             available_timeframes = [key[1:] for key in store.keys()]  # Remove leading '/'
             logger.info(f"Available timeframes in {data_path}: {available_timeframes}")
+            
+            # Log CuPy usage
+            if self.use_cupy and HAS_CUPY:
+                logger.info("Using CuPy for data normalization")
             
             # Load each requested timeframe
             for tf in timeframes:
@@ -126,10 +154,22 @@ class TimeSeriesDataset(Dataset):
                         for col in df.columns:
                             # Skip timestamp columns and any non-numeric columns
                             if col not in ['timestamp', 'time_col'] and np.issubdtype(df[col].dtype, np.number):
-                                mean = df[col].mean()
-                                std = df[col].std()
-                                if std > 0:
-                                    df[col] = (df[col] - mean) / std
+                                # Use CuPy if available for normalization
+                                if self.use_cupy and HAS_CUPY:
+                                    # Convert to CuPy array for processing
+                                    values = cp.array(df[col].values)
+                                    mean = cp.mean(values)
+                                    std = cp.std(values)
+                                    if std > 0:
+                                        normalized = (values - mean) / std
+                                        # Convert back to numpy for pandas
+                                        df[col] = cp.asnumpy(normalized)
+                                else:
+                                    # Use pandas/numpy directly
+                                    mean = df[col].mean()
+                                    std = df[col].std()
+                                    if std > 0:
+                                        df[col] = (df[col] - mean) / std
                     
                     self.data[tf] = df
                 else:
@@ -209,12 +249,12 @@ class TimeSeriesDataset(Dataset):
         
         return sequences, torch.tensor(primary_target, dtype=torch.long)
 
-def create_dataloaders(train_path, val_path, batch_size=32, **dataset_kwargs):
+def create_dataloaders(train_path, val_path, batch_size=32, use_cupy=None, **dataset_kwargs):
     """Create DataLoader objects for training and validation"""
     
-    # Create datasets
-    train_dataset = TimeSeriesDataset(train_path, **dataset_kwargs)
-    val_dataset = TimeSeriesDataset(val_path, **dataset_kwargs)
+    # Create datasets with CuPy option
+    train_dataset = TimeSeriesDataset(train_path, use_cupy=use_cupy, **dataset_kwargs)
+    val_dataset = TimeSeriesDataset(val_path, use_cupy=use_cupy, **dataset_kwargs)
     
     # Determine number of workers based on system CPU count
     num_workers = min(os.cpu_count() - 1, 16)  # Use n-1 CPUs, max 16
@@ -562,7 +602,7 @@ def validate(model, dataloader, criterion, device):
     accuracy = val_correct / val_total
     
     # Calculate trading-specific metrics
-    metrics = calculate_trading_metrics(all_predictions, all_targets)
+    metrics = calculate_trading_metrics(all_predictions, all_targets, device)
     
     end_time = time.time()
     val_time = end_time - start_time
@@ -587,42 +627,75 @@ def validate(model, dataloader, criterion, device):
     
     return avg_loss, accuracy, val_time, throughput, metrics
 
-def calculate_trading_metrics(predictions, targets):
+def calculate_trading_metrics(predictions, targets, device=None):
     """
     Calculate trading-specific metrics
     
     Parameters:
     - predictions: List of model predictions (0=hold, 1=buy, 2=sell)
     - targets: List of actual targets
+    - device: The torch device being used (to determine whether to use CuPy)
     
     Returns:
     - Dictionary of metrics
     """
-    # Convert inputs to numpy arrays if they're not already
-    predictions = np.array(predictions)
-    targets = np.array(targets)
+    # Get the appropriate array module
+    xp = get_array_module(device) if device else np
     
-    # Calculate precision, recall, and F1 score (macro average)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        targets, predictions, average='macro', zero_division=0
-    )
+    # Convert inputs to appropriate array type
+    predictions = xp.array(predictions)
+    targets = xp.array(targets)
     
-    # Get unique classes present in the data
-    unique_classes = np.unique(np.concatenate([predictions, targets]))
+    # If using CuPy, need to convert back to NumPy for sklearn metrics
+    if xp is cp:
+        # Move arrays to CPU to use sklearn
+        np_predictions = cp.asnumpy(predictions)
+        np_targets = cp.asnumpy(targets)
+        
+        # Calculate sklearn metrics with NumPy arrays
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            np_targets, np_predictions, average='macro', zero_division=0
+        )
+        
+        # Calculate confusion matrix
+        conf_matrix = confusion_matrix(np_targets, np_predictions)
+        conf_matrix = xp.array(conf_matrix)  # Convert back to CuPy if needed
+        
+        # Get unique classes
+        unique_classes = xp.unique(xp.concatenate([predictions, targets]))
+    else:
+        # Using NumPy directly
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            targets, predictions, average='macro', zero_division=0
+        )
+        
+        # Calculate confusion matrix
+        conf_matrix = confusion_matrix(targets, predictions)
+        
+        # Get unique classes
+        unique_classes = xp.unique(xp.concatenate([predictions, targets]))
     
     # Calculate class-specific accuracy
-    conf_matrix = confusion_matrix(targets, predictions)
-    with np.errstate(divide='ignore', invalid='ignore'):
+    with xp.errstate(divide='ignore', invalid='ignore'):
         class_accuracy = conf_matrix.diagonal() / conf_matrix.sum(axis=1)
     
     # Replace NaN values (from division by zero) with zero
-    class_accuracy = np.nan_to_num(class_accuracy)
+    class_accuracy = xp.nan_to_num(class_accuracy)
     
     # Calculate additional trading metrics
     # A basic trading score: higher weight for correctly predicting buy/sell signals
     # and lower penalty for mispredicting hold signals
     trading_score = 0
-    for pred, target in zip(predictions, targets):
+    
+    # Convert to numpy or CPU if needed for iteration
+    if xp is cp:
+        iter_predictions = cp.asnumpy(predictions)
+        iter_targets = cp.asnumpy(targets)
+    else:
+        iter_predictions = predictions
+        iter_targets = targets
+        
+    for pred, target in zip(iter_predictions, iter_targets):
         if pred == target:
             if target in [1, 2]:  # Buy or Sell
                 trading_score += 2  # Higher weight for correct buy/sell
@@ -638,6 +711,11 @@ def calculate_trading_metrics(predictions, targets):
     
     trading_score = trading_score / len(predictions)
     
+    # Convert to CPU for serialization if using CuPy
+    if xp is cp:
+        class_accuracy = cp.asnumpy(class_accuracy)
+        unique_classes = cp.asnumpy(unique_classes)
+    
     # Convert numpy arrays to lists for JSON serialization
     return {
         'precision': float(precision),
@@ -645,7 +723,7 @@ def calculate_trading_metrics(predictions, targets):
         'f1': float(f1),
         'trading_score': float(trading_score),
         'class_accuracy': class_accuracy,  # Will be converted to list during JSON serialization
-        'unique_classes': unique_classes.tolist()
+        'unique_classes': unique_classes.tolist() if hasattr(unique_classes, 'tolist') else list(unique_classes)
     }
 
 def check_gpu_availability():
@@ -657,6 +735,18 @@ def check_gpu_availability():
         
         logger.info(f"GPU detected: {gpu_name} (CUDA {cuda_version})")
         logger.info(f"Number of GPUs available: {gpu_count}")
+        
+        # Log CuPy availability
+        if HAS_CUPY:
+            logger.info("CuPy is available and will be used for GPU-accelerated array operations")
+            # Log CuPy version if possible
+            try:
+                cupy_version = cp.__version__
+                logger.info(f"CuPy version: {cupy_version}")
+            except:
+                logger.info("CuPy version information unavailable")
+        else:
+            logger.info("CuPy is not available, using NumPy for array operations")
         
         # Get memory info if possible
         try:
@@ -727,13 +817,32 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     
     logger.info(f"Training with data: {train_path}, {val_path}")
     
-    # Create dataloaders
+    # Setup device - use CUDA if available and configured, else CPU
+    if device_cfg == 'cuda' and torch.cuda.is_available():
+        device = torch.device('cuda')
+        logger.info("Using CUDA for training")
+        # Use CuPy for array operations if available
+        use_cupy = HAS_CUPY
+        if use_cupy:
+            logger.info("CuPy will be used for array operations")
+        else:
+            logger.info("CuPy not available, using NumPy for array operations")
+    else:
+        device = torch.device('cpu')
+        use_cupy = False  # Don't use CuPy with CPU
+        if device_cfg == 'cuda' and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available, falling back to CPU")
+        else:
+            logger.info("Using CPU for training")
+    
+    # Create dataloaders with CuPy option
     train_loader, val_loader = create_dataloaders(
         train_path=train_path,
         val_path=val_path,
         batch_size=batch_size,
         timeframes=timeframes,
-        sequence_length=seq_length
+        sequence_length=seq_length,
+        use_cupy=use_cupy
     )
     
     # Create model
@@ -753,17 +862,6 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     else:
         logger.error(f"Unsupported model type: {model_type}")
         sys.exit(1)
-    
-    # Setup device - use CUDA if available and configured, else CPU
-    if device_cfg == 'cuda' and torch.cuda.is_available():
-        device = torch.device('cuda')
-        logger.info("Using CUDA for training")
-    else:
-        device = torch.device('cpu')
-        if device_cfg == 'cuda' and not torch.cuda.is_available():
-            logger.warning("CUDA requested but not available, falling back to CPU")
-        else:
-            logger.info("Using CPU for training")
     
     model.to(device)
     

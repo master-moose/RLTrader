@@ -18,6 +18,7 @@ optuna==3.2.0
 tensorboard==2.13.0
 pyyaml==6.0
 jupyter==1.0.0
+cupy-cuda12x
 
 # Data handling
 ccxt>=1.60.0       # For crypto exchange API
