@@ -18,8 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('model_training.log')
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger('crypto_trading_model.training')
@@ -75,6 +74,8 @@ class TimeSeriesDataset(Dataset):
         
         # Load data from HDF5 file
         self.data = {}
+        timestamps = {}
+        
         with pd.HDFStore(data_path, mode='r') as store:
             # Check available timeframes in the store
             available_timeframes = [key[1:] for key in store.keys()]  # Remove leading '/'
@@ -85,6 +86,17 @@ class TimeSeriesDataset(Dataset):
                 if f'/{tf}' in store:
                     # Load the dataframe
                     df = store[f'/{tf}']
+                    
+                    # Ensure timestamp column exists for alignment
+                    if 'timestamp' not in df.columns:
+                        logger.warning(f"No timestamp column in {tf} data, using index as timestamp")
+                        # Use a different name to prevent ambiguity with index
+                        df['time_col'] = df.index
+                        timestamps[tf] = set(df['time_col'])
+                    else:
+                        timestamps[tf] = set(df['timestamp'])
+                    
+                    # Store timestamps for alignment
                     
                     # Select feature columns if specified
                     if feature_columns is not None:
@@ -101,7 +113,8 @@ class TimeSeriesDataset(Dataset):
                     # Normalize if requested
                     if normalize:
                         for col in df.columns:
-                            if col != 'timestamp':  # Don't normalize timestamp
+                            # Skip timestamp columns and any non-numeric columns
+                            if col not in ['timestamp', 'time_col'] and np.issubdtype(df[col].dtype, np.number):
                                 mean = df[col].mean()
                                 std = df[col].std()
                                 if std > 0:
@@ -110,6 +123,29 @@ class TimeSeriesDataset(Dataset):
                     self.data[tf] = df
                 else:
                     logger.warning(f"Timeframe '{tf}' not found in {data_path}")
+        
+        # Find common timestamps across all timeframes for alignment
+        if len(timestamps) > 0:
+            common_timestamps = set.intersection(*timestamps.values())
+            logger.info(f"Found {len(common_timestamps)} common timestamps across all timeframes")
+            
+            # Filter data to only include common timestamps
+            for tf in self.data:
+                df = self.data[tf]
+                # Use the appropriate timestamp column name
+                time_col = 'time_col' if 'time_col' in df.columns else 'timestamp'
+                
+                # Filter to common timestamps
+                self.data[tf] = df[df[time_col].isin(common_timestamps)]
+                
+                # Sort by timestamp
+                self.data[tf] = self.data[tf].sort_values(time_col)
+                
+                # Remove timestamp columns before modeling to avoid issues
+                if 'time_col' in self.data[tf].columns:
+                    self.data[tf] = self.data[tf].drop(columns=['time_col'])
+                if 'timestamp' in self.data[tf].columns:
+                    self.data[tf] = self.data[tf].drop(columns=['timestamp'])
         
         # Calculate valid indices (ensuring we have enough sequential data)
         min_length = min(len(df) for df in self.data.values())
@@ -165,18 +201,27 @@ def create_dataloaders(train_path, val_path, batch_size=32, **dataset_kwargs):
     train_dataset = TimeSeriesDataset(train_path, **dataset_kwargs)
     val_dataset = TimeSeriesDataset(val_path, **dataset_kwargs)
     
+    # Determine number of workers based on system CPU count
+    num_workers = min(os.cpu_count() - 1, 16)  # Use n-1 CPUs, max 16
+    logger.info(f"Using {num_workers} worker processes for data loading")
+    
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0  # Increase for faster loading if CPU has multiple cores
+        num_workers=num_workers,
+        pin_memory=True,  # Faster data transfer to GPU
+        persistent_workers=True if num_workers > 0 else False  # Keep workers alive between epochs
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False
     )
     
     return train_loader, val_loader
@@ -234,21 +279,29 @@ class MultiTimeframeModel(torch.nn.Module):
         
         # Attention mechanism
         if attention:
-            attn_dim = hidden_dims * self.num_directions
-            self.attn_weights = torch.nn.ParameterDict()
+            # Simplified attention mechanism
+            self.attn_hidden_dim = hidden_dims * self.num_directions
             
-            # Create attention weights for each timeframe
+            # Query vectors for each timeframe
+            self.query_vectors = torch.nn.ParameterDict()
             for tf in self.timeframes:
-                self.attn_weights[tf] = torch.nn.Parameter(torch.randn(attn_dim, attn_dim))
-                
-            self.attn_combine = torch.nn.Linear(len(self.timeframes) * attn_dim, attn_dim)
+                self.query_vectors[tf] = torch.nn.Parameter(torch.randn(self.attn_hidden_dim))
+            
+            # Attention projection
+            self.attention_projection = torch.nn.Linear(
+                self.attn_hidden_dim * len(self.timeframes), 
+                self.attn_hidden_dim
+            )
         
         # Output layers
-        output_dim = hidden_dims * self.num_directions * (1 if attention else len(self.timeframes))
+        if attention:
+            output_dim = self.attn_hidden_dim
+        else:
+            output_dim = self.attn_hidden_dim * len(self.timeframes)
         
         self.fc1 = torch.nn.Linear(output_dim, hidden_dims)
         self.fc2 = torch.nn.Linear(hidden_dims, hidden_dims // 2)
-        self.fc3 = torch.nn.Linear(hidden_dims // 2, num_classes)  # 3 classes: buy, hold, sell
+        self.fc3 = torch.nn.Linear(hidden_dims // 2, num_classes)
         
         self.dropout = torch.nn.Dropout(dropout)
     
@@ -292,35 +345,27 @@ class MultiTimeframeModel(torch.nn.Module):
         
         # Apply attention mechanism if enabled
         if self.attention:
-            # Calculate attention scores between timeframes
-            attn_applied = []
+            # Calculate attention scores for each timeframe
+            attended_encodings = []
             
-            for tf1 in self.timeframes:
-                # Apply attention between current timeframe and all others
-                attended_vector = encoded_timeframes[tf1]
+            for tf in self.timeframes:
+                # Compute attention scores between query vector and encoded timeframe
+                encoding = encoded_timeframes[tf]
+                query = self.query_vectors[tf].unsqueeze(0).expand(encoding.size(0), -1)
                 
-                for tf2 in self.timeframes:
-                    if tf1 != tf2:
-                        # Calculate attention score
-                        attn_weight = self.attn_weights[tf1]
-                        attn_score = torch.matmul(
-                            encoded_timeframes[tf2], 
-                            torch.matmul(attn_weight, encoded_timeframes[tf1].unsqueeze(2))
-                        ).squeeze(2)
-                        
-                        # Apply attention score
-                        attn_score = torch.nn.functional.softmax(attn_score, dim=1).unsqueeze(1)
-                        attended = torch.bmm(attn_score, encoded_timeframes[tf2].unsqueeze(2)).squeeze(2)
-                        
-                        # Update the attended vector
-                        attended_vector = attended_vector + attended
+                # Simple dot-product attention
+                attention_score = torch.sum(query * encoding, dim=1, keepdim=True)
+                attention_weights = torch.nn.functional.softmax(attention_score, dim=0)
                 
-                attn_applied.append(attended_vector)
+                # Apply attention weights
+                attended = attention_weights * encoding
+                attended_encodings.append(attended)
             
-            # Combine attended vectors
-            combined = torch.cat(attn_applied, dim=1)
-            combined = self.attn_combine(combined)
+            # Concatenate all attended vectors
+            concat_encodings = torch.cat(attended_encodings, dim=1)
             
+            # Project to final representation
+            combined = self.attention_projection(concat_encodings)
         else:
             # Simple concatenation of all timeframe encodings
             combined = torch.cat([encoded_timeframes[tf] for tf in self.timeframes], dim=1)
@@ -460,6 +505,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     
     # Create model
     input_dims = {tf: feature_dims[tf] for tf in timeframes}
+    num_classes = config['model']['num_classes']
     
     if model_type == 'multi_timeframe':
         model = MultiTimeframeModel(
@@ -468,7 +514,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
             num_layers=num_layers,
             dropout=dropout,
             bidirectional=bidirectional,
-            attention=attention
+            attention=attention,
+            num_classes=num_classes
         )
     else:
         logger.error(f"Unsupported model type: {model_type}")

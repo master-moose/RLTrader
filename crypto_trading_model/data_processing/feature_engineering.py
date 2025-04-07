@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import talib
+import pandas_ta as ta
 from typing import Dict, List, Union, Optional
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -17,52 +17,42 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
     
     # Basic moving averages
-    result['sma_7'] = talib.SMA(df['close'], timeperiod=7)
-    result['sma_25'] = talib.SMA(df['close'], timeperiod=25)
-    result['sma_99'] = talib.SMA(df['close'], timeperiod=99)
-    result['ema_9'] = talib.EMA(df['close'], timeperiod=9)
-    result['ema_21'] = talib.EMA(df['close'], timeperiod=21)
+    result['sma_7'] = ta.sma(df['close'], length=7)
+    result['sma_25'] = ta.sma(df['close'], length=25)
+    result['sma_99'] = ta.sma(df['close'], length=99)
+    result['ema_9'] = ta.ema(df['close'], length=9)
+    result['ema_21'] = ta.ema(df['close'], length=21)
     
     # Oscillators
-    result['rsi_14'] = talib.RSI(df['close'], timeperiod=14)
+    result['rsi_14'] = ta.rsi(df['close'], length=14)
     
     # MACD
-    macd, macd_signal, macd_hist = talib.MACD(df['close'], 
-                                              fastperiod=12, 
-                                              slowperiod=26, 
-                                              signalperiod=9)
-    result['macd'] = macd
-    result['macd_signal'] = macd_signal
-    result['macd_hist'] = macd_hist
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    result['macd'] = macd['MACD_12_26_9']
+    result['macd_signal'] = macd['MACDs_12_26_9']
+    result['macd_hist'] = macd['MACDh_12_26_9']
     
     # Bollinger Bands
-    upper, middle, lower = talib.BBANDS(df['close'], 
-                                        timeperiod=20, 
-                                        nbdevup=2, 
-                                        nbdevdn=2, 
-                                        matype=0)
-    result['bb_upper'] = upper
-    result['bb_middle'] = middle
-    result['bb_lower'] = lower
+    bbands = ta.bbands(df['close'], length=20, std=2)
+    result['bb_upper'] = bbands['BBU_20_2.0']
+    result['bb_middle'] = bbands['BBM_20_2.0']
+    result['bb_lower'] = bbands['BBL_20_2.0']
     
     # Volume indicators
-    result['obv'] = talib.OBV(df['close'], df['volume'])
+    result['obv'] = ta.obv(df['close'], df['volume'])
     result['vwap'] = calculate_vwap(df)
     
     # Volatility indicators
-    result['atr_14'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+    result['atr_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     
     # Momentum indicators
-    result['adx_14'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
-    result['cci_14'] = talib.CCI(df['high'], df['low'], df['close'], timeperiod=14)
-    result['stoch_k'], result['stoch_d'] = talib.STOCH(df['high'], 
-                                                       df['low'], 
-                                                       df['close'],
-                                                       fastk_period=14,
-                                                       slowk_period=3,
-                                                       slowk_matype=0,
-                                                       slowd_period=3,
-                                                       slowd_matype=0)
+    adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+    result['adx_14'] = adx['ADX_14']
+    result['cci_14'] = ta.cci(df['high'], df['low'], df['close'], length=14)
+    
+    stoch = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
+    result['stoch_k'] = stoch['STOCHk_14_3_3']
+    result['stoch_d'] = stoch['STOCHd_14_3_3']
     
     # Support/resistance levels
     result['pivot_point'] = calculate_pivot_points(df)

@@ -135,7 +135,7 @@ Major dependencies include:
 - PyTorch
 - Pandas
 - NumPy
-- TA-Lib (for technical indicators)
+- pandas-ta (for technical indicators)
 - Gymnasium (for reinforcement learning)
 
 For a complete list, see `requirements.txt`.

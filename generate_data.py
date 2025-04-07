@@ -147,14 +147,86 @@ def generate_synthetic_data(num_samples=140000, output_dir='data/synthetic', con
     
     logger.info(f"Generated dataframes: 15m ({len(df_15m)} rows), 4h ({len(df_4h)} rows), 1d ({len(df_1d)} rows)")
     
-    # Add simple indicators
+    # Add comprehensive set of indicators
     if include_indicators:
         for df in [df_15m, df_4h, df_1d]:
+            # Basic OHLCV features (5 features)
+            # 'open', 'high', 'low', 'close', 'volume' are already in the DataFrame
+            
+            # Trend indicators (7 features)
             df['sma_7'] = df['close'].rolling(7).mean()
             df['sma_25'] = df['close'].rolling(25).mean()
-            df['rsi_14'] = 50 + np.random.normal(0, 10, len(df))  # Random RSI
-            df['rsi_14'] = df['rsi_14'].clip(0, 100)  # Clip to valid range
-    
+            df['sma_99'] = df['close'].rolling(99).mean()
+            df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+            df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
+            # Price position relative to moving averages
+            df['price_sma_ratio'] = df['close'] / df['sma_25']
+            df['sma_cross_signal'] = ((df['sma_7'] > df['sma_25']).astype(int) * 2 - 1)  # +1 for bullish, -1 for bearish
+
+            # Momentum indicators (6 features)
+            # RSI
+            delta = df['close'].diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
+            df['rsi_14'] = 100 - (100 / (1 + rs))
+            
+            # Stochastic Oscillator
+            low_14 = df['low'].rolling(window=14).min()
+            high_14 = df['high'].rolling(window=14).max()
+            df['stoch_k'] = 100 * ((df['close'] - low_14) / (high_14 - low_14 + np.finfo(float).eps))
+            df['stoch_d'] = df['stoch_k'].rolling(window=3).mean()
+            
+            # MACD calculation
+            ema_12 = df['close'].ewm(span=12, adjust=False).mean()
+            ema_26 = df['close'].ewm(span=26, adjust=False).mean()
+            df['macd'] = ema_12 - ema_26
+            df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+            df['macd_hist'] = df['macd'] - df['macd_signal']
+
+            # Volatility indicators (6 features)
+            # Bollinger Bands
+            df['bb_middle'] = df['close'].rolling(20).mean()
+            std_20 = df['close'].rolling(20).std()
+            df['bb_upper'] = df['bb_middle'] + 2 * std_20
+            df['bb_lower'] = df['bb_middle'] - 2 * std_20
+            df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+            df['bb_pct_b'] = (df['close'] - df['bb_lower']) / ((df['bb_upper'] - df['bb_lower']) + np.finfo(float).eps)
+            
+            # ATR calculation
+            high_low = df['high'] - df['low']
+            high_close = (df['high'] - df['close'].shift()).abs()
+            low_close = (df['low'] - df['close'].shift()).abs()
+            ranges = pd.concat([high_low, high_close, low_close], axis=1)
+            true_range = ranges.max(axis=1)
+            df['atr_14'] = true_range.rolling(14).mean()
+
+            # Volume indicators (4 features)
+            df['volume_sma_20'] = df['volume'].rolling(20).mean()
+            df['volume_ratio'] = df['volume'] / df['volume_sma_20']
+            
+            # On-Balance Volume
+            df['price_change'] = df['close'].diff()
+            df['price_direction'] = np.where(df['price_change'] > 0, 1, np.where(df['price_change'] < 0, -1, 0))
+            df['obv'] = (df['volume'] * df['price_direction']).cumsum()
+            
+            # Chaikin Money Flow
+            money_flow_multiplier = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'] + np.finfo(float).eps)
+            money_flow_volume = money_flow_multiplier * df['volume']
+            df['cmf_20'] = money_flow_volume.rolling(20).sum() / df['volume'].rolling(20).sum()
+
+            # Price-derived features (4 features)
+            df['return'] = df['close'].pct_change()
+            df['log_return'] = np.log(df['close'] / df['close'].shift(1))
+            df['high_low_range'] = (df['high'] - df['low']) / df['close']
+            df['body_size'] = abs(df['open'] - df['close']) / df['close']
+            
+            # Clean up NaN values that resulted from rolling windows
+            df.fillna(method='bfill', inplace=True)
+            df.fillna(0, inplace=True)
+
     dataset = {
         '15m': df_15m,
         '4h': df_4h,

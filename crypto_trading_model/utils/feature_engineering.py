@@ -7,8 +7,8 @@ and cross-timeframe features used by the trading models.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Union, Optional
-import talib
+from typing import Dict, List, Union, Optional, Tuple
+import pandas_ta as ta
 import logging
 from sklearn.preprocessing import RobustScaler, MinMaxScaler
 
@@ -65,38 +65,25 @@ class FeatureEngineer:
         
         # Simple Moving Averages
         for window in window_sizes:
-            df_features[f'sma_{window}'] = talib.SMA(df_features['close'].values, timeperiod=window)
+            df_features[f'sma_{window}'] = ta.sma(df_features['close'], length=window)
         
         # Exponential Moving Averages
         for window in window_sizes:
-            df_features[f'ema_{window}'] = talib.EMA(df_features['close'].values, timeperiod=window)
+            df_features[f'ema_{window}'] = ta.ema(df_features['close'], length=window)
         
         # MACD (Moving Average Convergence Divergence)
-        macd, macd_signal, macd_hist = talib.MACD(
-            df_features['close'].values,
-            fastperiod=12,
-            slowperiod=26,
-            signalperiod=9
-        )
-        df_features['macd'] = macd
-        df_features['macd_signal'] = macd_signal
-        df_features['macd_hist'] = macd_hist
+        macd = ta.macd(df_features['close'], fast=12, slow=26, signal=9)
+        df_features['macd'] = macd['MACD_12_26_9']
+        df_features['macd_signal'] = macd['MACDs_12_26_9']
+        df_features['macd_hist'] = macd['MACDh_12_26_9']
         
         # ADX (Average Directional Index)
-        df_features['adx'] = talib.ADX(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            timeperiod=14
-        )
+        adx = ta.adx(df_features['high'], df_features['low'], df_features['close'], length=14)
+        df_features['adx'] = adx['ADX_14']
         
         # PPO (Percentage Price Oscillator)
-        df_features['ppo'] = talib.PPO(
-            df_features['close'].values,
-            fastperiod=12,
-            slowperiod=26,
-            matype=0
-        )
+        ppo = ta.ppo(df_features['close'], fast=12, slow=26, signal=9)
+        df_features['ppo'] = ppo['PPO_12_26_9']
         
         return df_features
     
@@ -118,40 +105,21 @@ class FeatureEngineer:
         df_features = df.copy()
         
         # RSI (Relative Strength Index)
-        df_features['rsi_14'] = talib.RSI(df_features['close'].values, timeperiod=14)
+        df_features['rsi_14'] = ta.rsi(df_features['close'], length=14)
         
         # Stochastic Oscillator
-        stoch_k, stoch_d = talib.STOCH(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            fastk_period=14,
-            slowk_period=3,
-            slowk_matype=0,
-            slowd_period=3,
-            slowd_matype=0
-        )
-        df_features['stoch_k'] = stoch_k
-        df_features['stoch_d'] = stoch_d
+        stoch = ta.stoch(df_features['high'], df_features['low'], df_features['close'], k=14, d=3, smooth_k=3)
+        df_features['stoch_k'] = stoch['STOCHk_14_3_3']
+        df_features['stoch_d'] = stoch['STOCHd_14_3_3']
         
         # CCI (Commodity Channel Index)
-        df_features['cci_14'] = talib.CCI(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            timeperiod=14
-        )
+        df_features['cci_14'] = ta.cci(df_features['high'], df_features['low'], df_features['close'], length=14)
         
         # ROC (Rate of Change)
-        df_features['roc_10'] = talib.ROC(df_features['close'].values, timeperiod=10)
+        df_features['roc_10'] = ta.roc(df_features['close'], length=10)
         
         # Williams %R
-        df_features['willr_14'] = talib.WILLR(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            timeperiod=14
-        )
+        df_features['willr_14'] = ta.willr(df_features['high'], df_features['low'], df_features['close'], length=14)
         
         return df_features
     
@@ -173,39 +141,23 @@ class FeatureEngineer:
         df_features = df.copy()
         
         # Bollinger Bands
-        upper, middle, lower = talib.BBANDS(
-            df_features['close'].values,
-            timeperiod=20,
-            nbdevup=2,
-            nbdevdn=2,
-            matype=0
-        )
-        df_features['bb_upper'] = upper
-        df_features['bb_middle'] = middle
-        df_features['bb_lower'] = lower
+        bbands = ta.bbands(df_features['close'], length=20, std=2)
+        df_features['bb_upper'] = bbands['BBU_20_2.0']
+        df_features['bb_middle'] = bbands['BBM_20_2.0']
+        df_features['bb_lower'] = bbands['BBL_20_2.0']
         
         # BB Width and %B
-        df_features['bb_width'] = (upper - lower) / middle
-        df_features['bb_pct_b'] = (df_features['close'] - lower) / (upper - lower)
+        df_features['bb_width'] = (df_features['bb_upper'] - df_features['bb_lower']) / df_features['bb_middle']
+        df_features['bb_pct_b'] = (df_features['close'] - df_features['bb_lower']) / (df_features['bb_upper'] - df_features['bb_lower'])
         
         # ATR (Average True Range)
-        df_features['atr_14'] = talib.ATR(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            timeperiod=14
-        )
+        df_features['atr_14'] = ta.atr(df_features['high'], df_features['low'], df_features['close'], length=14)
         
         # Normalized ATR (ATR / Close)
-        df_features['natr_14'] = talib.NATR(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            timeperiod=14
-        )
+        df_features['natr_14'] = df_features['atr_14'] / df_features['close'] * 100  # pandas-ta doesn't have NATR, so we calculate it
         
         # Standard Deviation
-        df_features['std_20'] = talib.STDDEV(df_features['close'].values, timeperiod=20, nbdev=1)
+        df_features['std_20'] = ta.stdev(df_features['close'], length=20)
         
         return df_features
     
@@ -227,40 +179,22 @@ class FeatureEngineer:
         df_features = df.copy()
         
         # OBV (On Balance Volume)
-        df_features['obv'] = talib.OBV(df_features['close'].values, df_features['volume'].values)
+        df_features['obv'] = ta.obv(df_features['close'], df_features['volume'])
         
         # Volume SMA
-        df_features['volume_sma_20'] = talib.SMA(df_features['volume'].values, timeperiod=20)
+        df_features['volume_sma_20'] = ta.sma(df_features['volume'], length=20)
         
         # Money Flow Index
-        df_features['mfi_14'] = talib.MFI(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            df_features['volume'].values,
-            timeperiod=14
-        )
+        df_features['mfi_14'] = ta.mfi(df_features['high'], df_features['low'], df_features['close'], df_features['volume'], length=14)
         
         # Chaikin A/D Line
-        df_features['ad'] = talib.AD(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            df_features['volume'].values
-        )
+        df_features['ad'] = ta.ad(df_features['high'], df_features['low'], df_features['close'], df_features['volume'])
         
         # Chaikin A/D Oscillator
-        df_features['adosc'] = talib.ADOSC(
-            df_features['high'].values,
-            df_features['low'].values,
-            df_features['close'].values,
-            df_features['volume'].values,
-            fastperiod=3,
-            slowperiod=10
-        )
+        df_features['adosc'] = ta.adosc(df_features['high'], df_features['low'], df_features['close'], df_features['volume'], fast=3, slow=10)
         
         # Calculate VWAP (Volume Weighted Average Price)
-        # This is a more advanced indicator that's not directly available in talib
+        # This is a more advanced indicator that's not directly available in pandas-ta
         df_features['vwap'] = (df_features['volume'] * df_features['close']).cumsum() / df_features['volume'].cumsum()
         
         return df_features
@@ -321,26 +255,19 @@ class FeatureEngineer:
         # Make a copy to avoid modifying the original
         df_features = df.copy()
         
-        # Add candlestick pattern recognition from TALib
+        # Add candlestick pattern recognition using pandas-ta
         # Bullish patterns
-        df_features['cdl_hammer'] = talib.CDLHAMMER(df_features['open'].values, df_features['high'].values, 
-                                                   df_features['low'].values, df_features['close'].values)
-        df_features['cdl_morning_star'] = talib.CDLMORNINGSTAR(df_features['open'].values, df_features['high'].values, 
-                                                              df_features['low'].values, df_features['close'].values)
-        df_features['cdl_engulfing_bullish'] = talib.CDLENGULFING(df_features['open'].values, df_features['high'].values, 
-                                                                 df_features['low'].values, df_features['close'].values)
+        df_features['cdl_hammer'] = ta.cdl_pattern(df_features, name="hammer") / 100 
+        df_features['cdl_morning_star'] = ta.cdl_pattern(df_features, name="morningstar") / 100
+        df_features['cdl_engulfing_bullish'] = ta.cdl_pattern(df_features, name="engulfing") / 100
         
         # Bearish patterns
-        df_features['cdl_shooting_star'] = talib.CDLSHOOTINGSTAR(df_features['open'].values, df_features['high'].values, 
-                                                                df_features['low'].values, df_features['close'].values)
-        df_features['cdl_evening_star'] = talib.CDLEVENINGSTAR(df_features['open'].values, df_features['high'].values, 
-                                                              df_features['low'].values, df_features['close'].values)
-        df_features['cdl_hanging_man'] = talib.CDLHANGINGMAN(df_features['open'].values, df_features['high'].values, 
-                                                            df_features['low'].values, df_features['close'].values)
+        df_features['cdl_shooting_star'] = ta.cdl_pattern(df_features, name="shootingstar") / 100
+        df_features['cdl_evening_star'] = ta.cdl_pattern(df_features, name="eveningstar") / 100
+        df_features['cdl_hanging_man'] = ta.cdl_pattern(df_features, name="hangingman") / 100
         
         # Support/resistance patterns
-        df_features['cdl_doji'] = talib.CDLDOJI(df_features['open'].values, df_features['high'].values, 
-                                               df_features['low'].values, df_features['close'].values)
+        df_features['cdl_doji'] = ta.cdl_pattern(df_features, name="doji") / 100
         
         return df_features
     

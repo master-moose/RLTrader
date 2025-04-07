@@ -21,9 +21,9 @@
         "bidirectional": true,
         "attention": true,
         "feature_dims": {
-            "15m": 32,
-            "4h": 32,
-            "1d": 32
+            "15m": 34,
+            "4h": 34,
+            "1d": 34
         },
         "num_classes": 3
     },

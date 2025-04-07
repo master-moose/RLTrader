@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import talib
+import pandas_ta as ta
 from typing import Dict, List, Tuple, Optional, Union
 
 def calculate_realistic_indicators(synthetic_price_data: pd.DataFrame) -> pd.DataFrame:
@@ -18,14 +18,14 @@ def calculate_realistic_indicators(synthetic_price_data: pd.DataFrame) -> pd.Dat
     
     # Calculate basic indicators
     # Moving averages
-    df['sma_7'] = talib.SMA(df['close'], timeperiod=7)
-    df['sma_25'] = talib.SMA(df['close'], timeperiod=25)
-    df['sma_99'] = talib.SMA(df['close'], timeperiod=99)
-    df['ema_9'] = talib.EMA(df['close'], timeperiod=9)
-    df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
+    df['sma_7'] = ta.sma(df['close'], length=7)
+    df['sma_25'] = ta.sma(df['close'], length=25)
+    df['sma_99'] = ta.sma(df['close'], length=99)
+    df['ema_9'] = ta.ema(df['close'], length=9)
+    df['ema_21'] = ta.ema(df['close'], length=21)
     
     # Oscillators
-    df['rsi_14'] = talib.RSI(df['close'], timeperiod=14)
+    df['rsi_14'] = ta.rsi(df['close'], length=14)
     
     # Add realistic noise to RSI (more noise in choppy periods)
     price_volatility = df['close'].pct_change().rolling(window=14).std()
@@ -35,13 +35,10 @@ def calculate_realistic_indicators(synthetic_price_data: pd.DataFrame) -> pd.Dat
     df['rsi_14'] = np.clip(df['rsi_14'], 0, 100)
     
     # MACD with realistic lag
-    macd, macd_signal, macd_hist = talib.MACD(df['close'], 
-                                          fastperiod=12, 
-                                          slowperiod=26, 
-                                          signalperiod=9)
-    df['macd'] = macd
-    df['macd_signal'] = macd_signal
-    df['macd_hist'] = macd_hist
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    df['macd'] = macd['MACD_12_26_9']
+    df['macd_signal'] = macd['MACDs_12_26_9']
+    df['macd_hist'] = macd['MACDh_12_26_9']
     
     # Add realistic noise to MACD (correlated with price volatility)
     macd_noise = np.random.normal(0, 1, len(df)) * price_volatility * df['close'].mean() * 0.001
@@ -53,14 +50,10 @@ def calculate_realistic_indicators(synthetic_price_data: pd.DataFrame) -> pd.Dat
     df['macd_hist'] = df['macd'] - df['macd_signal']
     
     # Bollinger Bands
-    upper, middle, lower = talib.BBANDS(df['close'], 
-                                      timeperiod=20, 
-                                      nbdevup=2, 
-                                      nbdevdn=2, 
-                                      matype=0)
-    df['bb_upper'] = upper
-    df['bb_middle'] = middle
-    df['bb_lower'] = lower
+    bbands = ta.bbands(df['close'], length=20, std=2)
+    df['bb_upper'] = bbands['BBU_20_2.0']
+    df['bb_middle'] = bbands['BBM_20_2.0']
+    df['bb_lower'] = bbands['BBL_20_2.0']
     
     # Add realistic BB noise based on volatility
     bb_adjustment = price_volatility * df['close'].mean() * 0.005
@@ -68,25 +61,22 @@ def calculate_realistic_indicators(synthetic_price_data: pd.DataFrame) -> pd.Dat
     df['bb_lower'] = df['bb_lower'] - bb_adjustment * np.random.normal(0.5, 0.5, len(df))
     
     # Stochastic oscillator with realistic behavior
-    df['stoch_k'], df['stoch_d'] = talib.STOCH(df['high'], 
-                                             df['low'], 
-                                             df['close'],
-                                             fastk_period=14,
-                                             slowk_period=3,
-                                             slowk_matype=0,
-                                             slowd_period=3,
-                                             slowd_matype=0)
+    stoch = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
+    df['stoch_k'] = stoch['STOCHk_14_3_3']
+    df['stoch_d'] = stoch['STOCHd_14_3_3']
     
     # Add realistic noise to stochastic (more noise in ranges, less in trends)
-    trend_strength = abs(talib.LINEARREG_SLOPE(df['close'], timeperiod=14))
+    linear_reg = ta.linreg(df['close'], length=14)
+    # Calculate slope from linear regression
+    trend_strength = abs(linear_reg.diff(1))
     normalized_trend = trend_strength / trend_strength.mean()
     stoch_noise = np.random.normal(0, 2, len(df)) * (1 - normalized_trend.fillna(0))
     df['stoch_k'] = np.clip(df['stoch_k'] + stoch_noise, 0, 100)
     df['stoch_d'] = np.clip(df['stoch_d'] + stoch_noise * 0.5, 0, 100)  # Less noise in signal line
     
     # Add other indicators
-    df['atr_14'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-    df['adx_14'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+    df['atr_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    df['adx_14'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
     
     # ADX behaves realistically (less sensitive in choppy markets)
     adx_adjustment = np.where(
@@ -97,7 +87,7 @@ def calculate_realistic_indicators(synthetic_price_data: pd.DataFrame) -> pd.Dat
     df['adx_14'] = np.clip(df['adx_14'] + adx_adjustment, 0, 100)
     
     # Volume-based indicators
-    df['obv'] = talib.OBV(df['close'], df['volume'])
+    df['obv'] = ta.obv(df['close'], df['volume'])
     
     # Add noise to OBV that occasionally creates false signals
     obv_noise = np.zeros(len(df))
