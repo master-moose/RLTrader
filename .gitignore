@@ -1,2 +1,17 @@
 venv/
 __pycache__/*.ckpt
+*.ckpt
+*.h5
+*.pkl
+*.pt
+*.pth
+*.ptl
+*.pthl
+*.pth.tar
+*.pth.tar.gz
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
