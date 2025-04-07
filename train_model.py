@@ -372,6 +372,97 @@ def create_dataloaders(train_path, val_path, batch_size=32, use_cupy=None, disab
     
     return train_loader, val_loader
 
+class FocalLoss(torch.nn.Module):
+    """
+    Focal Loss for addressing extreme class imbalance.
+    
+    FL(pt) = -alpha_t * (1 - pt)^gamma * log(pt)
+    where pt is the probability of the target class.
+    
+    Parameters:
+    - gamma: Focusing parameter (default: 2.0). Higher values give more weight to misclassified examples.
+    - alpha: Class weight tensor or None. If None, all classes are weighted equally.
+    - reduction: 'mean', 'sum', or 'none'
+    """
+    def __init__(self, gamma=2.0, alpha=None, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+        
+    def forward(self, input, target):
+        """
+        Forward pass for focal loss
+        
+        Parameters:
+        - input: (B, C) tensor of raw model outputs
+        - target: (B,) tensor of target class indices
+        
+        Returns:
+        - loss: Scalar loss value
+        """
+        # Apply log_softmax to get log probabilities
+        log_probs = torch.nn.functional.log_softmax(input, dim=1)
+        
+        # Gather log probabilities of target classes
+        target_probs = log_probs.gather(1, target.unsqueeze(1))
+        target_probs = target_probs.squeeze(1)
+        
+        # Calculate focal term: (1 - pt)^gamma
+        focal_term = torch.exp(target_probs).neg().add(1).pow(self.gamma)
+        
+        # Apply alpha weights if provided
+        if self.alpha is not None:
+            alpha_weights = self.alpha.gather(0, target)
+            focal_term = focal_term * alpha_weights
+        
+        # Calculate final loss
+        loss = -focal_term * target_probs
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+
+class BalancedClassActivation(torch.nn.Module):
+    """
+    Custom activation layer that helps produce more balanced class predictions.
+    
+    When the model heavily favors one class, this activation adds a temperature
+    scaling factor and a small class-specific bias term to encourage more balanced predictions.
+    """
+    def __init__(self, num_classes=3, temperature=1.0, bias=None):
+        """
+        Initialize the balanced class activation.
+        
+        Parameters:
+        - num_classes: Number of output classes
+        - temperature: Temperature parameter for scaling logits (lower values make distribution more uniform)
+        - bias: Optional bias vector to encourage specific classes
+        """
+        super().__init__()
+        self.num_classes = num_classes
+        self.temperature = temperature
+        
+        # Create learnable bias if not provided
+        if bias is None:
+            # Initialize with zeros
+            self.bias = torch.nn.Parameter(torch.zeros(num_classes))
+        else:
+            self.bias = torch.nn.Parameter(torch.tensor(bias))
+    
+    def forward(self, x):
+        # Apply temperature scaling
+        scaled_logits = x / self.temperature
+        
+        # Add class-specific bias
+        biased_logits = scaled_logits + self.bias
+        
+        return biased_logits
+
 class MultiTimeframeModel(torch.nn.Module):
     """
     Deep learning model that processes multiple timeframes
@@ -411,8 +502,8 @@ class MultiTimeframeModel(torch.nn.Module):
         self.attention = attention
         self.num_directions = 2 if bidirectional else 1
         
-        # Increased dropout for stronger regularization
-        self.dropout_rate = max(0.3, dropout)  # Ensure dropout is at least 0.3
+        # Very strong dropout for extreme regularization
+        self.dropout_rate = max(0.4, dropout)  # Ensure dropout is at least 0.4
         
         # Create encoder LSTMs for each timeframe
         self.encoders = torch.nn.ModuleDict()
@@ -431,33 +522,46 @@ class MultiTimeframeModel(torch.nn.Module):
             # Simplified attention mechanism
             self.attn_hidden_dim = hidden_dims * self.num_directions
             
-            # Query vectors for each timeframe
+            # Query vectors for each timeframe with Xavier initialization
             self.query_vectors = torch.nn.ParameterDict()
             for tf in self.timeframes:
-                self.query_vectors[tf] = torch.nn.Parameter(torch.randn(self.attn_hidden_dim))
+                param = torch.nn.Parameter(torch.zeros(self.attn_hidden_dim))
+                torch.nn.init.xavier_uniform_(param)
+                self.query_vectors[tf] = param
             
-            # Attention projection with batch normalization
+            # Attention projection with layer normalization
             self.attention_projection = torch.nn.Linear(
                 self.attn_hidden_dim * len(self.timeframes), 
                 self.attn_hidden_dim
             )
-            self.attention_bn = torch.nn.BatchNorm1d(self.attn_hidden_dim)
+            self.attention_ln = torch.nn.LayerNorm(self.attn_hidden_dim)
         
-        # Output layers
+        # Output layers with layer normalization for more stable training
         if attention:
             output_dim = self.attn_hidden_dim
         else:
             output_dim = self.attn_hidden_dim * len(self.timeframes)
         
+        # First fully connected layer
         self.fc1 = torch.nn.Linear(output_dim, hidden_dims)
-        self.bn1 = torch.nn.BatchNorm1d(hidden_dims)
+        self.ln1 = torch.nn.LayerNorm(hidden_dims)
         
+        # Second fully connected layer
         self.fc2 = torch.nn.Linear(hidden_dims, hidden_dims // 2)
-        self.bn2 = torch.nn.BatchNorm1d(hidden_dims // 2)
+        self.ln2 = torch.nn.LayerNorm(hidden_dims // 2)
         
+        # Final classification layer
         self.fc3 = torch.nn.Linear(hidden_dims // 2, num_classes)
         
+        # Stronger dropout
         self.dropout = torch.nn.Dropout(self.dropout_rate)
+        
+        # Add balanced class activation
+        self.output_activation = BalancedClassActivation(
+            num_classes=num_classes,
+            temperature=1.2,  # Slightly lower temperature to make distribution more uniform
+            bias=None  # Let the model learn the bias
+        )
     
     def forward(self, inputs):
         """
@@ -518,36 +622,88 @@ class MultiTimeframeModel(torch.nn.Module):
             # Concatenate all attended vectors
             concat_encodings = torch.cat(attended_encodings, dim=1)
             
-            # Project to final representation and apply batch normalization
+            # Project to final representation and apply layer normalization
             combined = self.attention_projection(concat_encodings)
-            if combined.size(0) > 1:  # Batch size must be > 1 for BatchNorm
-                combined = self.attention_bn(combined)
+            # Layer normalization doesn't have batch size restrictions like BatchNorm
+            combined = self.attention_ln(combined)
         else:
             # Simple concatenation of all timeframe encodings
             combined = torch.cat([encoded_timeframes[tf] for tf in self.timeframes], dim=1)
         
-        # Apply clipping to prevent gradient explosion
-        combined = torch.clamp(combined, -10, 10)
+        # Apply clipping to prevent gradient explosion (slightly tighter bounds)
+        combined = torch.clamp(combined, -5, 5)
         
-        # Pass through fully connected layers with batch normalization
+        # Pass through fully connected layers with layer normalization
         x = self.dropout(combined)
         x = self.fc1(x)
-        if x.size(0) > 1:  # Batch size must be > 1 for BatchNorm
-            x = self.bn1(x)
+        # Layer normalization works with any batch size
+        x = self.ln1(x)
         x = torch.nn.functional.relu(x)
         
         x = self.dropout(x)
         x = self.fc2(x)
-        if x.size(0) > 1:  # Batch size must be > 1 for BatchNorm
-            x = self.bn2(x)
+        x = self.ln2(x)
         x = torch.nn.functional.relu(x)
         
         x = self.dropout(x)
-        x = self.fc3(x)
+        logits = self.fc3(x)
         
-        return x
+        # Apply balanced class activation
+        return self.output_activation(logits)
 
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def mixup_data(x, y, device, alpha=0.2):
+    """
+    Creates mixed-up data for training to improve generalization.
+    
+    Parameters:
+    - x: Dictionary of features if using multi-timeframe model, or tensor
+    - y: Target tensor (class labels)
+    - alpha: Alpha parameter for Beta distribution
+    
+    Returns:
+    - mixed_x: Mixed features
+    - y_a, y_b: Original labels
+    - lam: Lambda value used for mixing
+    """
+    batch_size = y.size(0)
+    
+    # Sample lambda from Beta distribution
+    if alpha > 0:
+        lam = torch.distributions.beta.Beta(alpha, alpha).sample().to(device)
+    else:
+        lam = torch.ones(1).to(device)
+    
+    # Generate permutation of indices
+    index = torch.randperm(batch_size).to(device)
+    
+    if isinstance(x, dict):
+        # Handle dictionary of tensors (multi-timeframe model)
+        mixed_x = {}
+        for key, tensor in x.items():
+            mixed_x[key] = lam * tensor + (1 - lam) * tensor[index]
+    else:
+        # Handle single tensor
+        mixed_x = lam * x + (1 - lam) * x[index]
+    
+    # Return mixed features and original labels
+    return mixed_x, y, y[index], lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    """
+    Applies mixup to the criterion
+    
+    Parameters:
+    - criterion: Loss function
+    - pred: Model predictions
+    - y_a, y_b: Original labels
+    - lam: Lambda value used for mixing
+    
+    Returns:
+    - loss: Mixed loss value
+    """
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+def train_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2):
     """Train the model for one epoch"""
     model.train()
     epoch_loss = 0
@@ -586,6 +742,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
             features[tf] = features[tf].to(device)
         targets = targets.to(device)
         
+        # Apply mixup data augmentation if enabled
+        if use_mixup and batch_size > 1:
+            features, targets_a, targets_b, lam = mixup_data(features, targets, device, alpha=mixup_alpha)
+            mixup_applied = True
+        else:
+            mixup_applied = False
+            
         data_end = time.time()
         timing_stats['data_transfer'] += data_end - data_start
         
@@ -598,8 +761,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         forward_end = time.time()
         timing_stats['forward_pass'] += forward_end - forward_start
         
-        # Calculate loss
-        loss = criterion(outputs, targets)
+        # Calculate loss with mixup if applied
+        if mixup_applied:
+            loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
+        else:
+            loss = criterion(outputs, targets)
         
         # Backward pass and optimize - measure time
         backward_start = time.time()
@@ -619,9 +785,15 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         # Track statistics
         epoch_loss += loss.item()
         
-        # Calculate accuracy
-        _, predicted = torch.max(outputs, 1)
-        batch_correct = (predicted == targets).sum().item()
+        # Calculate accuracy (only if not using mixup or for mixup's first target)
+        if not mixup_applied:
+            _, predicted = torch.max(outputs, 1)
+            batch_correct = (predicted == targets).sum().item()
+        else:
+            # Use first target for accuracy calculation with mixup
+            _, predicted = torch.max(outputs, 1)
+            batch_correct = (predicted == targets_a).sum().item()
+            
         epoch_correct += batch_correct
         epoch_total += targets.size(0)
         
@@ -939,6 +1111,71 @@ def configure_gpu_settings():
     else:
         logger.warning("Cannot configure GPU settings - CUDA not available")
 
+# Add a function to compute class weights more dynamically
+def compute_class_weights(class_counts, strategy='aggressive'):
+    """
+    Compute class weights based on various strategies
+    
+    Parameters:
+    - class_counts: Array of counts per class
+    - strategy: Strategy to use ('balanced', 'aggressive', 'very_aggressive')
+    
+    Returns:
+    - Dictionary mapping class indices to weights
+    """
+    total_samples = sum(class_counts)
+    num_classes = len(class_counts)
+    class_weights = {}
+    
+    # Set power based on strategy
+    if strategy == 'balanced':
+        power = 1.0
+        boost = 1.0
+    elif strategy == 'aggressive':
+        power = 2.0
+        boost = 1.5
+    elif strategy == 'very_aggressive':
+        power = 2.5
+        boost = 2.0
+    else:
+        power = 1.0
+        boost = 1.0
+    
+    # Compute weights
+    for cls in range(num_classes):
+        if class_counts[cls] > 0:
+            # Higher power makes weights more extreme
+            class_weights[cls] = (total_samples / (class_counts[cls])) ** power
+        else:
+            class_weights[cls] = 1.0
+    
+    # Normalize
+    weight_sum = sum(class_weights.values())
+    for cls in class_weights:
+        # Normalize and apply boost
+        class_weights[cls] = (class_weights[cls] * num_classes / weight_sum) * boost
+    
+    return class_weights
+
+# After the compute_class_weights function, add:
+def get_focal_loss_gamma(epoch, max_epochs, initial_gamma=2.0, final_gamma=1.0):
+    """
+    Gradually reduce focal loss gamma to avoid overfitting
+    
+    Parameters:
+    - epoch: Current epoch
+    - max_epochs: Maximum number of epochs
+    - initial_gamma: Starting gamma value
+    - final_gamma: Final gamma value
+    
+    Returns:
+    - gamma: Current gamma value
+    """
+    # Linear schedule
+    decay_factor = max(0, 1 - epoch / max_epochs)
+    return final_gamma + (initial_gamma - final_gamma) * decay_factor
+
+# Modify the training loop to dynamically adjust focal loss parameters
 def train_model(config_path="crypto_trading_model/config/time_series_config.json", disable_mp=False):
     """Train the time series model using parameters from config file"""
     # Load configuration
@@ -1070,34 +1307,27 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         total_samples = np.sum(class_counts)
         logger.info(f"Class distribution: {class_counts}")
         
-        # Compute class weights (inverse frequency with a stronger adjustment)
-        class_weights = {}
-        for cls in range(num_classes):
-            if class_counts[cls] > 0:
-                # Use a stronger weighting scheme (squared inverse frequency)
-                # This gives more emphasis to minority classes
-                class_weights[cls] = (total_samples / (class_counts[cls])) ** 1.5  
-            else:
-                class_weights[cls] = 1.0
-                
-        # Normalize weights to prevent extreme values
-        weight_sum = sum(class_weights.values())
-        for cls in class_weights:
-            class_weights[cls] = class_weights[cls] * num_classes / weight_sum
-        
-        logger.info(f"Using class weights to handle imbalance: {class_weights}")
+        # Use a more aggressive class weighting strategy
+        class_weights = compute_class_weights(class_counts, strategy='very_aggressive')
+        logger.info(f"Using very aggressive class weights to handle imbalance: {class_weights}")
     else:
         class_weights = None
     
-    # Create criterion with weights for classification
-    if num_classes > 1 and class_weights:
-        criterion = torch.nn.CrossEntropyLoss(
-            weight=torch.tensor([class_weights[i] for i in range(num_classes)], 
-                               dtype=torch.float32,  # Explicitly use float32 to match model outputs
-                               device=device)
-        )
-    else:
-        criterion = torch.nn.CrossEntropyLoss() if num_classes > 1 else torch.nn.MSELoss()
+    # Create weight tensor for focal loss
+    weight_tensor = torch.tensor([class_weights[i] for i in range(num_classes)],
+                                dtype=torch.float32,
+                                device=device)
+    
+    # Initialize focal loss
+    focal_loss = FocalLoss(
+        gamma=2.0,  # Starting gamma
+        alpha=weight_tensor,
+        reduction='mean'
+    )
+    
+    # Use focal loss as the criterion
+    criterion = focal_loss
+    logger.info("Using Focal Loss with dynamic gamma and aggressive class weights")
     
     # Setup optimizer with weight decay for regularization
     optimizer = torch.optim.Adam(
@@ -1117,27 +1347,38 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     )
     
     # Early stopping
-    best_val_loss = float('inf')
-    best_f1_score = 0.0
-    best_trading_score = float('-inf')
-    best_model_state = None
+    best_balanced_metric = float('-inf')
     no_improve_epochs = 0
     
-    # Function to check if we have improvement based on multiple metrics
-    def is_improvement(new_loss, new_f1, new_trading_score):
-        # Weighted combination of metrics (lower is better for loss, higher is better for F1 and trading score)
-        # We convert each to a value where higher is better
-        loss_component = 1.0 / (1.0 + new_loss)  # Transform loss so higher is better
+    # Function to calculate a balanced metric considering all classes
+    def calculate_balanced_metric(val_metrics):
+        """
+        Calculate a metric that balances accuracy and class balance
         
-        # Previous best
-        prev_loss_component = 1.0 / (1.0 + best_val_loss)
+        Parameters:
+        - val_metrics: Dict containing validation metrics
         
-        # Calculate overall scores (higher is better)
-        # Put more weight on F1 score to prioritize balanced class performance
-        new_score = 0.2 * loss_component + 0.6 * new_f1 + 0.2 * new_trading_score
-        old_score = 0.2 * prev_loss_component + 0.6 * best_f1_score + 0.2 * best_trading_score
+        Returns:
+        - balanced_metric: A combined score favoring both accuracy and class balance
+        """
+        # Extract metrics
+        accuracy = val_metrics.get('val_acc', 0)
+        precision = val_metrics.get('precision', 0)
+        recall = val_metrics.get('recall', 0)
+        f1 = val_metrics.get('f1', 0)
         
-        return new_score > old_score
+        # Get class-specific accuracies
+        class_acc = val_metrics.get('class_accuracy', [0, 0, 0])
+        
+        # Calculate class balance metric (min/max ratio of class accuracies)
+        non_zero_acc = [acc for acc in class_acc if acc > 0]
+        if len(non_zero_acc) > 1:
+            balance = min(non_zero_acc) / max(non_zero_acc)
+        else:
+            balance = 0
+        
+        # Combine metrics with heavy weight on balance and F1
+        return 0.2 * accuracy + 0.2 * precision + 0.3 * f1 + 0.3 * balance
     
     # Performance metrics tracking
     total_training_time = 0
@@ -1177,10 +1418,13 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         
         # Get current learning rate using get_last_lr()
         current_lr = optimizer.param_groups[0]['lr']
-        logger.info(f"Epoch {epoch}/{epochs} (Learning Rate: {current_lr:.6f})")
+        
+        # Update focal loss gamma based on epoch
+        focal_loss.gamma = get_focal_loss_gamma(epoch, epochs)
+        logger.info(f"Epoch {epoch}/{epochs} (Learning Rate: {current_lr:.6f}, Focal Loss Gamma: {focal_loss.gamma:.2f})")
         
         # Train
-        train_result = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_result = train_epoch(model, train_loader, criterion, optimizer, device, use_mixup=True, mixup_alpha=0.2)
         train_loss, train_acc, train_time, train_throughput, train_timing, gpu_stats = (
             train_result if len(train_result) == 6 else train_result + (None,)
         )
@@ -1232,17 +1476,27 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         epoch_time = time.time() - epoch_start_time
         total_training_time += epoch_time
         
-        # Check for improvement
-        if is_improvement(val_loss, val_metrics['f1'], val_metrics['trading_score']):
-            best_val_loss = val_loss
-            best_f1_score = val_metrics['f1']
-            best_trading_score = val_metrics['trading_score']
+        # After validation:
+        # Calculate balanced metric and check for improvement
+        val_metrics_dict = {
+            'val_acc': val_acc,
+            'precision': val_metrics['precision'],
+            'recall': val_metrics['recall'],
+            'f1': val_metrics['f1'],
+            'class_accuracy': val_metrics['class_accuracy']
+        }
+        
+        balanced_metric = calculate_balanced_metric(val_metrics_dict)
+        
+        # Check for improvement using the balanced metric
+        if balanced_metric > best_balanced_metric:
+            best_balanced_metric = balanced_metric
             best_model_state = model.state_dict().copy()
             no_improve_epochs = 0
-            logger.info(f"New best validation loss: {best_val_loss:.4f}")
+            logger.info(f"New best balanced metric: {best_balanced_metric:.4f}")
         else:
             no_improve_epochs += 1
-            logger.info(f"No improvement for {no_improve_epochs} epochs")
+            logger.info(f"No improvement for {no_improve_epochs} epochs (balanced metric: {balanced_metric:.4f})")
         
         # Early stopping
         if no_improve_epochs >= early_stopping_patience:
@@ -1263,7 +1517,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     # Load best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-        logger.info(f"Loaded best model with validation loss: {best_val_loss:.4f}")
+        logger.info(f"Loaded best model with validation loss: {val_loss:.4f}")
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -1274,7 +1528,7 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'config': config,
-        'val_loss': best_val_loss,
+        'val_loss': val_loss,
         'timeframes': timeframes,
         'feature_dims': feature_dims,
         'epoch': epoch
