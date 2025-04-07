@@ -1,0 +1,36 @@
+{
+    "data": {
+        "data_path": "./data",
+        "output_dir": "./output/time_series",
+        "timeframes": ["15m", "4h", "1d"],
+        "sequence_length": 50,
+        "use_synthetic": false,
+        "synthetic_path": "./data/synthetic",
+        "forecast_steps": 5,
+        "threshold": 0.005,
+        "forecast_horizon": null
+    },
+    "model": {
+        "type": "multi_timeframe",
+        "hidden_dims": 128,
+        "num_layers": 2,
+        "dropout": 0.2,
+        "bidirectional": true,
+        "attention": true,
+        "feature_dims": {
+            "15m": 32,
+            "4h": 32,
+            "1d": 32
+        }
+    },
+    "training": {
+        "epochs": 100,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "weight_decay": 1e-5,
+        "patience": 10,
+        "scheduler_factor": 0.5,
+        "scheduler_patience": 5,
+        "device": "cuda"
+    }
+} 

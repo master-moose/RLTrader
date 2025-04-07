@@ -1,0 +1,9 @@
+2025-04-07 19:02:21,559 - crypto_trading_model - INFO - Created directory: data/raw
+2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: data/processed
+2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: data/synthetic
+2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: output/time_series
+2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: output/reinforcement
+2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: output/ensemble
+2025-04-07 19:02:21,568 - crypto_trading_model - INFO - Created directory: output/backtest
+2025-04-07 19:02:21,578 - crypto_trading_model - INFO - Created directory: logs
+2025-04-07 19:02:21,578 - crypto_trading_model - INFO - Directory setup complete.

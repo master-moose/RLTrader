@@ -1,0 +1,46 @@
+{
+    "data": {
+        "data_path": "./data",
+        "output_dir": "./output/reinforcement",
+        "timeframes": ["15m", "4h", "1d"],
+        "window_size": 50,
+        "train_test_split": 0.8,
+        "validation_split": 0.1,
+        "seed": 42
+    },
+    "environment": {
+        "type": "multi",
+        "initial_balance": 10000.0,
+        "transaction_cost": 0.001,
+        "position_size": 0.2,
+        "reward_function": "sharpe",
+        "include_position_info": true,
+        "observation_type": "composed"
+    },
+    "agent": {
+        "type": "dqn",
+        "policy_type": "multi",
+        "policy_kwargs": {
+            "hidden_size": 128,
+            "num_layers": 2,
+            "dropout": 0.2,
+            "use_attention": true
+        },
+        "learning_kwargs": {
+            "learning_rate": 1e-4,
+            "gamma": 0.99,
+            "epsilon_start": 1.0,
+            "epsilon_end": 0.05,
+            "epsilon_decay": 0.995,
+            "buffer_size": 50000,
+            "batch_size": 64,
+            "target_update_freq": 10,
+            "double_dqn": true
+        }
+    },
+    "training": {
+        "num_episodes": 1000,
+        "max_steps_per_episode": 1000,
+        "eval_freq": 10
+    }
+} 

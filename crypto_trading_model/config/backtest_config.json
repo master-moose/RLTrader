@@ -1,0 +1,22 @@
+{
+    "data_path": "./data",
+    "output_dir": "./output/backtest",
+    "timeframes": ["15m", "4h", "1d"],
+    "model_path": "./output/time_series/model.pt",
+    "model_type": "time_series",
+    "initial_balance": 10000.0,
+    "position_size": 0.2,
+    "transaction_cost": 0.001,
+    "lookback": 50,
+    "evaluation_metrics": [
+        "total_return",
+        "win_rate",
+        "sharpe_ratio",
+        "max_drawdown",
+        "avg_trade_duration"
+    ],
+    "start_date": null,
+    "end_date": null,
+    "use_ensemble": false,
+    "ensemble_config": "./config/ensemble_config.json"
+} 
