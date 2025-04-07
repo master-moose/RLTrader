@@ -281,7 +281,13 @@ def train_lightning_model(
                 try:
                     table_data = f[primary_tf]['table'][:]
                     if 'price_direction' in table_data.dtype.names:
-                        train_labels = torch.tensor(table_data['price_direction'], dtype=torch.long)
+                        # Extract price direction labels and ensure they're valid for num_classes
+                        raw_labels = table_data['price_direction']
+                        # Clip labels to be in valid range [0, num_classes-1]
+                        valid_labels = np.clip(raw_labels, 0, num_classes - 1)
+                        train_labels = torch.tensor(valid_labels, dtype=torch.long)
+                        if np.any(raw_labels != valid_labels):
+                            logger.warning(f"Some training labels were outside valid range [0, {num_classes-1}] and have been clipped")
                         logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {train_labels.shape}")
                     else:
                         logger.warning(f"No price_direction field found in {primary_tf}, generating dummy labels")
@@ -331,7 +337,13 @@ def train_lightning_model(
                 try:
                     table_data = f[primary_tf]['table'][:]
                     if 'price_direction' in table_data.dtype.names:
-                        val_labels = torch.tensor(table_data['price_direction'], dtype=torch.long)
+                        # Extract price direction labels and ensure they're valid for num_classes
+                        raw_labels = table_data['price_direction']
+                        # Clip labels to be in valid range [0, num_classes-1]
+                        valid_labels = np.clip(raw_labels, 0, num_classes - 1)
+                        val_labels = torch.tensor(valid_labels, dtype=torch.long)
+                        if np.any(raw_labels != valid_labels):
+                            logger.warning(f"Some validation labels were outside valid range [0, {num_classes-1}] and have been clipped")
                         logger.info(f"Using price_direction from {primary_tf} as labels, Shape: {val_labels.shape}")
                     else:
                         logger.warning(f"No price_direction field found in {primary_tf}, generating dummy labels")
