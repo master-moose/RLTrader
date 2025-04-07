@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 """
 PyTorch Lightning implementation of the LSTM-based trading model
 """
