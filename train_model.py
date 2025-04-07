@@ -91,10 +91,8 @@ class TimeSeriesDataset(Dataset):
         self.data_path = data_path
         self.timeframes = timeframes
         
-        # Determine whether to use CuPy
+        # Determine whether to use CuPy - store as flag but don't keep module reference
         self.use_cupy = use_cupy if use_cupy is not None else HAS_CUPY
-        # Get appropriate array module
-        self.xp = cp if self.use_cupy and HAS_CUPY else np
         
         # Handle sequence_length as either dict or int
         if isinstance(sequence_length, dict):
@@ -205,6 +203,12 @@ class TimeSeriesDataset(Dataset):
         self.valid_indices = range(max_sequence_length, min_length)
         logger.info(f"Loaded dataset with {len(self.valid_indices)} valid samples")
         logger.info(f"Using sequence lengths: {self.sequence_length}")
+    
+    def get_array_module(self):
+        """Helper method to get the appropriate array module (NumPy or CuPy)"""
+        if self.use_cupy and HAS_CUPY:
+            return cp
+        return np
 
     def __len__(self):
         return len(self.valid_indices)
@@ -249,15 +253,28 @@ class TimeSeriesDataset(Dataset):
         
         return sequences, torch.tensor(primary_target, dtype=torch.long)
 
-def create_dataloaders(train_path, val_path, batch_size=32, use_cupy=None, **dataset_kwargs):
+def create_dataloaders(train_path, val_path, batch_size=32, use_cupy=None, disable_mp=False, **dataset_kwargs):
     """Create DataLoader objects for training and validation"""
     
     # Create datasets with CuPy option
     train_dataset = TimeSeriesDataset(train_path, use_cupy=use_cupy, **dataset_kwargs)
     val_dataset = TimeSeriesDataset(val_path, use_cupy=use_cupy, **dataset_kwargs)
     
-    # Determine number of workers based on system CPU count
-    num_workers = min(os.cpu_count() - 1, 16)  # Use n-1 CPUs, max 16
+    # Determine number of workers - use 0 (no multiprocessing) if disabled
+    if disable_mp:
+        num_workers = 0
+        logger.info("Using single process data loading (multiprocessing disabled)")
+    else:
+        # Determine number of workers - use 0 if on Windows with CuPy
+        is_windows = sys.platform.startswith('win')
+        using_cupy = use_cupy and HAS_CUPY
+        
+        if is_windows and using_cupy:
+            num_workers = 0
+            logger.warning("Multiprocessing disabled on Windows with CuPy due to pickling limitations")
+        else:
+            num_workers = min(os.cpu_count() - 1, 16)  # Use n-1 CPUs, max 16
+    
     logger.info(f"Using {num_workers} worker processes for data loading")
     
     # Create dataloaders
@@ -640,7 +657,10 @@ def calculate_trading_metrics(predictions, targets, device=None):
     - Dictionary of metrics
     """
     # Get the appropriate array module
-    xp = get_array_module(device) if device else np
+    if device and device.type == 'cuda' and HAS_CUPY:
+        xp = cp
+    else:
+        xp = np
     
     # Convert inputs to appropriate array type
     predictions = xp.array(predictions)
@@ -772,7 +792,7 @@ def configure_gpu_settings():
         
         logger.info("Configured GPU settings for optimal performance")
 
-def train_model(config_path="crypto_trading_model/config/time_series_config.json"):
+def train_model(config_path="crypto_trading_model/config/time_series_config.json", disable_mp=False):
     """Train the time series model using parameters from config file"""
     # Load configuration
     config = load_config(config_path)
@@ -825,6 +845,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         use_cupy = HAS_CUPY
         if use_cupy:
             logger.info("CuPy will be used for array operations")
+            if disable_mp:
+                logger.info("Multiprocessing disabled to avoid pickling issues with CuPy")
         else:
             logger.info("CuPy not available, using NumPy for array operations")
     else:
@@ -842,7 +864,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         batch_size=batch_size,
         timeframes=timeframes,
         sequence_length=seq_length,
-        use_cupy=use_cupy
+        use_cupy=use_cupy,
+        disable_mp=disable_mp
     )
     
     # Create model
@@ -1248,14 +1271,25 @@ def main():
                       help="Path to configuration file")
     parser.add_argument("--visualize", action="store_true", 
                       help="Generate visualizations of throughput metrics")
+    parser.add_argument("--disable_mp", action="store_true",
+                      help="Disable multiprocessing for data loading")
     
     args = parser.parse_args()
     
     # Setup directories
     setup_directories()
     
+    # Force single-process mode on Windows with CuPy
+    if sys.platform.startswith('win') and HAS_CUPY:
+        # Set environment variable for PyTorch dataloader
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
+        # Set global flag to disable multiprocessing in DataLoader
+        args.disable_mp = True
+        logger.warning("Windows with CuPy detected: multiprocessing disabled to avoid pickling errors")
+    
     # Train the model
-    model, history = train_model(args.config)
+    model, history = train_model(args.config, disable_mp=args.disable_mp)
     
     # Generate visualizations if requested
     if args.visualize:
