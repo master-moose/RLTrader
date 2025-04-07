@@ -17,6 +17,8 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 import torch.nn.functional as F
+import torchmetrics
+from torchmetrics import MetricCollection, Accuracy, Precision, Recall, F1Score
 
 # Import from local modules
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
@@ -132,11 +134,11 @@ class LightningTimeSeriesModel(pl.LightningModule):
             
         # Track metrics for each class
         self.class_names = ['Sell', 'Hold', 'Buy'] if num_classes == 3 else [f'Class_{i}' for i in range(num_classes)]
-        self.train_metrics = pl.metrics.MetricCollection({
-            'accuracy': pl.metrics.Accuracy(num_classes=num_classes, average='macro'),
-            'precision': pl.metrics.Precision(num_classes=num_classes, average='macro'),
-            'recall': pl.metrics.Recall(num_classes=num_classes, average='macro'),
-            'f1': pl.metrics.F1Score(num_classes=num_classes, average='macro')
+        self.train_metrics = MetricCollection({
+            'accuracy': Accuracy(task="multiclass", num_classes=num_classes, average='macro'),
+            'precision': Precision(task="multiclass", num_classes=num_classes, average='macro'),
+            'recall': Recall(task="multiclass", num_classes=num_classes, average='macro'),
+            'f1': F1Score(task="multiclass", num_classes=num_classes, average='macro')
         })
         self.val_metrics = self.train_metrics.clone(prefix='val_')
         
