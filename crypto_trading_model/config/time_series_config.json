@@ -4,9 +4,9 @@
         "output_dir": "./output/time_series",
         "timeframes": ["15m", "4h", "1d"],
         "sequence_length": {
-            "15m": 1344,
-            "4h": 84,
-            "1d": 14
+            "15m": 96,
+            "4h": 24,
+            "1d": 8
         },
         "use_synthetic": true,
         "synthetic_path": "./data/synthetic",
