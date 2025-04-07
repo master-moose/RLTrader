@@ -372,14 +372,23 @@ def train_lightning_model(
                             self.timeframes[tf] = []
                         self.timeframes[tf].append(feature)
                 
-                # Verify all features have the same length as labels
+                # Find the minimum length across all tensors
                 self.data_length = len(labels)
                 for key, tensor in data.items():
-                    if len(tensor) != self.data_length:
-                        logger.warning(f"Feature {key} has length {len(tensor)}, but labels has length {self.data_length}. Truncating.")
-                        # Truncate to the smaller size to avoid index errors
-                        if len(tensor) > self.data_length:
-                            self.data[key] = tensor[:self.data_length]
+                    if len(tensor) < self.data_length:
+                        logger.warning(f"Feature {key} has length {len(tensor)}, shorter than labels with length {self.data_length}.")
+                        self.data_length = min(self.data_length, len(tensor))
+                
+                # Truncate all tensors to the minimum length
+                for key, tensor in data.items():
+                    if len(tensor) > self.data_length:
+                        logger.warning(f"Feature {key} has length {len(tensor)}, truncating to {self.data_length}.")
+                        self.data[key] = tensor[:self.data_length]
+                
+                # Truncate labels to match
+                if len(self.labels) > self.data_length:
+                    logger.warning(f"Labels has length {len(self.labels)}, truncating to {self.data_length}.")
+                    self.labels = self.labels[:self.data_length]
                 
                 logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
             
@@ -395,18 +404,22 @@ def train_lightning_model(
                 sample = {}
                 for tf in self.timeframes:
                     # Stack features into a tensor of shape (num_features,)
-                    features = torch.stack([
-                        self.data[f"{tf}_{feature}"][idx] 
-                        for feature in self.timeframes[tf]
-                    ])
-                    
-                    # LSTM expects input shape (batch_size, seq_len, input_size)
-                    # For a single sample, we need shape (seq_len, input_size)
-                    # Since we only have one time step per sample, seq_len=1
-                    # input_size = number of features
-                    # The features tensor is currently shape (num_features,)
-                    # We need to reshape to (1, num_features) for the LSTM
-                    sample[tf] = features.unsqueeze(0)  # Add sequence dimension -> (1, num_features)
+                    try:
+                        features = torch.stack([
+                            self.data[f"{tf}_{feature}"][idx] 
+                            for feature in self.timeframes[tf]
+                        ])
+                        
+                        # LSTM expects input shape (batch_size, seq_len, input_size)
+                        # For a single sample, we need shape (seq_len, input_size)
+                        # Since we only have one time step per sample, seq_len=1
+                        # input_size = number of features
+                        # The features tensor is currently shape (num_features,)
+                        # We need to reshape to (1, num_features) for the LSTM
+                        sample[tf] = features.unsqueeze(0)  # Add sequence dimension -> (1, num_features)
+                    except IndexError as e:
+                        logger.error(f"Index error for {tf} at idx={idx}: {str(e)}")
+                        raise
                 
                 sample['label'] = self.labels[idx]
                 return sample
@@ -414,21 +427,24 @@ def train_lightning_model(
         train_dataset = TimeSeriesDataset(train_data, train_labels)
         val_dataset = TimeSeriesDataset(val_data, val_labels)
         
-        # Create DataLoaders
+        # Create DataLoaders with safer settings
+        # Use fewer workers to reduce likelihood of race conditions
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            num_workers=2,  # Reduced from 4
+            pin_memory=True,
+            drop_last=True  # Drop the last incomplete batch
         )
         
         val_dataloader = DataLoader(
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=4,
-            pin_memory=True
+            num_workers=2,  # Reduced from 4
+            pin_memory=True,
+            drop_last=True  # Drop the last incomplete batch
         )
         
         logger.info(f"Created data loaders with batch size {batch_size}")
