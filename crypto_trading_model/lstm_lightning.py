@@ -193,8 +193,8 @@ def train_lightning_model(
     logger.info("Configuration loaded successfully")
     
     # Extract model parameters from config
-    model_params = config.get('model_params', {})
-    input_dims = model_params.get('input_dims', {
+    model_params = config.get('model', {})
+    input_dims = model_params.get('feature_dims', {
         '15m': 32,
         '4h': 32,
         '1d': 32
@@ -205,8 +205,11 @@ def train_lightning_model(
     bidirectional = model_params.get('bidirectional', True)
     attention = model_params.get('attention', True)
     num_classes = model_params.get('num_classes', 3)
-    learning_rate = model_params.get('learning_rate', 0.001)
-    weight_decay = model_params.get('weight_decay', 1e-5)
+    
+    # Get training parameters
+    training_params = config.get('training', {})
+    learning_rate = training_params.get('learning_rate', 0.001)
+    weight_decay = training_params.get('weight_decay', 1e-5)
     
     # Create Lightning model
     model = LightningTimeSeriesModel(
@@ -226,23 +229,81 @@ def train_lightning_model(
     # specific to your application
     
     # For example, assuming your config has data paths:
-    data_params = config.get('data_params', {})
+    data_params = config.get('data', {})
     train_data_path = data_params.get('train_data_path', '')
     val_data_path = data_params.get('val_data_path', '')
-    batch_size = data_params.get('batch_size', 32)
+    batch_size = config.get('training', {}).get('batch_size', 32)
     
     if train_data_path and val_data_path:
         # Load data
         logger.info(f"Loading data from {train_data_path} and {val_data_path}")
-        # Implement your data loading logic here
-        # ...
-        
-        # Create DataLoaders
-        # train_dataloader = DataLoader(...)
-        # val_dataloader = DataLoader(...)
+        try:
+            import h5py
+            import numpy as np
+            from torch.utils.data import TensorDataset, DataLoader
+            
+            # Load training data
+            with h5py.File(train_data_path, 'r') as f:
+                # Dynamically get the keys from the HDF5 file
+                train_data = {}
+                for key in f.keys():
+                    if key != 'labels':
+                        train_data[key] = torch.tensor(f[key][:], dtype=torch.float32)
+                train_labels = torch.tensor(f['labels'][:], dtype=torch.long)
+            
+            # Load validation data
+            with h5py.File(val_data_path, 'r') as f:
+                val_data = {}
+                for key in f.keys():
+                    if key != 'labels':
+                        val_data[key] = torch.tensor(f[key][:], dtype=torch.float32)
+                val_labels = torch.tensor(f['labels'][:], dtype=torch.long)
+            
+            logger.info(f"Successfully loaded {len(train_labels)} training samples and {len(val_labels)} validation samples")
+            
+            # Create datasets
+            class TimeSeriesDataset(torch.utils.data.Dataset):
+                def __init__(self, data, labels):
+                    self.data = data
+                    self.labels = labels
+                
+                def __len__(self):
+                    return len(self.labels)
+                
+                def __getitem__(self, idx):
+                    sample = {k: v[idx] for k, v in self.data.items()}
+                    sample['label'] = self.labels[idx]
+                    return sample
+            
+            train_dataset = TimeSeriesDataset(train_data, train_labels)
+            val_dataset = TimeSeriesDataset(val_data, val_labels)
+            
+            # Create DataLoaders
+            train_dataloader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=4,
+                pin_memory=True
+            )
+            
+            val_dataloader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=4,
+                pin_memory=True
+            )
+            
+            logger.info(f"Created data loaders with batch size {batch_size}")
+            
+        except Exception as e:
+            logger.error(f"Error loading data: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None, None
     else:
         logger.warning("No data paths provided in config, skipping data loading")
-        # In a real implementation, you would raise an error here
         return None, None
     
     # Setup callbacks
@@ -278,8 +339,7 @@ def train_lightning_model(
     
     # Train model
     logger.info("Starting training")
-    # In a real implementation, you would uncomment this:
-    # trainer.fit(model, train_dataloader, val_dataloader)
+    trainer.fit(model, train_dataloader, val_dataloader)
     
     logger.info("Training complete")
     

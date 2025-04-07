@@ -2,6 +2,9 @@
     "data": {
         "data_path": "./data",
         "output_dir": "./output/time_series",
+        "train_data_path": "./data/synthetic/train_data.h5",
+        "val_data_path": "./data/synthetic/val_data.h5",
+        "test_data_path": "./data/synthetic/test_data.h5",
         "timeframes": ["15m", "4h", "1d"],
         "sequence_length": {
             "15m": 120,
