@@ -282,47 +282,84 @@ class TimeSeriesDataset(Dataset):
         
         return sequences, torch.tensor(primary_target, dtype=torch.long)
 
-def create_dataloaders(train_path, val_path, batch_size=32, use_cupy=None, disable_mp=False, **dataset_kwargs):
-    """Create DataLoader objects for training and validation"""
+def create_dataloaders(train_path, val_path, batch_size=32, use_cupy=None, disable_mp=False, balanced_sampling=True, **dataset_kwargs):
+    """
+    Create DataLoader objects for training and validation
     
-    # Create datasets with CuPy option
+    Parameters:
+    - train_path: Path to training data
+    - val_path: Path to validation data
+    - batch_size: Batch size
+    - use_cupy: Whether to use CuPy for computations
+    - disable_mp: Whether to disable multiprocessing
+    - balanced_sampling: Whether to use balanced sampling for training data
+    - **dataset_kwargs: Additional arguments to pass to TimeSeriesDataset
+    
+    Returns:
+    - (train_loader, val_loader)
+    """
+    # Create datasets
     train_dataset = TimeSeriesDataset(train_path, use_cupy=use_cupy, **dataset_kwargs)
     val_dataset = TimeSeriesDataset(val_path, use_cupy=use_cupy, **dataset_kwargs)
     
-    # Determine number of workers - use 0 (no multiprocessing) if disabled
-    if disable_mp:
+    logger.info(f"Created datasets with {len(train_dataset)} training samples and {len(val_dataset)} validation samples")
+    
+    # Determine whether to use multiprocessing
+    # We can't use multiprocessing if CuPy arrays are involved (they're not picklable)
+    if use_cupy or disable_mp:
         num_workers = 0
-        logger.info("Using single process data loading (multiprocessing disabled)")
+        logger.info("Using single-process data loading (CuPy detected or multiprocessing disabled)")
     else:
-        # Determine number of workers - use 0 if on Windows with CuPy
-        is_windows = sys.platform.startswith('win')
-        using_cupy = use_cupy and HAS_CUPY
+        num_workers = min(4, os.cpu_count() or 1)
+        logger.info(f"Using {num_workers} processes for data loading")
+    
+    # If using balanced sampling, create a sampler that rebalances class weights
+    if balanced_sampling:
+        # Get all class labels
+        train_labels = []
+        for i in range(len(train_dataset)):
+            _, label = train_dataset[i]
+            train_labels.append(label.item() if hasattr(label, 'item') else label)
         
-        if is_windows and using_cupy:
-            num_workers = 0
-            logger.warning("Multiprocessing disabled on Windows with CuPy due to pickling limitations")
-        else:
-            num_workers = min(os.cpu_count() - 1, 16)  # Use n-1 CPUs, max 16
+        # Count samples per class
+        class_sample_count = np.unique(train_labels, return_counts=True)[1]
+        logger.info(f"Class distribution in training data: {class_sample_count}")
+        
+        # Calculate weights per sample (inversely proportional to class frequency)
+        weight = 1. / class_sample_count
+        samples_weight = torch.tensor([weight[t] for t in train_labels])
+        
+        # Create a WeightedRandomSampler
+        train_sampler = torch.utils.data.WeightedRandomSampler(
+            samples_weight, len(samples_weight), replacement=True
+        )
+        logger.info("Using weighted sampler to balance class distribution during training")
+        
+        # Create DataLoader with the sampler
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    else:
+        # Standard DataLoader with shuffling
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True
+        )
     
-    logger.info(f"Using {num_workers} worker processes for data loading")
-    
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,  # Faster data transfer to GPU
-        persistent_workers=True if num_workers > 0 else False  # Keep workers alive between epochs
-    )
-    
+    # Create validation loader (no need for balanced sampling here)
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
+        pin_memory=True
     )
     
     return train_loader, val_loader
@@ -914,7 +951,8 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         timeframes=timeframes,
         sequence_length=seq_length,
         use_cupy=use_cupy,
-        disable_mp=disable_mp
+        disable_mp=disable_mp,
+        balanced_sampling=True  # Enable balanced sampling to address class imbalance
     )
     
     # Create model
@@ -943,7 +981,29 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
     logger.info(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
     
     # Setup loss and optimizer
-    criterion = torch.nn.CrossEntropyLoss()
+    # Calculate class weights based on the training data distribution
+    class_counts = torch.zeros(num_classes, dtype=torch.float, device=device)
+    for batch in train_loader:
+        for tf in batch[0]:
+            batch[0][tf] = batch[0][tf].to(device)
+        targets = batch[1].to(device)
+        
+        # Count occurrences of each class
+        for c in range(num_classes):
+            class_counts[c] += (targets == c).sum().item()
+    
+    # Calculate inverse class weights (give more weight to underrepresented classes)
+    if class_counts.sum() > 0 and (class_counts > 0).all():
+        class_weights = 1.0 / (class_counts / class_counts.sum())
+        # Normalize weights so they sum to num_classes
+        class_weights = class_weights * (num_classes / class_weights.sum())
+        logger.info(f"Using class weights for loss function: {class_weights.cpu().numpy()}")
+    else:
+        logger.warning("Could not calculate proper class weights, some classes have zero samples. Using uniform weights.")
+        class_weights = torch.ones(num_classes, dtype=torch.float, device=device)
+    
+    # Create weighted loss function
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Learning rate scheduler - using both ReduceLROnPlateau and cosine annealing
@@ -981,8 +1041,9 @@ def train_model(config_path="crypto_trading_model/config/time_series_config.json
         prev_loss_component = 1.0 / (1.0 + best_val_loss)
         
         # Calculate overall scores (higher is better)
-        new_score = 0.5 * loss_component + 0.3 * new_f1 + 0.2 * new_trading_score
-        old_score = 0.5 * prev_loss_component + 0.3 * best_f1_score + 0.2 * best_trading_score
+        # Putting more weight on F1 score to prioritize balanced class performance
+        new_score = 0.3 * loss_component + 0.5 * new_f1 + 0.2 * new_trading_score
+        old_score = 0.3 * prev_loss_component + 0.5 * best_f1_score + 0.2 * best_trading_score
         
         return new_score > old_score
     

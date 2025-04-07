@@ -4,9 +4,9 @@
         "output_dir": "./output/time_series",
         "timeframes": ["15m", "4h", "1d"],
         "sequence_length": {
-            "15m": 96,
-            "4h": 24,
-            "1d": 8
+            "15m": 192,
+            "4h": 48,
+            "1d": 16
         },
         "use_synthetic": true,
         "synthetic_path": "./data/synthetic",
@@ -33,12 +33,12 @@
     },
     "training": {
         "epochs": 200,
-        "batch_size": 64,
+        "batch_size": 128,
         "learning_rate": 0.001,
         "weight_decay": 1e-5,
-        "patience": 20,
+        "patience": 30,
         "scheduler_factor": 0.5,
-        "scheduler_patience": 8,
+        "scheduler_patience": 10,
         "device": "cuda"
     }
 } 
