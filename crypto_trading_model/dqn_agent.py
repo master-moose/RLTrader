@@ -349,7 +349,7 @@ class DQNAgent:
                 f"Target network updated at step {self.steps_done}"
             )
         
-        return loss.item()
+        return loss.detach().item()
     
     def save(self, path: str) -> None:
         """
