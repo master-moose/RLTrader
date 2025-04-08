@@ -75,7 +75,18 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
     # Update configuration with test data path and batch size
     if 'data' not in config:
         config['data'] = {}
-    config['data']['test_data_path'] = test_path
+    
+    # Normalize paths for cross-platform compatibility
+    test_path_normalized = os.path.normpath(test_path).replace('\\', '/')
+    config['data']['test_data_path'] = test_path_normalized
+    
+    # Also normalize the train and val paths if they exist
+    if 'train_data_path' in config['data']:
+        config['data']['train_data_path'] = os.path.normpath(config['data']['train_data_path']).replace('\\', '/')
+    
+    if 'val_data_path' in config['data']:
+        config['data']['val_data_path'] = os.path.normpath(config['data']['val_data_path']).replace('\\', '/')
+    
     if num_workers is not None:
         config['data']['num_workers'] = num_workers
     if 'training' not in config:
