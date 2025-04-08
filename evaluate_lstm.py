@@ -24,7 +24,7 @@ from crypto_trading_model.lstm_lightning import train_lightning_model, Lightning
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None):
+def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_path=None):
     """
     Evaluate the trained model on the test dataset.
     
@@ -38,6 +38,8 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None):
         Batch size for evaluation
     num_workers : int, optional
         Number of worker processes for data loading
+    model_path : str, optional
+        Path to the specific model file. If None, looks for 'final_model.pt' in model_dir
         
     Returns:
     --------
@@ -46,7 +48,10 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None):
     """
     # Paths to the model and configuration files
     config_path = os.path.join(model_dir, 'config.json')
-    model_path = os.path.join(model_dir, 'final_model.pt')
+    
+    # If model_path not specified, use default location
+    if model_path is None:
+        model_path = os.path.join(model_dir, 'final_model.pt')
     
     # Check if files exist
     if not os.path.exists(config_path):
@@ -98,8 +103,12 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None):
         
         # Load the saved model weights
         logger.info(f"Loading model weights from {model_path}...")
-        model.model.load_state_dict(torch.load(model_path))
-        model.eval()  # Set to evaluation mode
+        try:
+            model.model.load_state_dict(torch.load(model_path))
+            model.eval()  # Set to evaluation mode
+        except Exception as e:
+            logger.error(f"Error loading model weights: {str(e)}")
+            return None
         
         # Load test data
         import h5py
@@ -148,8 +157,131 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None):
                     logger.error(f"Error loading labels: {str(e)}")
                     test_labels = torch.zeros(len(next(iter(test_data.values()))), dtype=torch.long)
         
-        # Create dataset and dataloader
-        from crypto_trading_model.lstm_lightning import TimeSeriesDataset
+        # Create our own TimeSeriesDataset class for evaluation
+        class TimeSeriesDataset(torch.utils.data.Dataset):
+            def __init__(self, data, labels):
+                # Deep copy the data to avoid pickling issues with references
+                self.data = {}
+                for key, tensor in data.items():
+                    self.data[key] = tensor.clone() if isinstance(tensor, torch.Tensor) else torch.tensor(tensor, dtype=torch.float32)
+                
+                # Make sure labels are properly copied
+                self.labels = labels.clone() if isinstance(labels, torch.Tensor) else torch.tensor(labels, dtype=torch.long)
+                
+                # Group features by timeframe
+                self.timeframes = {}
+                for key in data.keys():
+                    if '_' in key:
+                        tf, feature = key.split('_', 1)
+                        if tf not in self.timeframes:
+                            self.timeframes[tf] = []
+                        self.timeframes[tf].append(feature)
+                
+                # Find the base timeframe (highest frequency) and its length
+                base_tf = None
+                base_length = 0
+                
+                # Determine the timeframe with the most samples (highest frequency)
+                timeframe_lengths = {}
+                for tf in self.timeframes.keys():
+                    # Get the length of one feature from this timeframe
+                    if self.timeframes[tf]:
+                        feature = self.timeframes[tf][0]
+                        tf_length = len(self.data[f"{tf}_{feature}"])
+                        timeframe_lengths[tf] = tf_length
+                        if base_tf is None or tf_length > base_length:
+                            base_tf = tf
+                            base_length = tf_length
+                
+                logger.info(f"Base timeframe is {base_tf} with {base_length} samples")
+                for tf, length in timeframe_lengths.items():
+                    logger.info(f"Timeframe {tf} has {length} samples")
+                
+                # Use the length of the labels if available
+                self.data_length = len(self.labels)
+                
+                # Ensure labels match the base timeframe length
+                if len(self.labels) != base_length:
+                    logger.warning(f"Labels length ({len(self.labels)}) doesn't match base timeframe length ({base_length}), adjusting...")
+                    
+                    # If labels are longer, truncate
+                    if len(self.labels) > base_length:
+                        self.labels = self.labels[:base_length]
+                    # If labels are shorter, pad with zeros (this should be rare)
+                    elif len(self.labels) < base_length:
+                        padding = torch.zeros(base_length - len(self.labels), dtype=torch.long)
+                        self.labels = torch.cat([self.labels, padding])
+                    
+                    self.data_length = base_length
+                
+                # Resample lower frequency data to match the base timeframe length
+                for tf in self.timeframes.keys():
+                    if tf != base_tf:
+                        tf_length = timeframe_lengths.get(tf, 0)
+                        
+                        # Only process if we have features for this timeframe
+                        if tf_length > 0:
+                            for feature in self.timeframes[tf]:
+                                feature_key = f"{tf}_{feature}"
+                                source_tensor = self.data[feature_key]
+                                
+                                # If source is shorter than target (lower frequency data)
+                                if len(source_tensor) < base_length:
+                                    logger.info(f"Upsampling {feature_key} from {len(source_tensor)} to {base_length} samples")
+                                    
+                                    # Create indices for nearest-neighbor upsampling
+                                    # This effectively repeats each value the appropriate number of times
+                                    indices = torch.linspace(0, len(source_tensor) - 1, base_length).long()
+                                    upsampled = source_tensor[indices]
+                                    self.data[feature_key] = upsampled
+                                # If source is longer than target (this should be rare)
+                                elif len(source_tensor) > base_length:
+                                    logger.warning(f"Feature {feature_key} has length {len(source_tensor)}, truncating to {base_length}.")
+                                    self.data[feature_key] = source_tensor[:base_length]
+                
+                logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
+            
+            def __len__(self):
+                return self.data_length
+            
+            def __getitem__(self, idx):
+                # Ensure index is in bounds
+                if idx >= self.data_length:
+                    raise IndexError(f"Index {idx} is out of bounds for dataset with length {self.data_length}")
+                
+                # Organize data by timeframe for model consumption
+                sample = {}
+                for tf in self.timeframes:
+                    # Check if this timeframe has any features
+                    if not self.timeframes[tf]:
+                        continue  # Skip empty timeframes
+                        
+                    # Stack features into a tensor of shape (num_features,)
+                    try:
+                        features = torch.stack([
+                            self.data[f"{tf}_{feature}"][idx] 
+                            for feature in self.timeframes[tf]
+                        ])
+                        
+                        # LSTM expects input shape (batch_size, seq_len, input_size)
+                        # For a single sample, we need shape (seq_len, input_size)
+                        # Since we only have one time step per sample, seq_len=1
+                        # input_size = number of features
+                        # The features tensor is currently shape (num_features,)
+                        # We need to reshape to (1, num_features) for the LSTM
+                        sample[tf] = features.unsqueeze(0)  # Add sequence dimension -> (1, num_features)
+                    except IndexError as e:
+                        logger.error(f"Index error for {tf} at idx={idx}: {str(e)}")
+                        raise
+                    except Exception as e:
+                        logger.error(f"Error processing timeframe {tf} at idx={idx}: {str(e)}")
+                        # Provide an empty tensor as fallback
+                        sample[tf] = torch.zeros((1, 1), dtype=torch.float32)
+                
+                sample['label'] = self.labels[idx]
+                return sample
+        
+        # Create test dataset
         test_dataset = TimeSeriesDataset(test_data, test_labels)
         
         # Get the number of workers
@@ -252,6 +384,8 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate the trained LSTM model on test data")
     parser.add_argument("--model_dir", type=str, default="models/lstm_improved",
                       help="Directory containing the trained model and configuration")
+    parser.add_argument("--model_path", type=str, default=None,
+                      help="Path to specific model file (default: looks for final_model.pt in model_dir)")
     parser.add_argument("--data_dir", type=str, default="data/synthetic",
                       help="Directory containing the data files")
     parser.add_argument("--batch_size", type=int, default=256,
@@ -266,7 +400,8 @@ def main():
         model_dir=args.model_dir,
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        model_path=args.model_path
     )
     
     if results:
