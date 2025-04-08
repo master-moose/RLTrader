@@ -355,8 +355,9 @@ def train_dqn_agent(args):
             
             # Store transitions in replay buffer using vectorized operations
             if len(agent.memory) >= agent.batch_size:
-                # Sample batch indices
-                indices = np.random.choice(len(agent.memory), args.batch_size, replace=False)
+                # Sample batch indices - ensure we don't sample more than available items
+                sample_size = min(len(agent.memory), agent.batch_size)
+                indices = np.random.choice(len(agent.memory), sample_size, replace=False)
                 batch = [agent.memory[i] for i in indices]
                 
                 # Convert batch to tensors efficiently
@@ -369,10 +370,10 @@ def train_dqn_agent(args):
                 
                 # Update networks using vectorized operations
                 with torch.cuda.amp.autocast():
-                    current_q_values = agent.policy_net(replay_states).gather(1, replay_actions.unsqueeze(1))
+                    current_q_values = agent.policy_net(replay_states[:sample_size]).gather(1, replay_actions[:sample_size].unsqueeze(1))
                     with torch.no_grad():
-                        next_q_values = agent.target_net(replay_next_states).max(1)[0]
-                        expected_q_values = replay_rewards + (1 - replay_dones.float()) * agent.gamma * next_q_values
+                        next_q_values = agent.target_net(replay_next_states[:sample_size]).max(1)[0]
+                        expected_q_values = replay_rewards[:sample_size] + (1 - replay_dones[:sample_size].float()) * agent.gamma * next_q_values
                     
                     loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
                 
