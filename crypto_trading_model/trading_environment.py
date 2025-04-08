@@ -418,13 +418,13 @@ class TradingEnvironment:
             portfolio_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
         
         # 2. Trade execution penalty - stronger penalty for excessive trading
-        trade_penalty = -0.05 if trade_executed else 0  # Increased from -0.02
+        trade_penalty = -0.03 if trade_executed else 0  # Reduced from -0.05 to be less punitive
         
         # Additional penalty for trying to trade during cooldown
-        cooldown_penalty = -0.05 if cooldown_active and (action == 1 or action == 2) else 0  # Increased from -0.02
+        cooldown_penalty = -0.03 if cooldown_active and (action == 1 or action == 2) else 0  # Reduced from -0.05
         
         # Reward for holding (not trading) - encourage patience
-        hold_reward = 0.001 if action == 0 else 0  # Increased from 0.0002
+        hold_reward = 0.002 if action == 0 else 0  # Increased from 0.001
         
         # 3. Trend-following component - improved trend detection
         trend_reward = 0
@@ -473,12 +473,14 @@ class TradingEnvironment:
         
         # 6. Balance maintenance - reward for maintaining/growing account balance
         balance_reward = 0
-        if self.balance > self.initial_balance:  # Growing account
-            balance_reward = 0.01  # Increased from 0.005
+        if self.balance > self.initial_balance * 1.05:  # More than 5% profit
+            balance_reward = 0.03  # Significant reward for growing account
+        elif self.balance > self.initial_balance:  # Growing account
+            balance_reward = 0.015  # Increased from 0.01
         elif self.balance > self.initial_balance * 0.95:  # Preserving capital
-            balance_reward = 0.005  # Increased from 0.003
+            balance_reward = 0.008  # Increased from 0.005
         elif self.balance > self.initial_balance * 0.9:  # Minor drawdown
-            balance_reward = 0.002  # Increased from 0.001
+            balance_reward = 0.003  # Increased from 0.002
         
         # Apply strong penalty if balance drops too low
         low_balance_penalty = 0
@@ -490,7 +492,7 @@ class TradingEnvironment:
             low_balance_penalty = -0.1  # Increased from -0.05
         
         # 7. Stop loss penalty - extra penalty for hitting stop loss
-        stop_loss_penalty = -0.03 if stop_loss_triggered else 0  # New penalty
+        stop_loss_penalty = -0.02 if stop_loss_triggered else 0  # Reduced from -0.03
         
         # Combine all reward components
         reward = (
@@ -507,8 +509,8 @@ class TradingEnvironment:
             stop_loss_penalty              # New component
         ) * self.reward_scaling
         
-        # Apply reward clipping to handle extreme values
-        reward = np.clip(reward, -1.0, 1.0)
+        # Apply reward clipping to handle extreme values - less aggressive clipping
+        reward = np.clip(reward, -0.5, 0.5)  # Changed from (-1.0, 1.0) to be less extreme
         
         # Track returns for visualization
         self.returns.append(reward)
