@@ -270,7 +270,7 @@ def train_dqn_agent(args):
     envs = []
     for i in range(args.num_workers):
         env = TradingEnvironment(
-            market_data=market_data,
+            data_path=h5_file_path,
             initial_balance=args.initial_balance,
             transaction_fee=args.transaction_fee,
             window_size=args.window_size,
