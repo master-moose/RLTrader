@@ -250,12 +250,32 @@ class DQNAgent:
         # Sample a batch of experiences
         batch = random.sample(self.memory, self.batch_size)
         
-        # Convert batch to tensors
-        state_batch = torch.stack([x[0] for x in batch]).to(self.device)
-        action_batch = torch.tensor([x[1] for x in batch], device=self.device)
-        reward_batch = torch.tensor([x[2] for x in batch], dtype=torch.float32, device=self.device)
-        next_state_batch = torch.stack([x[3] for x in batch]).to(self.device)
-        done_batch = torch.tensor([x[4] for x in batch], dtype=torch.float32, device=self.device)
+        # Convert batch to tensors, handling both numpy arrays and tensors
+        state_batch = []
+        action_batch = []
+        reward_batch = []
+        next_state_batch = []
+        done_batch = []
+        
+        for state, action, reward, next_state, done in batch:
+            # Convert numpy arrays to tensors if needed
+            if isinstance(state, np.ndarray):
+                state = torch.from_numpy(state).float()
+            if isinstance(next_state, np.ndarray):
+                next_state = torch.from_numpy(next_state).float()
+            
+            state_batch.append(state)
+            action_batch.append(action)
+            reward_batch.append(reward)
+            next_state_batch.append(next_state)
+            done_batch.append(done)
+        
+        # Stack tensors and move to device
+        state_batch = torch.stack(state_batch).to(self.device)
+        action_batch = torch.tensor(action_batch, device=self.device)
+        reward_batch = torch.tensor(reward_batch, dtype=torch.float32, device=self.device)
+        next_state_batch = torch.stack(next_state_batch).to(self.device)
+        done_batch = torch.tensor(done_batch, dtype=torch.float32, device=self.device)
         
         # Get current Q values
         current_q_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
