@@ -190,7 +190,6 @@ def train_dqn_agent(args):
     agent = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
-        lstm_model=lstm_model,
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         epsilon_start=args.epsilon_start,
@@ -198,8 +197,7 @@ def train_dqn_agent(args):
         epsilon_decay=args.epsilon_decay,
         buffer_size=100000,  # Increased for more diverse experiences
         batch_size=args.batch_size,
-        device=device,
-        use_amp=args.use_amp  # Enable AMP if specified in command line
+        device=device
     )
     
     # Verify AMP setup
