@@ -260,6 +260,9 @@ def train_dqn_agent(args):
     total_experiences = 0
     update_counter = 0
     
+    # Pre-allocate tensors for states to avoid repeated allocations
+    states_tensor = torch.zeros((args.num_workers, state_dim), device=device)
+    
     for episode in range(1, args.episodes + 1):
         # Reset all environments with random starting points
         states = []
@@ -272,6 +275,13 @@ def train_dqn_agent(args):
             env.start_step = random_start
             states.append(env.reset())
             
+        # Convert states to tensor for faster processing
+        for i, state in enumerate(states):
+            if isinstance(state, np.ndarray):
+                states_tensor[i] = torch.from_numpy(state).float()
+            else:
+                states_tensor[i] = state
+                
         dones = [False] * args.num_workers
         episode_rewards_per_env = [0] * args.num_workers
         steps_per_env = [0] * args.num_workers
@@ -288,113 +298,130 @@ def train_dqn_agent(args):
         # Continue as long as at least one environment is active and steps are within limit
         step_counter = 0
         while active_envs > 0 and step_counter < max_episode_steps:
-            step_counter += 1
+            # Select actions for all environments at once
+            actions = []
+            for i in range(args.num_workers):
+                if not dones[i]:
+                    # Use the pre-allocated tensor for this environment
+                    action = agent.select_action(states_tensor[i], training=True)
+                    actions.append(action)
+                else:
+                    actions.append(0)  # Dummy action for done environments
             
-            # For each active environment
-            for env_idx in range(args.num_workers):
-                if dones[env_idx]:
-                    continue
-                
-                # Select action for this environment
-                action = agent.select_action(states[env_idx])
-                
-                # Take step in environment
-                next_state, reward, done, info = envs[env_idx].step(action)
-                
-                # Force done if we've reached the episode length
-                if steps_per_env[env_idx] >= max_episode_steps - 1:
-                    done = True
-                
-                # Store transition in replay buffer
-                agent.store_transition(states[env_idx], action, reward, next_state, done)
-                total_experiences += 1
-                update_counter += 1
-                
-                # Update state and rewards
-                states[env_idx] = next_state
-                episode_rewards_per_env[env_idx] += reward
-                steps_per_env[env_idx] += 1
-                
-                # Check if this environment is done
-                if done:
-                    dones[env_idx] = True
-                    active_envs -= 1
+            # Step all environments
+            next_states = []
+            rewards = []
+            new_dones = []
+            balances = []
+            trade_counts = []
             
-            # Update agent (from common replay buffer) multiple times per step if specified
-            if len(agent.memory) > args.batch_size and update_counter >= args.num_workers:
-                # Multiple updates per batch of experiences
+            for i in range(args.num_workers):
+                if not dones[i]:
+                    next_state, reward, done, info = envs[i].step(actions[i])
+                    next_states.append(next_state)
+                    rewards.append(reward)
+                    new_dones.append(done)
+                    balances.append(info.get('balance', 0))
+                    trade_counts.append(info.get('trades', 0))
+                    
+                    # Update episode rewards and steps
+                    episode_rewards_per_env[i] += reward
+                    steps_per_env[i] += 1
+                    
+                    # Update states tensor for next iteration
+                    if isinstance(next_state, np.ndarray):
+                        states_tensor[i] = torch.from_numpy(next_state).float()
+                    else:
+                        states_tensor[i] = next_state
+                else:
+                    next_states.append(states[i])  # Keep old state for done environments
+                    rewards.append(0)
+                    new_dones.append(True)
+                    balances.append(0)
+                    trade_counts.append(0)
+            
+            # Store transitions in replay buffer
+            for i in range(args.num_workers):
+                if not dones[i]:
+                    agent.store_transition(states[i], actions[i], rewards[i], next_states[i], new_dones[i])
+                    total_experiences += 1
+            
+            # Update states and dones
+            states = next_states
+            dones = new_dones
+            
+            # Count active environments
+            active_envs = sum(1 for d in dones if not d)
+            
+            # Update progress bar with average metrics
+            avg_reward = sum(r for i, r in enumerate(rewards) if not dones[i]) / max(1, active_envs)
+            avg_balance = sum(b for i, b in enumerate(balances) if not dones[i]) / max(1, active_envs)
+            avg_trades = sum(t for i, t in enumerate(trade_counts) if not dones[i]) / max(1, active_envs)
+            
+            progress_bar.set_postfix({
+                'reward': f"{avg_reward:.2f}",
+                'balance': f"{avg_balance:.2f}",
+                'trades': f"{avg_trades:.0f}",
+                'active_envs': active_envs
+            })
+            progress_bar.update(1)
+            
+            # Update the agent if we have enough experiences
+            if len(agent.memory) >= agent.batch_size:
                 for _ in range(args.updates_per_step):
                     loss = agent.update()
                     total_updates += 1
-                
-                update_counter = 0
-                
-                # Log debug info occasionally
-                if args.debug and total_updates % 100 == 0:
-                    logger.debug(f"Updates: {total_updates}, Loss: {loss:.4f}")
+                    update_counter += 1
             
-            # Update progress bar
-            progress_bar.update(1)
-            
-            # Find an active environment for the progress bar stats
-            active_idx = next((i for i, d in enumerate(dones) if not d), 0)
-            if active_idx < len(envs):  # Ensure valid index
-                progress_bar.set_postfix({
-                    'reward': f"{episode_rewards_per_env[active_idx]:.2f}",
-                    'balance': f"{envs[active_idx].balance:.2f}",
-                    'trades': envs[active_idx].total_trades,
-                    'active_envs': active_envs
-                })
+            step_counter += 1
         
+        # Close progress bar
         progress_bar.close()
         
-        # Decay epsilon
-        agent.epsilon = max(args.epsilon_end, agent.epsilon * args.epsilon_decay)
+        # Calculate episode metrics
+        episode_reward = sum(episode_rewards_per_env) / args.num_workers
+        episode_profit = sum(env.balance - args.initial_balance for env in envs) / args.num_workers
+        episode_trade_count = sum(env.trade_count for env in envs) / args.num_workers
         
-        # Calculate average statistics across environments
-        avg_episode_reward = sum(episode_rewards_per_env) / args.num_workers
-        avg_profit = sum([env.total_profit for env in envs]) / args.num_workers
-        avg_trades = sum([env.total_trades for env in envs]) / args.num_workers
+        # Store episode metrics
+        episode_rewards.append(episode_reward)
+        episode_profits.append(episode_profit)
+        episode_trades.append(episode_trade_count)
         
-        # Store episode statistics (using averages)
-        episode_rewards.append(avg_episode_reward)
-        episode_profits.append(avg_profit)
-        episode_trades.append(avg_trades)
+        # Log episode results
+        logger.info(
+            f"Episode {episode}/{args.episodes} - "
+            f"Avg Reward: {episode_reward:.2f}, "
+            f"Avg Profit: {episode_profit:.2f}, "
+            f"Avg Trades: {episode_trade_count:.1f}, "
+            f"Epsilon: {agent.epsilon:.4f}, "
+            f"Buffer: {len(agent.memory)}"
+        )
         
-        logger.info(f"Episode {episode}/{args.episodes} - "
-                   f"Avg Reward: {avg_episode_reward:.2f}, "
-                   f"Avg Profit: {avg_profit:.2f}, "
-                   f"Avg Trades: {avg_trades:.1f}, "
-                   f"Epsilon: {agent.epsilon:.4f}, "
-                   f"Buffer: {len(agent.memory)}")
+        # Save model if it's the best so far
+        if episode_reward > best_reward:
+            best_reward = episode_reward
+            agent.save(os.path.join(args.output_dir, 'dqn_agent_best.pt'))
+            logger.info(f"New best model saved with reward {episode_reward:.2f}")
         
-        # Update target network
-        if episode % args.update_target_frequency == 0:
-            agent.target_net.load_state_dict(agent.policy_net.state_dict())
-            logger.info(f"Target network updated at episode {episode}")
-        
-        # Save model checkpoint
-        if episode % args.save_frequency == 0 or episode == args.episodes:
-            checkpoint_path = os.path.join(args.output_dir, f"dqn_agent_episode_{episode}.pt")
-            agent.save(checkpoint_path)
-            logger.info(f"Model checkpoint saved to {checkpoint_path}")
-        
-        # Save best model
-        if avg_episode_reward > best_reward:
-            best_reward = avg_episode_reward
-            best_model_path = os.path.join(args.output_dir, "dqn_agent_best.pt")
-            agent.save(best_model_path)
-            logger.info(f"New best model saved with reward {best_reward:.2f}")
+        # Save checkpoint periodically
+        if episode % args.save_frequency == 0:
+            agent.save(os.path.join(args.output_dir, f'dqn_agent_episode_{episode}.pt'))
+            logger.info(f"Checkpoint saved at episode {episode}")
     
     # Save final model
-    final_model_path = os.path.join(args.output_dir, "dqn_agent_final.pt")
-    agent.save(final_model_path)
-    logger.info(f"Final model saved to {final_model_path}")
+    agent.save(os.path.join(args.output_dir, 'dqn_agent_final.pt'))
+    logger.info("Training completed. Final model saved.")
     
-    # Plot and save training results
-    plot_training_results(episode_rewards, episode_profits, episode_trades, args.output_dir)
+    # Plot training metrics
+    plot_training_metrics(
+        episode_rewards, 
+        episode_profits, 
+        episode_trades, 
+        args.output_dir
+    )
     
-    logger.info(f"Training completed. Total updates: {total_updates}, experiences: {total_experiences}")
+    return agent
 
 def plot_training_results(rewards, profits, trades, output_dir):
     """
