@@ -263,11 +263,14 @@ class TradingEnvironment:
         # Check if we're in cooldown period - prevent trading too frequently
         cooldown_active = self.trade_cooldown > 0 and self.steps_since_last_trade < self.trade_cooldown
         
+        # Get price history for trend detection
+        price_history = self._get_price_history(20)  # Get last 20 prices
+        
         # Execute action
         if action == 1:  # Buy
             if self.position == 0 and not cooldown_active:  # No position -> Long
-                # Use only 50% of available balance to avoid all-in trades
-                use_balance = min(self.balance * 0.5, self.initial_balance * 0.3)
+                # Use only 25% of available balance to avoid all-in trades (reduced from 50%)
+                use_balance = min(self.balance * 0.25, self.initial_balance * 0.25)
                 
                 # Only trade if we have enough balance (at least 1% of initial)
                 if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
@@ -304,8 +307,8 @@ class TradingEnvironment:
                 
         elif action == 2:  # Sell
             if self.position == 0 and not cooldown_active:  # No position -> Short
-                # Use only 50% of available balance as collateral
-                use_balance = min(self.balance * 0.5, self.initial_balance * 0.3)
+                # Use only 25% of available balance as collateral (reduced from 50%)
+                use_balance = min(self.balance * 0.25, self.initial_balance * 0.25)
                 
                 # Only trade if we have enough balance (at least 1% of initial)
                 if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
@@ -345,65 +348,82 @@ class TradingEnvironment:
         
         # Calculate reward components
         
-        # 1. Portfolio change component - primary reward signal
+        # 1. Portfolio change component - primary reward signal with stronger weight
         portfolio_change = 0
         if portfolio_value_before > 0:
             portfolio_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
         
-        # 2. Trade execution penalty - stronger penalty for excessive trading
-        trade_penalty = -0.01 if trade_executed else 0
+        # 2. Trade execution penalty - stronger penalty for excessive trading (increased penalty)
+        trade_penalty = -0.02 if trade_executed else 0
         
         # Additional penalty for trying to trade during cooldown
         cooldown_penalty = -0.02 if cooldown_active and (action == 1 or action == 2) else 0
         
         # Reward for holding (not trading) - encourage patience
-        hold_reward = 0.0001 if action == 0 else 0
+        hold_reward = 0.0002 if action == 0 else 0
         
-        # 3. Position holding component - encourage holding profitable positions
+        # 3. Trend-following component - reward for following the market trend
+        trend_reward = 0
+        if len(price_history) >= 5:
+            # Calculate short-term trend
+            short_trend = price_history[-1] / price_history[-5] - 1  # Last 5 periods
+            
+            # Reward for trend-aligned actions
+            if self.position == 1 and short_trend > 0:  # Long in uptrend
+                trend_reward = 0.002
+            elif self.position == -1 and short_trend < 0:  # Short in downtrend
+                trend_reward = 0.002
+            elif self.position == 0 and abs(short_trend) < 0.002:  # Flat market, good to wait
+                trend_reward = 0.001
+        
+        # 4. Position holding component - encourage holding profitable positions
         position_reward = 0
         if self.position == 1 and current_price > self.position_price:  # Long position in profit
-            position_reward = 0.001
+            position_reward = 0.002
         elif self.position == -1 and current_price < self.position_price:  # Short position in profit
-            position_reward = 0.001
+            position_reward = 0.002
         
         # Apply penalty for holding losing positions
         holding_loss_penalty = 0
-        if self.position == 1 and current_price < self.position_price * 0.95:  # 5% loss in long
-            holding_loss_penalty = -0.005
-        elif self.position == -1 and current_price > self.position_price * 1.05:  # 5% loss in short
-            holding_loss_penalty = -0.005
+        if self.position == 1 and current_price < self.position_price * 0.98:  # 2% loss in long (increased sensitivity)
+            holding_loss_penalty = -0.01
+        elif self.position == -1 and current_price > self.position_price * 1.02:  # 2% loss in short (increased sensitivity)
+            holding_loss_penalty = -0.01
             
-        # 4. Profit realization reward - bonus for taking profits
+        # 5. Profit realization reward - bonus for taking profits
         profit_reward = 0
         if trade_type == "close_long" and profit > 0:
             profit_pct = profit / (self.position_size * self.position_price) if self.position_size * self.position_price > 0 else 0
-            profit_reward = 0.02 * min(profit_pct * 100, 5)  # Scale with % profit, max 5%
+            profit_reward = 0.05 * min(profit_pct * 100, 5)  # Scale with % profit, max 5% (increased reward)
         elif trade_type == "close_short" and profit > 0:
             profit_pct = profit / (self.position_size * self.position_price) if self.position_size * self.position_price > 0 else 0
-            profit_reward = 0.02 * min(profit_pct * 100, 5)  # Scale with % profit, max 5%
+            profit_reward = 0.05 * min(profit_pct * 100, 5)  # Scale with % profit, max 5% (increased reward)
         
-        # 5. Balance maintenance - reward for maintaining/growing account balance
+        # 6. Balance maintenance - reward for maintaining/growing account balance (strengthened)
         balance_reward = 0
         if self.balance > self.initial_balance:  # Growing account
-            balance_reward = 0.002
-        elif self.balance > self.initial_balance * 0.9:  # Preserving capital
+            balance_reward = 0.005
+        elif self.balance > self.initial_balance * 0.95:  # Preserving capital
+            balance_reward = 0.003
+        elif self.balance > self.initial_balance * 0.9:  # Minor drawdown
             balance_reward = 0.001
         
         # Apply strong penalty if balance drops too low
         low_balance_penalty = 0
-        if self.balance < self.initial_balance * 0.7:  # Lost more than 30%
+        if self.balance < self.initial_balance * 0.8:  # Lost more than 20%
             low_balance_penalty = -0.01
-        elif self.balance < self.initial_balance * 0.65:  # Lost more than 35%
+        elif self.balance < self.initial_balance * 0.7:  # Lost more than 30%
             low_balance_penalty = -0.03
-        elif self.balance < self.initial_balance * 0.6:  # Approaching 40% drawdown limit
-            low_balance_penalty = -0.05  # Strong penalty as we approach termination threshold
+        elif self.balance < self.initial_balance * 0.65:  # Lost more than 35%
+            low_balance_penalty = -0.05
         
         # Combine all reward components
         reward = (
-            portfolio_change * 2.0 +       # Main component with stronger weight
+            portfolio_change * 3.0 +       # Main component with stronger weight (increased)
             trade_penalty +
             cooldown_penalty +
             hold_reward +
+            trend_reward +                 # New trend component
             position_reward +
             holding_loss_penalty +
             profit_reward +
@@ -577,6 +597,30 @@ class TradingEnvironment:
         ]
         
         return np.array(position_features, dtype=np.float32)
+    
+    def _get_price_history(self, lookback):
+        """
+        Get price history for the last n steps.
+        
+        Parameters:
+        -----------
+        lookback : int
+            Number of past prices to retrieve
+            
+        Returns:
+        --------
+        list
+            List of historical prices
+        """
+        # Ensure we don't go beyond available data
+        start_idx = max(0, self.current_step - lookback)
+        end_idx = self.current_step
+        
+        # Get closing prices for the primary timeframe
+        if start_idx < end_idx:
+            return self.market_data[self.primary_tf]['close'].iloc[start_idx:end_idx].values
+        else:
+            return []
     
     def render(self, mode='human'):
         """

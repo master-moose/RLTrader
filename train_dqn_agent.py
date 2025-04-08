@@ -46,12 +46,12 @@ def parse_args():
                         help='Discount factor for future rewards')
     parser.add_argument('--epsilon_start', type=float, default=1.0,
                         help='Initial exploration rate')
-    parser.add_argument('--epsilon_end', type=float, default=0.01,
-                        help='Final exploration rate')
-    parser.add_argument('--epsilon_decay', type=float, default=0.995,
-                        help='Exploration rate decay factor')
-    parser.add_argument('--learning_rate', type=float, default=0.0001,
-                        help='Learning rate for the Q-network')
+    parser.add_argument('--epsilon_end', type=float, default=0.05,
+                        help='Final exploration rate (decreased from 0.01 for better exploration)')
+    parser.add_argument('--epsilon_decay', type=float, default=0.998,
+                        help='Exploration rate decay factor (increased from 0.995 for slower decay)')
+    parser.add_argument('--learning_rate', type=float, default=0.0005,
+                        help='Learning rate for the Q-network (increased from 0.0001 for faster learning)')
     parser.add_argument('--update_target_frequency', type=int, default=10,
                         help='Frequency of target network updates (episodes)')
     

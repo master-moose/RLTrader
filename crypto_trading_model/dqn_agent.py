@@ -45,13 +45,17 @@ class QNetwork(nn.Module):
         """
         super(QNetwork, self).__init__()
         
-        # Remove flattening layer as input is already flattened (1D)
+        # Create a deeper network with dropout for better regularization
         self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.2),  # Add dropout for regularization
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)
+            nn.Dropout(0.2),  # Add dropout for regularization
+            nn.Linear(hidden_dim, hidden_dim // 2),  # Add intermediate layer with fewer neurons
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, action_dim)
         )
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
