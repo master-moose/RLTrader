@@ -224,6 +224,23 @@ def train_dqn_agent(args):
             # Get the dataset for this timeframe
             dataset = h5f[tf]
             
+            # Check if this is a dataset or a group
+            if isinstance(dataset, h5py.Group):
+                logger.info(f"Timeframe {tf} is a group, looking for datasets inside")
+                # If it's a group, find the actual dataset inside
+                if 'data' in dataset:
+                    dataset = dataset['data']
+                    logger.info(f"Found 'data' dataset in group {tf}")
+                else:
+                    # Try to find any dataset in the group
+                    dataset_names = list(dataset.keys())
+                    if dataset_names:
+                        dataset = dataset[dataset_names[0]]
+                        logger.info(f"Using dataset '{dataset_names[0]}' from group {tf}")
+                    else:
+                        logger.error(f"No datasets found in group {tf}")
+                        continue
+            
             # Log dataset information
             logger.info(f"Dataset for {tf}: shape={dataset.shape}, dtype={dataset.dtype}")
             
