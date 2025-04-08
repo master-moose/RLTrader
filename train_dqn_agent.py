@@ -228,8 +228,8 @@ def train_dqn_agent(args):
             columns = dataset.attrs.get('columns', 
                         ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # Get the actual dataset from the group
-            data = dataset['data'][:]  # Access the 'data' dataset and read it
+            # Read the entire dataset directly
+            data = dataset[:]  # The dataset itself contains the data
             
             # Create DataFrame and set timestamp as index
             df = pd.DataFrame(data, columns=columns)
