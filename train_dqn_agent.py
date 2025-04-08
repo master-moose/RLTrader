@@ -171,7 +171,8 @@ def train_dqn_agent(args):
     set_seeds(args.seed)
     
     # Set device
-    device = "cuda" if torch.cuda.is_available() and args.use_gpu else "cpu"
+    use_cuda = torch.cuda.is_available() and (args.device == 'cuda' or args.use_amp)
+    device = "cuda" if use_cuda else "cpu"
     logger.info(f"Using device: {device}")
     
     # Advanced GPU optimizations
