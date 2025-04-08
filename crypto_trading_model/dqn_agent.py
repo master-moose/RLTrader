@@ -16,7 +16,8 @@ import torch.optim as optim
 from collections import deque, namedtuple
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Union, Optional, Any
-from torch.cuda.amp import autocast, GradScaler  # Import AMP tools
+from torch.cuda.amp import GradScaler  # Remove autocast import
+from torch.amp import autocast  # Use the new location for autocast
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -152,6 +153,13 @@ class DQNAgent:
                 logger.info("Using Automatic Mixed Precision (AMP)")
                 logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
                 logger.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
+                
+                # When using AMP, use a smaller learning rate for better stability
+                if self.learning_rate > 0.0001:
+                    logger.info(f"Reducing learning rate for AMP stability: {self.learning_rate} -> {self.learning_rate * 0.6}")
+                    self.learning_rate *= 0.6
+                    # Recreate optimizer with the reduced learning rate
+                    self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
             except Exception as e:
                 logger.warning(f"Failed to initialize AMP GradScaler: {str(e)}")
                 logger.warning("Falling back to full precision training")
@@ -347,8 +355,12 @@ class DQNAgent:
             # Zero gradients for next round
             self.optimizer.zero_grad()
             
-            # Use mixed precision for forward pass
-            with autocast():
+            # Use mixed precision for forward pass - using the new API
+            with autocast(device_type='cuda', dtype=torch.float16):
+                # Pre-normalize inputs for better numerical stability
+                states = states / (states.abs().max().detach() + 1e-8) if states.abs().max() > 1.0 else states
+                next_states = next_states / (next_states.abs().max().detach() + 1e-8) if next_states.abs().max() > 1.0 else next_states
+                
                 # Compute current Q values - states already has batch dimension
                 q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
                 
@@ -357,17 +369,21 @@ class DQNAgent:
                     next_actions = self.q_network(next_states).argmax(1, keepdim=True)
                     next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
                 
-                # Compute target Q values
-                target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
+                # Apply reward and Q-value scaling for better numerical stability
+                rewards_scaled = rewards.clamp(-10.0, 10.0)  # Ensure rewards are in reasonable range
+                next_q_values_scaled = next_q_values.clamp(-100.0, 100.0)  # Prevent extreme Q-values
                 
-                # Check for NaN values in target Q-values
+                # Compute target Q values with clamped inputs
+                target_q_values = rewards_scaled + (1 - dones) * self.gamma * next_q_values_scaled
+                
+                # Additional safety check for NaN/Inf before computing loss
                 if torch.isnan(target_q_values).any() or torch.isinf(target_q_values).any():
                     logger.warning("NaN or Inf detected in target Q-values, skipping update")
                     return 0.0
                 
-                # Compute loss 
-                loss = nn.MSELoss()(q_values, target_q_values.detach())
-                
+                # Use Huber loss instead of MSE for better stability with outliers
+                loss = nn.SmoothL1Loss()(q_values, target_q_values.detach())
+            
             # Check for NaN loss
             if torch.isnan(loss) or torch.isinf(loss):
                 logger.warning(f"NaN or Inf loss detected: {loss.item()}, skipping update")
@@ -378,7 +394,7 @@ class DQNAgent:
             
             # Apply gradient clipping to prevent exploding gradients (on scaled gradients)
             self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=0.5)  # Reduced from 1.0 for stability
             
             # Perform scaled optimizer step and update scaler
             self.scaler.step(self.optimizer)
