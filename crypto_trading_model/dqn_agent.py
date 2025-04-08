@@ -45,7 +45,9 @@ class QNetwork(nn.Module):
         """
         super(QNetwork, self).__init__()
         
+        # Add a flattening layer to handle potentially multidimensional input
         self.network = nn.Sequential(
+            nn.Flatten(),  # Flatten any multi-dimensional input
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),

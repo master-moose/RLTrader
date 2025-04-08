@@ -127,7 +127,9 @@ class TradingEnvironment:
         feature_count = 0
         for tf, df in self.market_data.items():
             # Count all columns except index and timestamp
-            feature_count += len(df.columns) - 2  # Assuming index and timestamp columns
+            feature_columns = len([col for col in df.columns if col not in ['index', 'timestamp']])
+            # Multiply by window size since we're using a window of data
+            feature_count += feature_columns * self.window_size
         
         # Add position features if used
         if self.use_position_features:
@@ -385,11 +387,12 @@ class TradingEnvironment:
             # Extract features (excluding index and timestamp)
             for col in df.columns:
                 if col not in ['index', 'timestamp']:
-                    # Use the values in the window
-                    feature_values = window[col].values
-                    features.extend(feature_values)
+                    # Use the values in the window as a flat array
+                    feature_values = window[col].values.flatten()
+                    features.append(feature_values)
         
-        return np.array(features, dtype=np.float32)
+        # Stack all features and flatten to 1D array
+        return np.hstack(features).astype(np.float32)
     
     def _get_position_features(self):
         """
