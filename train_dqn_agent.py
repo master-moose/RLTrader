@@ -62,6 +62,8 @@ def parse_args():
                         help='Frequency of target network updates (episodes)')
     parser.add_argument('--updates_per_step', type=int, default=1,
                         help='Number of network updates per environment step')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
     
     # Environment parameters
     parser.add_argument('--window_size', type=int, default=20,
