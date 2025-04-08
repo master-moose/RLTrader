@@ -40,8 +40,8 @@ def parse_args():
                         help='Number of episodes to train')
     parser.add_argument('--max_steps', type=int, default=None,
                         help='Maximum steps per episode (None uses full data)')
-    parser.add_argument('--batch_size', type=int, default=64,
-                        help='Batch size for experience replay')
+    parser.add_argument('--batch_size', type=int, default=256,
+                        help='Batch size for experience replay (increased from 64 for more stable learning)')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='Discount factor for future rewards')
     parser.add_argument('--epsilon_start', type=float, default=1.0,
@@ -250,7 +250,7 @@ def train_dqn_agent(args):
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay=args.epsilon_decay,
-        buffer_size=10000,
+        buffer_size=50000,
         batch_size=args.batch_size,
         device=device
     )

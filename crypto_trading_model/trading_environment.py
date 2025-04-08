@@ -210,9 +210,9 @@ class TradingEnvironment:
         # Check if episode is done
         done = self.current_step >= self.data_length - 1
         
-        # Also end episode early if balance drops too low (prevent complete depletion)
-        if self.balance < self.initial_balance * 0.1:  # Lost 90% of initial balance
-            logger.warning(f"Ending episode early due to low balance: {self.balance:.2f}")
+        # End episode early on 40% drawdown (previously 90%)
+        if self.balance < self.initial_balance * 0.6:  # Lost 40% of initial balance
+            logger.warning(f"Ending episode early due to 40% drawdown: {self.balance:.2f} (initial: {self.initial_balance:.2f})")
             done = True
         
         # Get new observation
@@ -391,10 +391,12 @@ class TradingEnvironment:
         
         # Apply strong penalty if balance drops too low
         low_balance_penalty = 0
-        if self.balance < self.initial_balance * 0.5:  # Lost more than 50%
+        if self.balance < self.initial_balance * 0.7:  # Lost more than 30%
             low_balance_penalty = -0.01
-        elif self.balance < self.initial_balance * 0.25:  # Lost more than 75%
-            low_balance_penalty = -0.05
+        elif self.balance < self.initial_balance * 0.65:  # Lost more than 35%
+            low_balance_penalty = -0.03
+        elif self.balance < self.initial_balance * 0.6:  # Approaching 40% drawdown limit
+            low_balance_penalty = -0.05  # Strong penalty as we approach termination threshold
         
         # Combine all reward components
         reward = (
