@@ -228,8 +228,8 @@ def train_dqn_agent(args):
             columns = dataset.attrs.get('columns', 
                         ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # Read the entire dataset directly
-            data = dataset[:]  # The dataset itself contains the data
+            # Read the entire dataset using proper HDF5 methods
+            data = np.array(dataset)  # Convert HDF5 dataset to numpy array
             
             # Create DataFrame and set timestamp as index
             df = pd.DataFrame(data, columns=columns)

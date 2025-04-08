@@ -6,15 +6,13 @@ cleaning and preprocessing, and organizing multi-timeframe data.
 """
 
 import os
-import numpy as np
 import pandas as pd
-from typing import Dict, List, Union, Tuple
+from typing import Dict, List, Tuple
 import ccxt
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Import from the correct location
-import sys
 from crypto_trading_model.config import DATA_SETTINGS, PATHS
 
 # Setup logging
@@ -53,7 +51,9 @@ def fetch_historical_data(
         DataFrame containing OHLCV data
     """
     try:
-        logger.info(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}")
+        logger.info(
+            f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}"
+        )
         
         # Initialize exchange
         exchange = getattr(ccxt, exchange_id)({
@@ -67,7 +67,9 @@ def fetch_historical_data(
         # Fetch data in chunks due to exchange limits
         all_candles = []
         while since < until:
-            logger.debug(f"Fetching chunk starting from {datetime.fromtimestamp(since/1000)}")
+            logger.debug(
+                f"Fetching chunk starting from {datetime.fromtimestamp(since/1000)}"
+            )
             candles = exchange.fetch_ohlcv(symbol, timeframe, since)
             if not candles:
                 break
@@ -79,7 +81,10 @@ def fetch_historical_data(
             exchange.sleep(exchange.rateLimit)
             
         # Convert to DataFrame
-        df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(
+            all_candles, 
+            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        )
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         
@@ -130,7 +135,9 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         upper_bound = Q3 + 3 * IQR
         
         # Flag potential outliers
-        outliers = df_clean[(df_clean[col] < lower_bound) | (df_clean[col] > upper_bound)]
+        outliers = df_clean[
+            (df_clean[col] < lower_bound) | (df_clean[col] > upper_bound)
+        ]
         if not outliers.empty:
             logger.info(f"Found {len(outliers)} potential outliers in {col}")
             
