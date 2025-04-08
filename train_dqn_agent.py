@@ -47,18 +47,20 @@ def parse_args():
     parser.add_argument('--episode_length', type=int, default=10000,
                         help='Length of each episode in steps (default: 10000)')
     parser.add_argument('--batch_size', type=int, default=256,
-                        help='Batch size for experience replay (increased from 64 for more stable learning)')
+                        help='Batch size for experience replay')
+    parser.add_argument('--buffer_size', type=int, default=100000,
+                        help='Size of the replay buffer')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='Discount factor for future rewards')
     parser.add_argument('--epsilon_start', type=float, default=1.0,
                         help='Initial exploration rate')
     parser.add_argument('--epsilon_end', type=float, default=0.05,
-                        help='Final exploration rate (decreased from 0.01 for better exploration)')
+                        help='Final exploration rate')
     parser.add_argument('--epsilon_decay', type=float, default=0.998,
-                        help='Exploration rate decay factor (increased from 0.995 for slower decay)')
+                        help='Exploration rate decay factor')
     parser.add_argument('--learning_rate', type=float, default=0.0005,
-                        help='Learning rate for the Q-network (increased from 0.0001 for faster learning)')
-    parser.add_argument('--update_target_frequency', type=int, default=10,
+                        help='Learning rate for the Q-network')
+    parser.add_argument('--target_update', type=int, default=10,
                         help='Frequency of target network updates (episodes)')
     parser.add_argument('--updates_per_step', type=int, default=1,
                         help='Number of network updates per environment step')
@@ -73,9 +75,17 @@ def parse_args():
     parser.add_argument('--transaction_fee', type=float, default=0.001,
                         help='Transaction fee as a percentage')
     parser.add_argument('--reward_scaling', type=float, default=0.001,
-                        help='Scaling factor for rewards (increased from 0.0001 for more balanced rewards)')
+                        help='Scaling factor for rewards')
     parser.add_argument('--trade_cooldown', type=int, default=12,
-                        help='Number of steps between trades (lower = more frequent trading)')
+                        help='Number of steps between trades')
+    parser.add_argument('--primary_timeframe', type=str, default='1h',
+                        help='Primary timeframe for trading')
+    parser.add_argument('--use_indicators', action='store_true',
+                        help='Whether to use technical indicators')
+    parser.add_argument('--use_position_features', action='store_true',
+                        help='Whether to include position features in state')
+    parser.add_argument('--lookback_window', type=int, default=20,
+                        help='Lookback window for LSTM features')
     
     # Parallelization
     parser.add_argument('--num_workers', type=int, default=4,
@@ -87,17 +97,21 @@ def parse_args():
     
     # Performance options
     parser.add_argument('--use_amp', action='store_true',
-                        help='Use Automatic Mixed Precision (AMP) for faster training on compatible GPUs')
+                        help='Use Automatic Mixed Precision for faster training')
     
-    # Saving options
-    parser.add_argument('--save_frequency', type=int, default=50,
+    # Saving and evaluation options
+    parser.add_argument('--save_dir', type=str, default='models/dqn',
+                        help='Directory to save model checkpoints')
+    parser.add_argument('--save_interval', type=int, default=50,
                         help='Frequency to save model checkpoints (episodes)')
+    parser.add_argument('--eval_interval', type=int, default=0,
+                        help='Frequency to evaluate model (episodes, 0 to disable)')
     
     # Debug
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug mode')
     parser.add_argument('--verbose', action='store_true',
-                        help='Enable verbose logging (including stop loss messages)')
+                        help='Enable verbose logging')
     
     return parser.parse_args()
 
@@ -188,7 +202,7 @@ def train_dqn_agent(args):
         logger.info(f"GPU: {gpu_name} with {gpu_memory:.1f} GB memory")
 
     # Load data from specified path
-    data_path = args.data_path
+    data_path = args.data_dir
     logger.info(f"Loading data from {data_path}")
     market_data = load_crypto_data(data_path)
     data_length = len(market_data['1h'])  # Use 1h as the primary timeframe
