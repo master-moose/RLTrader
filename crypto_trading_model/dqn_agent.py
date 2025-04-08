@@ -26,6 +26,61 @@ logger = logging.getLogger(__name__)
 # Define a named tuple for storing experiences
 Experience = namedtuple('Experience', ['state', 'action', 'reward', 'next_state', 'done'])
 
+def get_compatible_device(device_str=None):
+    """
+    Get a compatible device for PyTorch operations.
+    Checks CUDA compatibility and falls back to CPU if needed.
+    
+    Parameters:
+    -----------
+    device_str : str, optional
+        Device string to use if provided
+        
+    Returns:
+    --------
+    torch.device
+        Compatible device for PyTorch operations
+    """
+    if device_str is not None:
+        requested_device = torch.device(device_str)
+        if requested_device.type == 'cuda':
+            # Check if the requested CUDA device is compatible
+            if torch.cuda.is_available():
+                # Get the current CUDA device capabilities
+                current_capability = torch.cuda.get_device_capability()
+                logger.info(f"CUDA device capability: {current_capability}")
+                
+                # Check if the device is compatible with PyTorch
+                try:
+                    # Try a simple CUDA operation to test compatibility
+                    test_tensor = torch.tensor([1.0], device=requested_device)
+                    logger.info(f"Using requested CUDA device: {torch.cuda.get_device_name(0)}")
+                    return requested_device
+                except RuntimeError as e:
+                    logger.warning(f"Requested CUDA device not compatible: {str(e)}")
+                    logger.warning("Falling back to CPU")
+                    return torch.device("cpu")
+            else:
+                logger.warning("CUDA requested but not available. Falling back to CPU")
+                return torch.device("cpu")
+        return requested_device
+    
+    # If no device specified, try CUDA first, then fall back to CPU
+    if torch.cuda.is_available():
+        try:
+            # Try a simple CUDA operation to test compatibility
+            test_tensor = torch.tensor([1.0], device="cuda")
+            logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+            logger.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
+            return torch.device("cuda")
+        except RuntimeError as e:
+            logger.warning(f"CUDA device not compatible: {str(e)}")
+            logger.warning("Falling back to CPU")
+            return torch.device("cpu")
+    
+    logger.info("Using CPU device")
+    return torch.device("cpu")
+
 class QNetwork(nn.Module):
     """
     Neural network for Q-value approximation.
@@ -139,11 +194,8 @@ class DQNAgent:
         self.update_target_every = update_target_every
         self.use_amp = use_amp
         
-        # Determine device
-        if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            self.device = torch.device(device)
+        # Determine device using the compatibility function
+        self.device = get_compatible_device(device)
             
         # Initialize AMP GradScaler if we're using CUDA
         self.scaler = None
