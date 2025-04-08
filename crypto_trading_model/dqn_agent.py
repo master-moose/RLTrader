@@ -501,7 +501,7 @@ class DQNAgent:
         # Store loss for tracking
         self.losses.append(loss.detach().item())
         
-        return loss.item()
+        return loss.detach().item()
     
     def update_target_network(self):
         """Update the target network with current Q-network weights"""
