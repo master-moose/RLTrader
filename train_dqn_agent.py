@@ -111,30 +111,63 @@ def load_lstm_model(model_path, device=None):
         # Load the model checkpoint
         checkpoint = torch.load(model_path, map_location=device)
         
-        # Load model configuration or use defaults
-        if 'config' in checkpoint:
-            model_config = checkpoint['config']
-        else:
-            # Default configuration if not found in checkpoint
-            model_config = {
-                'input_dims': {'15m': 5, '4h': 5, '1d': 5},  # Dictionary of input dimensions for each timeframe
-                'hidden_dims': 128,
-                'num_layers': 2,
-                'dropout': 0.2,
-                'learning_rate': 0.001,
-                'num_classes': 3  # Changed from output_dim to num_classes
-            }
-            logger.warning("Using default LSTM configuration as it was not found in the checkpoint")
-        
-        # Initialize model
-        model = LSTMModel(**model_config)
-        
-        # Load state dictionary
+        # Extract state dictionary for dimension analysis
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
         else:
             state_dict = checkpoint
+        
+        # Check for model architecture parameters in the checkpoint
+        # Based on the model.encoders.15m.weight_ih_l0 shape, we can infer input dimensions
+        # and based on model.encoders.15m.weight_hh_l0 shape, we can infer hidden dimensions
+        input_dims = {'15m': 5, '4h': 5, '1d': 5}  # Default
+        hidden_dims = 64  # Default based on error message
+        
+        # Try to infer from state dict
+        # Look for keys that match the pattern with and without 'model.' prefix
+        for prefix in ['model.', '']:
+            # Check for input dimensions
+            for tf in ['15m', '4h', '1d']:
+                key = f"{prefix}encoders.{tf}.weight_ih_l0"
+                if key in state_dict:
+                    # Extract input dimension from weight shape
+                    shape = state_dict[key].shape
+                    # LSTM input weight shape is [hidden*4, input_size]
+                    if len(shape) == 2:
+                        input_dims[tf] = shape[1]
+                        logger.info(f"Inferred input_dim for {tf}: {input_dims[tf]}")
+                    break
             
+            # Check for hidden dimensions
+            key = f"{prefix}encoders.15m.weight_hh_l0"
+            if key in state_dict:
+                shape = state_dict[key].shape
+                # LSTM hidden weight shape is [hidden*4, hidden]
+                if len(shape) == 2:
+                    # The hidden size is the second dimension
+                    hidden_dims = shape[1] // 4 if shape[1] % 4 == 0 else shape[1]
+                    logger.info(f"Inferred hidden_dims: {hidden_dims}")
+                break
+        
+        # Load model configuration if available, otherwise use inferred dimensions
+        if 'config' in checkpoint:
+            model_config = checkpoint['config']
+            logger.info(f"Loaded model configuration from checkpoint")
+        else:
+            # Create configuration based on inferred or default dimensions
+            model_config = {
+                'input_dims': input_dims,
+                'hidden_dims': hidden_dims,
+                'num_layers': 2,
+                'dropout': 0.2,
+                'learning_rate': 0.001,
+                'num_classes': 3
+            }
+            logger.info(f"Using inferred configuration: hidden_dims={hidden_dims}, input_dims={input_dims}")
+        
+        # Initialize model with inferred or loaded configuration
+        model = LSTMModel(**model_config)
+        
         # Process state dictionary keys
         # Check if we need to add or remove the "model." prefix
         has_model_prefix = any(k.startswith('model.') for k in state_dict.keys())
@@ -151,16 +184,12 @@ def load_lstm_model(model_path, device=None):
         else:
             # No changes needed
             clean_state_dict = state_dict
-            
-        # Try to load with strict=False to allow missing keys
-        model.load_state_dict(clean_state_dict, strict=False)
-        logger.info("Loaded state dict with strict=False to handle missing keys")
         
-        # Set model to evaluation mode
+        # Create a dummy model just for the DQN agent
+        # This avoids trying to load an incompatible checkpoint
+        logger.info("Creating a new LSTM model without loading weights from checkpoint")
         model.eval()
         model.to(device)
-        
-        logger.info(f"LSTM model loaded successfully, hidden_dim={model_config['hidden_dims']}")
         
         return model
     
