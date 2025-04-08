@@ -45,9 +45,8 @@ class QNetwork(nn.Module):
         """
         super(QNetwork, self).__init__()
         
-        # Add a flattening layer to handle potentially multidimensional input
+        # Remove flattening layer as input is already flattened (1D)
         self.network = nn.Sequential(
-            nn.Flatten(),  # Flatten any multi-dimensional input
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -57,6 +56,9 @@ class QNetwork(nn.Module):
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward pass through the network"""
+        # Ensure input is 2D for batched processing if it's not already
+        if state.dim() == 1:
+            state = state.unsqueeze(0)  # Add batch dimension if missing
         return self.network(state)
 
 
@@ -216,6 +218,9 @@ class DQNAgent:
         if not explore or random.random() > self.epsilon:
             with torch.no_grad():
                 self.q_network.eval()
+                # Ensure state has proper dimensions
+                if state.dim() == 1:
+                    state = state.unsqueeze(0)  # Add batch dimension
                 q_values = self.q_network(state)
                 self.q_network.train()
                 return q_values.argmax().item()
@@ -266,7 +271,7 @@ class DQNAgent:
             else:
                 padded_next_states.append(exp.next_state)
         
-        # Stack tensors
+        # Stack tensors - this already creates batch dimension (dimension 0)
         states = torch.stack(padded_states)
         actions = torch.tensor([exp.action for exp in experiences], dtype=torch.long).to(self.device)
         
@@ -286,10 +291,11 @@ class DQNAgent:
         next_states = torch.stack(padded_next_states)
         dones = torch.tensor([exp.done for exp in experiences], dtype=torch.float).to(self.device)
         
-        # Compute current Q values
+        # Compute current Q values - states already has batch dimension
         q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         
         # Compute next Q values using Double DQN method
+        # next_states already has batch dimension
         next_actions = self.q_network(next_states).argmax(1, keepdim=True)
         next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
         
