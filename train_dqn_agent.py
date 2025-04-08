@@ -23,7 +23,7 @@ from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.utils import set_seeds
-from crypto_trading_model.data_loaders import load_crypto_data
+from crypto_trading_model.data_processing.data_loader import load_processed_data
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -204,9 +204,26 @@ def train_dqn_agent(args):
     # Load data from specified path
     data_path = args.data_dir
     logger.info(f"Loading data from {data_path}")
-    market_data = load_crypto_data(data_path)
-    data_length = len(market_data['1h'])  # Use 1h as the primary timeframe
-    logger.info(f"Data loaded, {data_length} samples")
+    
+    # Use the existing load_processed_data function
+    # Assuming data is already processed and has the processed_ prefix
+    market_data = load_processed_data("BTC_USDT", prefix="synthetic")
+    
+    # If no data was loaded, try loading from different prefixes
+    if not market_data:
+        logger.warning("No data found with 'synthetic' prefix, trying 'processed'")
+        market_data = load_processed_data("BTC_USDT", prefix="processed")
+    
+    # If still no data, try with 'train' prefix
+    if not market_data:
+        logger.warning("No data found with 'processed' prefix, trying 'train'")
+        market_data = load_processed_data("BTC_USDT", prefix="train")
+    
+    if not market_data:
+        raise ValueError(f"Could not load market data from {data_path}")
+        
+    data_length = len(next(iter(market_data.values())))  # Get length from first timeframe
+    logger.info(f"Data loaded, {data_length} samples found")
 
     # Create multiple environments for parallel training
     logger.info(f"Creating {args.num_workers} environments")
