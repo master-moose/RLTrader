@@ -271,14 +271,14 @@ def train_dqn_agent(args):
     for i in range(args.num_workers):
         env = TradingEnvironment(
             data_path=h5_file_path,
+            window_size=args.window_size,
             initial_balance=args.initial_balance,
             transaction_fee=args.transaction_fee,
-            window_size=args.window_size,
-            primary_timeframe=args.primary_timeframe,
-            trade_cooldown=args.trade_cooldown,
-            use_indicators=args.use_indicators,
+            reward_scaling=args.reward_scaling,
             use_position_features=args.use_position_features,
-            lookback_window=args.lookback_window
+            lookback_window=args.lookback_window,
+            trade_cooldown=args.trade_cooldown,
+            device=device
         )
         envs.append(env)
     
