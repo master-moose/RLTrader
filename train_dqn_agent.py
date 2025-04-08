@@ -66,6 +66,8 @@ def parse_args():
                         help='Transaction fee as a percentage')
     parser.add_argument('--reward_scaling', type=float, default=0.0001,
                         help='Scaling factor for rewards (smaller value for numerical stability)')
+    parser.add_argument('--trade_cooldown', type=int, default=12,
+                        help='Number of steps between trades (lower = more frequent trading)')
     
     # Parallelization
     parser.add_argument('--num_workers', type=int, default=4,
@@ -255,7 +257,7 @@ def train_dqn_agent(args):
             transaction_fee=args.transaction_fee,
             reward_scaling=args.reward_scaling,
             device=device,
-            trade_cooldown=20,  # Increased from 10 to prevent excessive trading with high fees
+            trade_cooldown=args.trade_cooldown,  # Use command-line parameter
             # Initial start step will be randomized in reset()
             start_step=None  
         )
