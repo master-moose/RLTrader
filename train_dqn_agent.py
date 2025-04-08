@@ -562,6 +562,9 @@ def train_dqn_agent(args):
                 except:
                     pass
             
+            # Initialize current_batch_size for the progress bar
+            current_batch_size = optimal_batch_size
+            
             progress_bar.set_postfix({
                 'reward': f"{avg_reward:.2f}",
                 'balance': f"{avg_balance:.2f}",
