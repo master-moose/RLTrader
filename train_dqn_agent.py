@@ -233,7 +233,8 @@ def train_dqn_agent(args):
         buffer_size=100000,
         batch_size=2048,  # Reduced from 8192 to 2048
         device=device,
-        update_target_frequency=100  # Increased from 10 to 100
+        update_target_frequency=100,  # Increased from 10 to 100
+        verbose=args.verbose  # Pass verbose flag to control logging
     )
     
     # Verify AMP setup

@@ -15,6 +15,7 @@ import random
 from collections import deque
 import logging
 from torch.amp import GradScaler, autocast
+import torch.nn.functional as F
 
 # Setup logging
 logging.basicConfig(
@@ -94,7 +95,8 @@ class DQNAgent:
         buffer_size: int = 100000,
         batch_size: int = 64,
         target_update: int = 10,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu"
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        verbose: bool = True
     ):
         """
         Initialize the DQN agent.
@@ -125,6 +127,8 @@ class DQNAgent:
             Number of steps between updates to target network
         device : str
             Device to use for training ('cpu' or 'cuda')
+        verbose : bool
+            Whether to log target network updates
         """
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -163,6 +167,9 @@ class DQNAgent:
         
         # Initialize logging
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize verbose mode
+        self.verbose = verbose
     
     def select_action(self, state: Union[np.ndarray, torch.Tensor], training: bool = True) -> int:
         """
@@ -234,122 +241,52 @@ class DQNAgent:
     
     def update(self) -> float:
         """
-        Update the Q-Network using experience replay.
-        
-        Returns:
-        --------
-        float
-            Loss value
+        Update the policy network using a batch of experiences from the replay buffer.
+        Returns the loss value.
         """
         if len(self.memory) < self.batch_size:
             return 0.0
         
-        # Sample batch from memory
+        # Sample a batch of experiences
         batch = random.sample(self.memory, self.batch_size)
         
-        # Process batch data, ensuring proper conversion to tensors
-        state_batch = []
-        action_batch = []
-        reward_batch = []
-        next_state_batch = []
-        done_batch = []
+        # Convert batch to tensors
+        state_batch = torch.stack([x[0] for x in batch]).to(self.device)
+        action_batch = torch.tensor([x[1] for x in batch], device=self.device)
+        reward_batch = torch.tensor([x[2] for x in batch], dtype=torch.float32, device=self.device)
+        next_state_batch = torch.stack([x[3] for x in batch]).to(self.device)
+        done_batch = torch.tensor([x[4] for x in batch], dtype=torch.float32, device=self.device)
         
-        for state, action, reward, next_state, done in batch:
-            # Convert state to numpy if it's a tensor
-            if torch.is_tensor(state):
-                state = state.cpu().numpy()
-            if torch.is_tensor(next_state):
-                next_state = next_state.cpu().numpy()
-                
-            state_batch.append(state)
-            action_batch.append(action)
-            reward_batch.append(reward)
-            next_state_batch.append(next_state)
-            done_batch.append(done)
+        # Get current Q values
+        current_q_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
         
-        # Convert to tensors and move to device
-        state_batch = torch.FloatTensor(np.array(state_batch)).to(self.device)
-        action_batch = torch.LongTensor(np.array(action_batch)).to(self.device)
-        reward_batch = torch.FloatTensor(np.array(reward_batch)).to(self.device)
-        next_state_batch = torch.FloatTensor(np.array(next_state_batch)).to(self.device)
-        done_batch = torch.FloatTensor(np.array(done_batch)).to(self.device)
+        # Get next Q values from target network
+        with torch.no_grad():
+            next_q_values = self.target_net(next_state_batch).max(1)[0]
+            expected_q_values = reward_batch + (1 - done_batch) * self.gamma * next_q_values
         
-        # Use AMP context manager if available
+        # Compute loss
+        loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
+        
+        # Optimize the model
+        self.optimizer.zero_grad()
+        
         if self.scaler is not None:
-            # Get the device type as a string (e.g., 'cuda', 'cpu')
-            device_type = 'cuda' if str(self.device).startswith('cuda') else 'cpu'
-            
-            with autocast(device_type=device_type):
-                # Compute current Q values
-                current_q_values = self.policy_net(state_batch).gather(
-                    1, action_batch.unsqueeze(1)
-                )
-                
-                # Compute target Q values
-                with torch.no_grad():
-                    # Always use eval mode for target_net
-                    self.target_net.eval()
-                    next_q_values = self.target_net(next_state_batch).max(1)[0]
-                    target_q_values = (reward_batch + 
-                                     (1 - done_batch) * self.gamma * next_q_values)
-                
-                # Compute loss
-                loss = nn.MSELoss()(
-                    current_q_values.squeeze(),
-                    target_q_values
-                )
-            
-            # Optimizer step with scaler
-            self.optimizer.zero_grad()
             self.scaler.scale(loss).backward()
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                self.policy_net.parameters(),
-                max_norm=1.0
-            )
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
-            # Regular training without AMP
-            # Compute current Q values
-            current_q_values = self.policy_net(state_batch).gather(
-                1, action_batch.unsqueeze(1)
-            )
-            
-            # Compute target Q values
-            with torch.no_grad():
-                # Always use eval mode for target_net
-                self.target_net.eval()
-                next_q_values = self.target_net(next_state_batch).max(1)[0]
-                target_q_values = (reward_batch + 
-                                 (1 - done_batch) * self.gamma * next_q_values)
-            
-            # Compute loss and update
-            loss = nn.MSELoss()(
-                current_q_values.squeeze(),
-                target_q_values
-            )
-            
-            self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                self.policy_net.parameters(),
-                max_norm=1.0
-            )
             self.optimizer.step()
         
-        # Update epsilon
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        
-        # Update target network
+        # Update target network if needed
         self.steps_done += 1
         if self.steps_done % self.target_update == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
-            self.logger.info(
-                f"Target network updated at step {self.steps_done}"
-            )
+            if self.verbose:
+                logger.info(f"Target network updated at step {self.steps_done}")
         
-        return loss.detach().item()
+        return loss.item()
     
     def save(self, path: str) -> None:
         """
