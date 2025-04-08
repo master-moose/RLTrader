@@ -269,7 +269,20 @@ class DQNAgent:
         # Stack tensors
         states = torch.stack(padded_states)
         actions = torch.tensor([exp.action for exp in experiences], dtype=torch.long).to(self.device)
-        rewards = torch.tensor([exp.reward for exp in experiences], dtype=torch.float).to(self.device)
+        
+        # Get rewards and check for numerical issues
+        rewards_list = []
+        for exp in experiences:
+            # Apply additional safety clipping to handle extreme reward values
+            if not np.isfinite(exp.reward):
+                rewards_list.append(0.0)  # Replace NaN/Inf with 0
+                logger.warning(f"Non-finite reward detected: {exp.reward}, replacing with 0")
+            else:
+                # Still apply clipping as a safety measure
+                reward = np.clip(exp.reward, -10.0, 10.0)
+                rewards_list.append(reward)
+        
+        rewards = torch.tensor(rewards_list, dtype=torch.float).to(self.device)
         next_states = torch.stack(padded_next_states)
         dones = torch.tensor([exp.done for exp in experiences], dtype=torch.float).to(self.device)
         
@@ -283,12 +296,26 @@ class DQNAgent:
         # Compute target Q values
         target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
         
+        # Check for NaN values in target Q-values
+        if torch.isnan(target_q_values).any() or torch.isinf(target_q_values).any():
+            logger.warning("NaN or Inf detected in target Q-values, skipping update")
+            return 0.0
+        
         # Compute loss
         loss = nn.MSELoss()(q_values, target_q_values.detach())
+        
+        # Check for NaN loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.warning(f"NaN or Inf loss detected: {loss.item()}, skipping update")
+            return 0.0
         
         # Update network
         self.optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
         
         # Update target network if needed

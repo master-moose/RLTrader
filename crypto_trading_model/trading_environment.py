@@ -304,11 +304,22 @@ class TradingEnvironment:
         portfolio_value_after = self._calculate_portfolio_value(current_price)
         
         # Add reward based on change in portfolio value (unrealized PnL)
-        value_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
-        reward += value_change * self.reward_scaling
+        # Use percentage change rather than absolute to avoid huge numbers
+        if portfolio_value_before > 0:  # Avoid division by zero
+            value_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
+            # Apply strong scaling factor to this component
+            reward += value_change * self.reward_scaling
         
         # Track returns
-        self.returns.append(value_change)
+        self.returns.append(reward)
+        
+        # Apply reward clipping to handle extreme values
+        # Clip reward to a reasonable range [-10, 10]
+        reward = np.clip(reward, -10.0, 10.0)
+        
+        # Log reward if it's still large after clipping
+        if abs(reward) > 5.0:
+            logger.debug(f"Large reward after clipping: {reward}, action: {action}, position: {self.position}")
         
         return reward
     
@@ -330,15 +341,27 @@ class TradingEnvironment:
         position_value = 0.0
         if self.position == 1:  # Long
             # Calculate the amount of the asset
-            amount = self.balance / self.position_price
-            position_value = amount * current_price
+            # Avoid division by zero or very small position price
+            if self.position_price > 1e-8:
+                amount = self.balance / self.position_price
+                position_value = amount * current_price
         elif self.position == -1:  # Short
             # Calculate the profit/loss of the short position
-            amount = self.balance / self.position_price
-            position_value = amount * (self.position_price - current_price)
+            # Avoid division by zero or very small position price
+            if self.position_price > 1e-8:
+                amount = self.balance / self.position_price
+                position_value = amount * (self.position_price - current_price)
         
         # Total portfolio value = cash balance + position value
-        return self.balance + position_value
+        # Apply numerical stability check
+        value = self.balance + position_value
+        
+        # Ensure the value is within a reasonable range
+        if not np.isfinite(value) or abs(value) > 1e10:
+            logger.warning(f"Invalid portfolio value detected: {value}, resetting to balance")
+            value = self.balance
+            
+        return value
     
     def _get_observation(self):
         """

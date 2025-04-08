@@ -62,8 +62,8 @@ def parse_args():
                         help='Initial balance for trading')
     parser.add_argument('--transaction_fee', type=float, default=0.001,
                         help='Transaction fee as a percentage')
-    parser.add_argument('--reward_scaling', type=float, default=0.01,
-                        help='Scaling factor for rewards')
+    parser.add_argument('--reward_scaling', type=float, default=0.0001,
+                        help='Scaling factor for rewards (smaller value for numerical stability)')
     
     # Device
     parser.add_argument('--device', type=str, default=None,
