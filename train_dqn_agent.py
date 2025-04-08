@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
-from crypto_trading_model.lstm_lightning import LightningTimeSeriesModel as LSTMModel
+from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -101,11 +101,47 @@ def load_lstm_model(model_path, device):
         
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"LSTM model not found at {model_path}")
-            
-        # Load the model
-        model = LSTMModel.load_from_checkpoint(model_path)
+        
+        # Load model configuration
+        config_path = os.path.join(os.path.dirname(model_path), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            logger.info("Loaded model configuration from config.json")
+        else:
+            logger.warning("No config.json found, using default configuration")
+            config = {
+                "model": {
+                    "hidden_dims": 64,
+                    "num_layers": 1,
+                    "dropout": 0.7,
+                    "bidirectional": True,
+                    "attention": False,
+                    "num_classes": 3,
+                    "use_batch_norm": True
+                }
+            }
+        
+        # Create a new model instance with the saved configuration
+        model = MultiTimeframeModel(
+            input_dims={"15m": 34, "4h": 34, "1d": 34},  # Match dataset feature count
+            hidden_dims=config["model"]["hidden_dims"],
+            num_layers=config["model"]["num_layers"],
+            dropout=config["model"]["dropout"],
+            bidirectional=config["model"]["bidirectional"],
+            attention=config["model"]["attention"],
+            num_classes=config["model"]["num_classes"],
+            use_batch_norm=config["model"].get("use_batch_norm", True)
+        )
+        
+        # Load the state dict
+        state_dict = torch.load(model_path, map_location=device)
+        model.load_state_dict(state_dict, strict=False)  # Use strict=False to handle missing/extra keys
+        logger.info("Model state dict loaded successfully")
+        
+        # Move model to device and set to evaluation mode
         model = model.to(device)
-        model.eval()  # Set to evaluation mode
+        model.eval()
         
         logger.info("LSTM model loaded successfully")
         return model
@@ -172,12 +208,11 @@ def train_dqn_agent(args):
             window_size=args.window_size,
             initial_balance=args.initial_balance,
             transaction_fee=args.transaction_fee,
-            reward_scaling=args.reward_scaling,
+            reward_scaling=0.01,  # Increased from 0.001 for more meaningful rewards
             device=device,
-            trade_cooldown=args.trade_cooldown,  # Use command-line parameter
-            # Initial start step will be randomized in reset()
+            trade_cooldown=args.trade_cooldown,
             start_step=None,
-            verbose=args.verbose  # Pass verbose flag to environment
+            verbose=args.verbose
         )
         envs.append(env)
     
@@ -185,7 +220,7 @@ def train_dqn_agent(args):
     state_dim = envs[0].state_dim
     action_dim = envs[0].action_space
     
-    # Create DQN agent
+    # Create DQN agent with optimized parameters
     logger.info(f"Creating DQN agent with AMP: {args.use_amp}")
     agent = DQNAgent(
         state_dim=state_dim,
@@ -195,9 +230,10 @@ def train_dqn_agent(args):
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay=args.epsilon_decay,
-        buffer_size=100000,  # Increased for more diverse experiences
-        batch_size=args.batch_size,
-        device=device
+        buffer_size=100000,
+        batch_size=2048,  # Reduced from 8192 to 2048
+        device=device,
+        update_target_frequency=100  # Increased from 10 to 100
     )
     
     # Verify AMP setup
