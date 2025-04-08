@@ -133,8 +133,8 @@ class TradingEnvironment:
         
         # Add position features if used
         if self.use_position_features:
-            # Current position + position history + balance + unrealized PnL
-            feature_count += 1 + self.lookback_window + 2
+            # Current position + position history + balance + unrealized PnL + position size
+            feature_count += 1 + self.lookback_window + 1 + 1 + 1
         
         return feature_count
     
@@ -154,6 +154,7 @@ class TradingEnvironment:
         self.balance = self.initial_balance
         self.position = 0  # 0: no position, 1: long, -1: short
         self.position_price = 0.0
+        self.position_size = 0.0  # Store quantity of asset held or sold short
         self.position_history = [0] * self.lookback_window
         
         # Reset metrics
@@ -232,94 +233,138 @@ class TradingEnvironment:
         float
             Reward for the action
         """
-        reward = 0.0
-        
-        # Calculate the value before action
+        # Calculate portfolio value before action
         portfolio_value_before = self._calculate_portfolio_value(current_price)
+        
+        # Track if trade was executed
+        trade_executed = False
+        trade_type = "none"
+        profit = 0
         
         # Execute action
         if action == 1:  # Buy
             if self.position == 0:  # No position -> Long
-                # Calculate the amount to buy (use all available balance)
-                amount = self.balance / current_price
-                fee = amount * current_price * self.transaction_fee
+                # Use 95% of available balance for the position to avoid rounding issues
+                use_balance = self.balance * 0.95
+                
+                # Calculate quantity to buy
+                quantity = use_balance / current_price
+                fee = quantity * current_price * self.transaction_fee
+                
+                # Store position size for later calculations
+                self.position_size = quantity
                 
                 # Update state
-                self.balance -= (amount * current_price + fee)
+                self.balance -= (quantity * current_price + fee)
                 self.position = 1
                 self.position_price = current_price
                 self.total_trades += 1
+                trade_executed = True
+                trade_type = "open_long"
                 
-                # Small negative reward for transaction fee
-                reward -= fee * self.reward_scaling
-                
-            elif self.position == -1:  # Short -> No position
+            elif self.position == -1:  # Short -> No position (close short)
                 # Close short position
-                profit = self.position_price - current_price
-                amount = abs(self.position_price)
-                fee = amount * current_price * self.transaction_fee
+                quantity = self.position_size if hasattr(self, 'position_size') else 0
+                profit = quantity * (self.position_price - current_price)
+                fee = quantity * current_price * self.transaction_fee
                 
                 # Update state
-                self.balance += amount * profit - fee
+                self.balance += profit - fee
                 self.position = 0
                 self.position_price = 0.0
+                self.position_size = 0
                 self.total_trades += 1
-                self.total_profit += profit
-                
-                # Reward based on profit
-                reward += profit * self.reward_scaling - fee * self.reward_scaling
+                self.total_profit += profit - fee
+                trade_executed = True
+                trade_type = "close_short"
                 
         elif action == 2:  # Sell
             if self.position == 0:  # No position -> Short
-                # Calculate the amount to sell (use all available balance as collateral)
-                amount = self.balance / current_price
-                fee = amount * current_price * self.transaction_fee
+                # Use 95% of available balance as collateral
+                use_balance = self.balance * 0.95
+                
+                # Calculate quantity to sell short
+                quantity = use_balance / current_price
+                fee = quantity * current_price * self.transaction_fee
+                
+                # Store position size for later
+                self.position_size = quantity
                 
                 # Update state
                 self.balance -= fee
                 self.position = -1
                 self.position_price = current_price
                 self.total_trades += 1
+                trade_executed = True
+                trade_type = "open_short"
                 
-                # Small negative reward for transaction fee
-                reward -= fee * self.reward_scaling
-                
-            elif self.position == 1:  # Long -> No position
+            elif self.position == 1:  # Long -> No position (close long)
                 # Close long position
-                profit = current_price - self.position_price
-                amount = self.balance / self.position_price
-                fee = amount * current_price * self.transaction_fee
+                quantity = self.position_size if hasattr(self, 'position_size') else 0
+                profit = quantity * (current_price - self.position_price)
+                fee = quantity * current_price * self.transaction_fee
                 
                 # Update state
-                self.balance += amount * current_price - fee
+                self.balance += quantity * current_price - fee
                 self.position = 0
                 self.position_price = 0.0
-                self.total_trades += 1
-                self.total_profit += profit
-                
-                # Reward based on profit
-                reward += profit * self.reward_scaling - fee * self.reward_scaling
+                self.position_size = 0
+                self.total_trades += 1 
+                self.total_profit += profit - fee
+                trade_executed = True
+                trade_type = "close_long"
         
-        # Calculate the value after action
+        # Calculate portfolio value after action
         portfolio_value_after = self._calculate_portfolio_value(current_price)
         
-        # Add reward based on change in portfolio value (unrealized PnL)
-        # Use percentage change rather than absolute to avoid huge numbers
-        if portfolio_value_before > 0:  # Avoid division by zero
-            value_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
-            # Apply strong scaling factor to this component
-            reward += value_change * self.reward_scaling
+        # Calculate reward components
         
-        # Track returns
-        self.returns.append(reward)
+        # 1. Portfolio change component - primary reward signal
+        portfolio_change = 0
+        if portfolio_value_before > 0:
+            portfolio_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
+        
+        # 2. Trade execution penalty - small penalty for excessive trading
+        trade_penalty = -0.0005 if trade_executed else 0
+        
+        # 3. Position holding component - encourage holding profitable positions
+        position_reward = 0
+        if self.position == 1 and current_price > self.position_price:  # Long position in profit
+            position_reward = 0.0002
+        elif self.position == -1 and current_price < self.position_price:  # Short position in profit
+            position_reward = 0.0002
+            
+        # 4. Profit realization reward - bonus for taking profits
+        profit_reward = 0
+        if trade_type == "close_long" and profit > 0:
+            profit_reward = 0.001
+        elif trade_type == "close_short" and profit > 0:
+            profit_reward = 0.001
+        
+        # 5. Balance maintenance - reward for maintaining/growing account balance
+        balance_reward = 0
+        if self.balance > self.initial_balance * 0.8:  # Still have most of our balance
+            balance_reward = 0.0001
+        
+        # Combine all reward components
+        reward = (
+            portfolio_change * 1.0 +  # Main component
+            trade_penalty +
+            position_reward +
+            profit_reward +
+            balance_reward
+        ) * self.reward_scaling
         
         # Apply reward clipping to handle extreme values
-        # Clip reward to a reasonable range [-10, 10]
-        reward = np.clip(reward, -10.0, 10.0)
+        reward = np.clip(reward, -1.0, 1.0)
         
-        # Log reward if it's still large after clipping
-        if abs(reward) > 5.0:
-            logger.debug(f"Large reward after clipping: {reward}, action: {action}, position: {self.position}")
+        # Track returns for visualization
+        self.returns.append(reward)
+        
+        # Log large rewards for debugging
+        if abs(reward) > 0.5:
+            logger.debug(f"Large reward: {reward:.4f}, Action: {action}, Position: {self.position}, " +
+                        f"Portfolio change: {portfolio_change:.4f}")
         
         return reward
     
@@ -337,26 +382,27 @@ class TradingEnvironment:
         float
             Total portfolio value
         """
-        # Calculate the value of the position
+        # Calculate position value based on correct position sizing
         position_value = 0.0
+        
         if self.position == 1:  # Long
-            # Calculate the amount of the asset
-            # Avoid division by zero or very small position price
+            # Calculate amount of asset based on purchase price
             if self.position_price > 1e-8:
-                amount = self.balance / self.position_price
-                position_value = amount * current_price
+                # For long positions, we bought quantity = balance/price
+                quantity = self.position_size if hasattr(self, 'position_size') else 0
+                position_value = quantity * current_price
+            
         elif self.position == -1:  # Short
-            # Calculate the profit/loss of the short position
-            # Avoid division by zero or very small position price
+            # Calculate profit/loss for short positions
             if self.position_price > 1e-8:
-                amount = self.balance / self.position_price
-                position_value = amount * (self.position_price - current_price)
+                # For short positions, we track the quantity sold short
+                quantity = self.position_size if hasattr(self, 'position_size') else 0
+                position_value = quantity * (self.position_price - current_price)
         
         # Total portfolio value = cash balance + position value
-        # Apply numerical stability check
         value = self.balance + position_value
         
-        # Ensure the value is within a reasonable range
+        # Safety check for numerical stability
         if not np.isfinite(value) or abs(value) > 1e10:
             logger.warning(f"Invalid portfolio value detected: {value}, resetting to balance")
             value = self.balance
@@ -441,24 +487,32 @@ class TradingEnvironment:
         # Position features:
         # 1. Current position (-1, 0, 1)
         # 2. Position history
-        # 3. Current balance
+        # 3. Current balance (normalized)
         # 4. Unrealized PnL
+        # 5. Position size relative to initial balance
         
         # Calculate unrealized PnL
         current_price = self._get_current_price()
         unrealized_pnl = 0.0
         
         if self.position == 1:  # Long
-            unrealized_pnl = (current_price - self.position_price) / self.position_price
+            unrealized_pnl = (current_price - self.position_price) / self.position_price if self.position_price > 0 else 0
         elif self.position == -1:  # Short
-            unrealized_pnl = (self.position_price - current_price) / self.position_price
+            unrealized_pnl = (self.position_price - current_price) / self.position_price if self.position_price > 0 else 0
+        
+        # Position size as percentage of initial balance
+        position_size_pct = 0.0
+        if self.position != 0:
+            position_value = self.position_size * current_price
+            position_size_pct = position_value / self.initial_balance
         
         # Combine position features
         position_features = [
-            self.position,                     # Current position
-            *self.position_history,            # Position history
-            self.balance / self.initial_balance,  # Normalized balance
-            unrealized_pnl                    # Unrealized PnL
+            self.position,                                 # Current position
+            *self.position_history,                        # Position history
+            self.balance / self.initial_balance,           # Normalized balance
+            np.clip(unrealized_pnl, -1.0, 1.0),           # Clipped unrealized PnL
+            np.clip(position_size_pct, 0.0, 3.0)           # Normalized position size
         ]
         
         return np.array(position_features, dtype=np.float32)
@@ -479,15 +533,45 @@ class TradingEnvironment:
             # Calculate portfolio value
             portfolio_value = self._calculate_portfolio_value(current_price)
             
-            # Print state
+            # Calculate position value and unrealized P&L
+            position_value = 0.0
+            unrealized_pnl = 0.0
+            
+            if self.position == 1:  # Long
+                position_value = self.position_size * current_price
+                if self.position_price > 0:
+                    unrealized_pnl = self.position_size * (current_price - self.position_price)
+            elif self.position == -1:  # Short
+                if self.position_price > 0:
+                    unrealized_pnl = self.position_size * (self.position_price - current_price)
+            
+            # Print state with more detailed information
+            print(f"\n{'='*60}")
             print(f"Step: {self.current_step}/{self.data_length}")
-            print(f"Price: {current_price:.2f}")
-            print(f"Balance: {self.balance:.2f}")
-            print(f"Position: {self.position}")
-            print(f"Portfolio Value: {portfolio_value:.2f}")
-            print(f"Total Trades: {self.total_trades}")
-            print(f"Total Profit: {self.total_profit:.2f}")
-            print("-" * 50)
+            print(f"Current Price: ${current_price:.2f}")
+            print(f"Cash Balance: ${self.balance:.2f}")
+            
+            # Position information
+            position_type = "NONE" if self.position == 0 else "LONG" if self.position == 1 else "SHORT"
+            print(f"\nPosition: {position_type}")
+            
+            if self.position != 0:
+                percent_change = (unrealized_pnl/position_value)*100 if position_value > 0 else 0.00
+                print(f"Entry Price: ${self.position_price:.2f}")
+                print(f"Size: {self.position_size:.6f} units (${position_value:.2f})")
+                print(f"Unrealized P&L: ${unrealized_pnl:.2f} ({percent_change:.2f}%)")
+            
+            # Portfolio and metrics
+            print(f"\nTotal Portfolio Value: ${portfolio_value:.2f}")
+            print(f"Total Trades Executed: {self.total_trades}")
+            print(f"Total Realized Profit: ${self.total_profit:.2f}")
+            
+            # Performance metrics
+            roi = ((portfolio_value / self.initial_balance) - 1.0) * 100
+            print(f"Return on Investment: {roi:.2f}%")
+            print(f"{'='*60}\n")
+            
+        return None
     
     def close(self):
         """Close the environment and release resources"""
