@@ -229,7 +229,7 @@ def train_dqn_agent(args):
                         ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
             # Read the entire dataset into a numpy array
-            data = dataset[()]
+            data = dataset[:]  # Use slice notation to read the entire dataset
             
             # Create DataFrame and set timestamp as index
             df = pd.DataFrame(data, columns=columns)
