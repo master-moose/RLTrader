@@ -329,10 +329,7 @@ def train_dqn_agent(args):
     
     # Pre-allocate tensors for states to avoid repeated allocations
     states_tensor = torch.zeros((args.num_workers, state_dim), device=device)
-    actions_tensor = torch.zeros(args.num_workers, dtype=torch.long, device=device)
-    rewards_tensor = torch.zeros(args.num_workers, device=device)
     next_states_tensor = torch.zeros((args.num_workers, state_dim), device=device)
-    dones_tensor = torch.zeros(args.num_workers, dtype=torch.bool, device=device)
     
     # Pre-allocate replay buffer tensors with dynamic sizing capability
     def get_optimal_batch_size():
@@ -342,23 +339,16 @@ def train_dqn_agent(args):
             free_mem = torch.cuda.mem_get_info()[0]
             # Estimate memory per sample (state_dim * 4 bytes per float32)
             mem_per_sample = state_dim * 4 * 4  # states, actions, rewards, next_states
-            # Use up to 30% of free memory for batches
-            return min(args.batch_size, max(64, int(free_mem * 0.3 / mem_per_sample)))
+            # Use up to 40% of free memory for batches
+            return min(args.batch_size, max(64, int(free_mem * 0.4 / mem_per_sample)))
         else:
             # On CPU, consider system memory
             free_mem = psutil.virtual_memory().available
             mem_per_sample = state_dim * 4 * 4
-            return min(args.batch_size, max(64, int(free_mem * 0.3 / mem_per_sample)))
+            return min(args.batch_size, max(64, int(free_mem * 0.4 / mem_per_sample)))
     
     optimal_batch_size = get_optimal_batch_size()
     logger.info(f"Using optimal batch size: {optimal_batch_size}")
-    
-    # Allocate with optimal batch size
-    replay_states = torch.zeros((optimal_batch_size, state_dim), device=device)
-    replay_actions = torch.zeros(optimal_batch_size, dtype=torch.long, device=device)
-    replay_rewards = torch.zeros(optimal_batch_size, device=device)
-    replay_next_states = torch.zeros((optimal_batch_size, state_dim), device=device)
-    replay_dones = torch.zeros(optimal_batch_size, dtype=torch.bool, device=device)
     
     # Helper function to step environments in parallel
     def step_environments_in_parallel(envs, actions, dones):
@@ -406,7 +396,7 @@ def train_dqn_agent(args):
         torch.backends.cudnn.allow_tf32 = True
     
     # Determine optimal update frequency
-    update_frequency = 4  # Update every 4 steps to batch updates
+    update_frequency = 16  # Update less frequently to batch more updates
     
     for episode in range(1, args.episodes + 1):
         # Reset all environments with random starting points
@@ -441,6 +431,7 @@ def train_dqn_agent(args):
             # Select actions for all environments at once using vectorized operations
             with torch.no_grad():
                 q_values = agent.policy_net(states_tensor)
+                # Use inplace operations where possible
                 actions = torch.where(
                     torch.rand(args.num_workers, device=device) < agent.epsilon,
                     torch.randint(0, action_dim, (args.num_workers,), device=device),
@@ -456,14 +447,19 @@ def train_dqn_agent(args):
             balances = []
             trade_counts = []
             
+            # Pre-process batch data collection to reduce redundant tensor operations
+            transitions_to_add = []
+            
             for i in range(args.num_workers):
                 if not dones[i]:
                     balances.append(infos[i].get('balance', 0))
-                    # Get trades from the environment's info dictionary
                     trade_counts.append(infos[i].get('total_trades', 0))
                     
                     episode_rewards_per_env[i] += rewards[i]
                     steps_per_env[i] += 1
+                    
+                    # Collect transitions for batch addition to memory
+                    transitions_to_add.append((states[i], actions[i].item(), rewards[i], next_states[i], new_dones[i]))
                     
                     if isinstance(next_states[i], np.ndarray):
                         next_states_tensor[i] = torch.from_numpy(next_states[i]).float()
@@ -473,6 +469,11 @@ def train_dqn_agent(args):
                     balances.append(0)
                     trade_counts.append(0)
             
+            # Batch add transitions to memory
+            for transition in transitions_to_add:
+                agent.memory.append(transition)
+                total_experiences += 1
+                
             # Log balance changes for debugging
             if step_counter % 100 == 0 and active_envs > 0:
                 i = next((i for i, d in enumerate(dones) if not d), 0)
@@ -481,12 +482,6 @@ def train_dqn_agent(args):
                            f"Position={infos[i].get('position', 0)}, "
                            f"Trades={infos[i].get('total_trades', 0)}, "
                            f"Price={infos[i].get('price', 0):.2f}")
-            
-            # Store transitions in replay buffer
-            for i in range(args.num_workers):
-                if not dones[i]:
-                    agent.memory.append((states[i], actions[i].item(), rewards[i], next_states[i], new_dones[i]))
-                    total_experiences += 1
             
             # Update states and dones
             states = next_states
@@ -499,7 +494,7 @@ def train_dqn_agent(args):
             # Batch updates every few steps for better efficiency
             if step_counter % update_frequency == 0 and len(agent.memory) >= optimal_batch_size:
                 # Perform multiple updates in a batch
-                for _ in range(update_frequency * max(1, args.updates_per_step)):
+                for _ in range(args.updates_per_step):  # Simplified update loop
                     # Dynamically adjust batch size based on available replay buffer samples
                     current_batch_size = min(len(agent.memory), optimal_batch_size)
                     
@@ -507,20 +502,28 @@ def train_dqn_agent(args):
                     indices = np.random.choice(len(agent.memory), current_batch_size, replace=False)
                     batch = [agent.memory[i] for i in indices]
                     
-                    # Convert batch to tensors efficiently
+                    # Convert batch to tensors efficiently - use a single loop
+                    batch_states, batch_actions, batch_rewards, batch_next_states, batch_dones = [], [], [], [], []
                     for i, (state, action, reward, next_state, done) in enumerate(batch):
-                        replay_states[i] = torch.from_numpy(state).float() if isinstance(state, np.ndarray) else state
-                        replay_actions[i] = action
-                        replay_rewards[i] = reward
-                        replay_next_states[i] = torch.from_numpy(next_state).float() if isinstance(next_state, np.ndarray) else next_state
-                        replay_dones[i] = done
+                        batch_states.append(torch.from_numpy(state).float() if isinstance(state, np.ndarray) else state)
+                        batch_actions.append(action)
+                        batch_rewards.append(reward)
+                        batch_next_states.append(torch.from_numpy(next_state).float() if isinstance(next_state, np.ndarray) else next_state)
+                        batch_dones.append(done)
+                    
+                    # Stack tensors at once instead of individual assignments
+                    replay_states = torch.stack(batch_states)
+                    replay_actions = torch.tensor(batch_actions, device=device)
+                    replay_rewards = torch.tensor(batch_rewards, device=device)
+                    replay_next_states = torch.stack(batch_next_states)
+                    replay_dones = torch.tensor(batch_dones, device=device)
                     
                     # Update networks using vectorized operations
-                    with torch.amp.autocast('cuda'):
-                        current_q_values = agent.policy_net(replay_states[:current_batch_size]).gather(1, replay_actions[:current_batch_size].unsqueeze(1))
+                    with torch.amp.autocast(device_type='cuda' if device == 'cuda' else 'cpu'):
+                        current_q_values = agent.policy_net(replay_states).gather(1, replay_actions.unsqueeze(1))
                         with torch.no_grad():
-                            next_q_values = agent.target_net(replay_next_states[:current_batch_size]).max(1)[0]
-                            expected_q_values = replay_rewards[:current_batch_size] + (1 - replay_dones[:current_batch_size].float()) * agent.gamma * next_q_values
+                            next_q_values = agent.target_net(replay_next_states).max(1)[0]
+                            expected_q_values = replay_rewards + (1 - replay_dones.float()) * agent.gamma * next_q_values
                         
                         loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
                     
