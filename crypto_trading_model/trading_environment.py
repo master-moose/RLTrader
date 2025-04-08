@@ -192,7 +192,7 @@ class TradingEnvironment:
         current_price = self._get_current_price()
         
         # Execute action and calculate reward
-        reward, trade_executed = self._execute_action(action, current_price)
+        reward, trade_executed, trade_type = self._execute_action(action, current_price)
         
         # Update position history
         self.position_history.pop(0)
@@ -200,7 +200,11 @@ class TradingEnvironment:
         
         # Update trade cooldown
         if trade_executed:
-            self.steps_since_last_trade = 0
+            # Special extended cooldown for stop losses (40 periods vs 20 normal)
+            if "stop_loss" in trade_type:  # Use trade_type instead of reward[1]
+                self.steps_since_last_trade = -20  # Effectively adds 20 more periods of cooldown
+            else:
+                self.steps_since_last_trade = 0
         else:
             self.steps_since_last_trade += 1
         
@@ -250,7 +254,7 @@ class TradingEnvironment:
         Returns:
         --------
         tuple
-            (reward, trade_executed)
+            (reward, trade_executed, trade_type)
         """
         # Calculate portfolio value before action
         portfolio_value_before = self._calculate_portfolio_value(current_price)
@@ -296,6 +300,8 @@ class TradingEnvironment:
                 self.total_profit += profit - fee
                 trade_executed = True
                 trade_type = "stop_loss_long"
+                # Reset trade cooldown counter with extended cooldown - prevent immediate re-entry
+                self.steps_since_last_trade = 0
                 
             elif self.position == -1:  # Close short position
                 quantity = self.position_size if hasattr(self, 'position_size') else 0
@@ -311,12 +317,14 @@ class TradingEnvironment:
                 self.total_profit += profit - fee
                 trade_executed = True
                 trade_type = "stop_loss_short"
+                # Reset trade cooldown counter with extended cooldown - prevent immediate re-entry
+                self.steps_since_last_trade = 0
         
         # Execute action from agent if stop loss wasn't triggered
         elif action == 1:  # Buy
             if self.position == 0 and not cooldown_active:  # No position -> Long
-                # Use only 15% of available balance (reduced from 25%) to avoid large trades
-                use_balance = min(self.balance * 0.15, self.initial_balance * 0.15)
+                # Use only 10% of available balance (reduced from 15%) for much smaller trades
+                use_balance = min(self.balance * 0.10, self.initial_balance * 0.10)
                 
                 # Only trade if we have enough balance (at least 1% of initial)
                 if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
@@ -353,8 +361,8 @@ class TradingEnvironment:
                 
         elif action == 2:  # Sell
             if self.position == 0 and not cooldown_active:  # No position -> Short
-                # Use only 15% of available balance as collateral (reduced from 25%)
-                use_balance = min(self.balance * 0.15, self.initial_balance * 0.15)
+                # Use only 10% of available balance (reduced from 15%) for much smaller trades
+                use_balance = min(self.balance * 0.10, self.initial_balance * 0.10)
                 
                 # Only trade if we have enough balance (at least 1% of initial)
                 if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
@@ -500,7 +508,7 @@ class TradingEnvironment:
             logger.debug(f"Large reward: {reward:.4f}, Action: {action}, Position: {self.position}, " +
                         f"Portfolio change: {portfolio_change:.4f}")
         
-        return reward, trade_executed
+        return reward, trade_executed, trade_type
     
     def _calculate_portfolio_value(self, current_price):
         """
