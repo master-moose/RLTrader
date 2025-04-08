@@ -16,10 +16,14 @@ import traceback
 from datetime import datetime
 from tqdm import tqdm
 import torch.nn.functional as F
+from concurrent.futures import ThreadPoolExecutor
+import psutil
 
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
+from crypto_trading_model.utils import set_seeds
+from crypto_trading_model.data_loaders import load_crypto_data
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -161,102 +165,90 @@ def train_dqn_agent(args):
     args : argparse.Namespace
         Command line arguments
     """
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Set seeds for reproducibility
+    set_seeds(args.seed)
     
     # Set device
-    device = args.device
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() and args.use_gpu else "cpu"
     logger.info(f"Using device: {device}")
     
-    # AMP verification
-    if args.use_amp:
-        logger.info("AMP requested via command line")
-        if device == "cuda" and torch.cuda.is_available():
-            cuda_version = torch.version.cuda if hasattr(torch.version, 'cuda') else "unknown"
-            logger.info(f"CUDA is available (version: {cuda_version}) - AMP should work")
-        else:
-            logger.warning("AMP requested but CUDA not available - AMP will be disabled")
-    
-    # Load LSTM model
-    lstm_model = load_lstm_model(args.lstm_model_path, device)
-    
-    # Prepare data path
-    train_data_path = os.path.join(args.data_dir, "train_data.h5")
-    
-    # Check if the file exists
-    if not os.path.exists(train_data_path):
-        train_data_path = os.path.join(args.data_dir, "train_data.h5")
-        if not os.path.exists(train_data_path):
-            raise FileNotFoundError(f"Training data not found at {train_data_path}")
-    
-    # Load data to get its length (for random starting positions)
-    temp_env = TradingEnvironment(
-        data_path=train_data_path,
-        window_size=args.window_size,
-        device=device
-    )
-    data_length = temp_env.data_length
-    logger.info(f"Dataset length: {data_length} timesteps")
-    
-    # Create multiple trading environments for vectorized training
-    logger.info(f"Creating {args.num_workers} parallel environments for training")
+    # Advanced GPU optimizations
+    if device == "cuda":
+        # Enable TF32 for faster training on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        
+        # Log GPU information
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        logger.info(f"GPU: {gpu_name} with {gpu_memory:.1f} GB memory")
+
+    # Load data from specified path
+    data_path = args.data_path
+    logger.info(f"Loading data from {data_path}")
+    market_data = load_crypto_data(data_path)
+    data_length = len(market_data['1h'])  # Use 1h as the primary timeframe
+    logger.info(f"Data loaded, {data_length} samples")
+
+    # Create multiple environments for parallel training
+    logger.info(f"Creating {args.num_workers} environments")
     envs = []
     for i in range(args.num_workers):
         env = TradingEnvironment(
-            data_path=train_data_path,
-            window_size=args.window_size,
+            market_data=market_data,
             initial_balance=args.initial_balance,
             transaction_fee=args.transaction_fee,
-            reward_scaling=0.01,  # Increased from 0.001 for more meaningful rewards
-            device=device,
+            window_size=args.window_size,
+            primary_timeframe=args.primary_timeframe,
             trade_cooldown=args.trade_cooldown,
-            start_step=None,
-            verbose=args.verbose
+            use_indicators=args.use_indicators,
+            use_position_features=args.use_position_features,
+            lookback_window=args.lookback_window
         )
         envs.append(env)
     
-    # Use the first environment's state dimension
-    state_dim = envs[0].state_dim
-    action_dim = envs[0].action_space
+    # Get state and action dimensions
+    state_dim = envs[0]._calculate_state_dim()
+    action_dim = 3  # hold, buy, sell
+    logger.info(f"State dimension: {state_dim}, Action dimension: {action_dim}")
     
-    # Create DQN agent with optimized parameters
-    logger.info(f"Creating DQN agent with AMP: {args.use_amp}")
+    # Create DQN agent
+    logger.info("Creating DQN agent")
     agent = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
+        hidden_dims=[512, 256], # Increase network capacity
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay=args.epsilon_decay,
-        buffer_size=100000,
-        batch_size=2048,  # Reduced from 8192 to 2048
+        buffer_size=args.buffer_size,
+        batch_size=args.batch_size,
+        target_update=args.target_update,
         device=device,
-        target_update=100,  # Changed from update_target_frequency to target_update
-        verbose=args.verbose  # Pass verbose flag to control logging
+        verbose=True
     )
     
-    # Verify AMP setup
-    if hasattr(agent, 'scaler') and agent.scaler is not None:
-        logger.info("AMP GradScaler initialized - Mixed precision training ENABLED")
-    elif args.use_amp:
-        logger.warning("AMP was requested but GradScaler not initialized - check if CUDA is available")
+    # Use torch.compile for faster network computations if available
+    if hasattr(torch, 'compile') and device == "cuda":
+        logger.info("Using torch.compile to optimize networks")
+        agent.policy_net = torch.compile(agent.policy_net, mode="reduce-overhead")
+        agent.target_net = torch.compile(agent.target_net, mode="reduce-overhead")
+    
+    # Initialize metrics
+    episode_rewards = []
+    episode_balances = []
+    episode_trade_counts = []
+    
+    # Save directory
+    save_dir = os.path.join(args.save_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(save_dir, exist_ok=True)
+    logger.info(f"Model checkpoints will be saved to {save_dir}")
     
     # Training loop
-    episode_rewards = []
-    episode_profits = []
-    episode_trades = []
-    best_reward = float('-inf')
-    
-    # Save training arguments
-    with open(os.path.join(args.output_dir, 'training_args.json'), 'w') as f:
-        json.dump(vars(args), f, indent=4)
-    
     logger.info("Starting training...")
-    
-    # Track total updates and experience collected
     total_updates = 0
     total_experiences = 0
     update_counter = 0
@@ -268,18 +260,79 @@ def train_dqn_agent(args):
     next_states_tensor = torch.zeros((args.num_workers, state_dim), device=device)
     dones_tensor = torch.zeros(args.num_workers, dtype=torch.bool, device=device)
     
-    # Pre-allocate replay buffer tensors
-    replay_states = torch.zeros((args.batch_size, state_dim), device=device)
-    replay_actions = torch.zeros(args.batch_size, dtype=torch.long, device=device)
-    replay_rewards = torch.zeros(args.batch_size, device=device)
-    replay_next_states = torch.zeros((args.batch_size, state_dim), device=device)
-    replay_dones = torch.zeros(args.batch_size, dtype=torch.bool, device=device)
+    # Pre-allocate replay buffer tensors with dynamic sizing capability
+    def get_optimal_batch_size():
+        """Dynamically determine optimal batch size based on available memory"""
+        if device == "cuda":
+            # Get available GPU memory (in bytes)
+            free_mem = torch.cuda.mem_get_info()[0]
+            # Estimate memory per sample (state_dim * 4 bytes per float32)
+            mem_per_sample = state_dim * 4 * 4  # states, actions, rewards, next_states
+            # Use up to 30% of free memory for batches
+            return min(args.batch_size, max(64, int(free_mem * 0.3 / mem_per_sample)))
+        else:
+            # On CPU, consider system memory
+            free_mem = psutil.virtual_memory().available
+            mem_per_sample = state_dim * 4 * 4
+            return min(args.batch_size, max(64, int(free_mem * 0.3 / mem_per_sample)))
+    
+    optimal_batch_size = get_optimal_batch_size()
+    logger.info(f"Using optimal batch size: {optimal_batch_size}")
+    
+    # Allocate with optimal batch size
+    replay_states = torch.zeros((optimal_batch_size, state_dim), device=device)
+    replay_actions = torch.zeros(optimal_batch_size, dtype=torch.long, device=device)
+    replay_rewards = torch.zeros(optimal_batch_size, device=device)
+    replay_next_states = torch.zeros((optimal_batch_size, state_dim), device=device)
+    replay_dones = torch.zeros(optimal_batch_size, dtype=torch.bool, device=device)
+    
+    # Helper function to step environments in parallel
+    def step_environments_in_parallel(envs, actions, dones):
+        """Execute steps across multiple environments in parallel"""
+        next_states = []
+        rewards = []
+        new_dones = []
+        infos = []
+        
+        # Only process active environments
+        active_indices = [i for i, done in enumerate(dones) if not done]
+        
+        # Use threads to parallelize environment steps
+        with ThreadPoolExecutor(max_workers=min(os.cpu_count(), len(active_indices))) as executor:
+            futures = []
+            for i in active_indices:
+                futures.append(executor.submit(envs[i].step, actions[i].item()))
+            
+            # Collect results
+            results = [future.result() for future in futures]
+            
+            # Distribute results back to full lists
+            result_idx = 0
+            for i in range(len(envs)):
+                if i in active_indices:
+                    ns, r, d, info = results[result_idx]
+                    next_states.append(ns)
+                    rewards.append(r)
+                    new_dones.append(d)
+                    infos.append(info)
+                    result_idx += 1
+                else:
+                    # Keep existing state for done environments
+                    next_states.append(None)
+                    rewards.append(0)
+                    new_dones.append(True)
+                    infos.append({})
+        
+        return next_states, rewards, new_dones, infos
     
     # Enable CUDA graph for faster training
     if device == "cuda":
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+    
+    # Determine optimal update frequency
+    update_frequency = 4  # Update every 4 steps to batch updates
     
     for episode in range(1, args.episodes + 1):
         # Reset all environments with random starting points
@@ -304,16 +357,13 @@ def train_dqn_agent(args):
         steps_per_env = [0] * args.num_workers
         active_envs = args.num_workers
         
-        # Episode length is now fixed by the argument
-        max_episode_steps = args.episode_length
-        
         # Episode loop
-        progress_bar = tqdm(total=max_episode_steps, 
+        progress_bar = tqdm(total=args.episode_length, 
                            desc=f"Episode {episode}/{args.episodes}", 
                            disable=False)
         
         step_counter = 0
-        while active_envs > 0 and step_counter < max_episode_steps:
+        while active_envs > 0 and step_counter < args.episode_length:
             # Select actions for all environments at once using vectorized operations
             with torch.no_grad():
                 q_values = agent.policy_net(states_tensor)
@@ -323,81 +373,40 @@ def train_dqn_agent(args):
                     q_values.argmax(dim=1)
                 )
             
-            # Step all environments
-            next_states = []
-            rewards = []
-            new_dones = []
+            # Step all environments in parallel
+            next_states, rewards, new_dones, infos = step_environments_in_parallel(
+                envs, actions, dones
+            )
+            
+            # Process environment step results
             balances = []
             trade_counts = []
             
             for i in range(args.num_workers):
                 if not dones[i]:
-                    next_state, reward, done, info = envs[i].step(actions[i].item())
-                    next_states.append(next_state)
-                    rewards.append(reward)
-                    new_dones.append(done)
-                    balances.append(info.get('balance', 0))
+                    balances.append(infos[i].get('balance', 0))
                     # Get trades from the environment's info dictionary
-                    trade_counts.append(info.get('total_trades', 0))
+                    trade_counts.append(infos[i].get('total_trades', 0))
                     
-                    # Log balance changes to identify what's causing them
-                    if step_counter % 100 == 0 and i == 0:  # Only log for first environment every 100 steps
-                        logger.info(f"Environment {i} - Step {step_counter}: Action={actions[i].item()}, "
-                                    f"Balance={info.get('balance', 0):.2f}, "
-                                    f"Position={info.get('position', 0)}, "
-                                    f"Trades={info.get('total_trades', 0)}, "
-                                    f"Price={info.get('price', 0):.2f}")
-                    
-                    episode_rewards_per_env[i] += reward
+                    episode_rewards_per_env[i] += rewards[i]
                     steps_per_env[i] += 1
                     
-                    if isinstance(next_state, np.ndarray):
-                        next_states_tensor[i] = torch.from_numpy(next_state).float()
+                    if isinstance(next_states[i], np.ndarray):
+                        next_states_tensor[i] = torch.from_numpy(next_states[i]).float()
                     else:
-                        next_states_tensor[i] = next_state
+                        next_states_tensor[i] = next_states[i]
                 else:
-                    next_states.append(states[i])
-                    rewards.append(0)
-                    new_dones.append(True)
                     balances.append(0)
                     trade_counts.append(0)
             
-            # Store transitions in replay buffer using vectorized operations
-            if len(agent.memory) >= agent.batch_size:
-                # Sample batch indices - ensure we don't sample more than available items
-                sample_size = min(len(agent.memory), agent.batch_size)
-                indices = np.random.choice(len(agent.memory), sample_size, replace=False)
-                batch = [agent.memory[i] for i in indices]
-                
-                # Convert batch to tensors efficiently
-                for i, (state, action, reward, next_state, done) in enumerate(batch):
-                    replay_states[i] = torch.from_numpy(state).float() if isinstance(state, np.ndarray) else state
-                    replay_actions[i] = action
-                    replay_rewards[i] = reward
-                    replay_next_states[i] = torch.from_numpy(next_state).float() if isinstance(next_state, np.ndarray) else next_state
-                    replay_dones[i] = done
-                
-                # Update networks using vectorized operations
-                with torch.amp.autocast('cuda'):
-                    current_q_values = agent.policy_net(replay_states[:sample_size]).gather(1, replay_actions[:sample_size].unsqueeze(1))
-                    with torch.no_grad():
-                        next_q_values = agent.target_net(replay_next_states[:sample_size]).max(1)[0]
-                        expected_q_values = replay_rewards[:sample_size] + (1 - replay_dones[:sample_size].float()) * agent.gamma * next_q_values
-                    
-                    loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
-                
-                # Optimize
-                agent.optimizer.zero_grad()
-                if agent.scaler is not None:
-                    agent.scaler.scale(loss).backward()
-                    agent.scaler.step(agent.optimizer)
-                    agent.scaler.update()
-                else:
-                    loss.backward()
-                    agent.optimizer.step()
-                
-                total_updates += 1
-                update_counter += 1
+            # Log balance changes for debugging
+            if step_counter % 100 == 0 and active_envs > 0:
+                i = next((i for i, d in enumerate(dones) if not d), 0)
+                logger.info(f"Environment {i} - Step {step_counter}: Action={actions[i].item()}, "
+                           f"Balance={infos[i].get('balance', 0):.2f}, "
+                           f"Position={infos[i].get('position', 0)}, "
+                           f"Trades={infos[i].get('total_trades', 0)}, "
+                           f"Price={infos[i].get('price', 0):.2f}")
             
             # Store transitions in replay buffer
             for i in range(args.num_workers):
@@ -413,10 +422,46 @@ def train_dqn_agent(args):
             # Count active environments
             active_envs = sum(1 for d in dones if not d)
             
-            # Update progress bar with average metrics
-            avg_reward = sum(r for i, r in enumerate(rewards) if not dones[i]) / max(1, active_envs)
-            avg_balance = sum(b for i, b in enumerate(balances) if not dones[i]) / max(1, active_envs)
-            avg_trades = sum(t for i, t in enumerate(trade_counts) if not dones[i]) / max(1, active_envs)
+            # Batch updates every few steps for better efficiency
+            if step_counter % update_frequency == 0 and len(agent.memory) >= optimal_batch_size:
+                # Perform multiple updates in a batch
+                for _ in range(update_frequency * max(1, args.updates_per_step)):
+                    # Dynamically adjust batch size based on available replay buffer samples
+                    current_batch_size = min(len(agent.memory), optimal_batch_size)
+                    
+                    # Sample batch indices - ensure we don't sample more than available items
+                    indices = np.random.choice(len(agent.memory), current_batch_size, replace=False)
+                    batch = [agent.memory[i] for i in indices]
+                    
+                    # Convert batch to tensors efficiently
+                    for i, (state, action, reward, next_state, done) in enumerate(batch):
+                        replay_states[i] = torch.from_numpy(state).float() if isinstance(state, np.ndarray) else state
+                        replay_actions[i] = action
+                        replay_rewards[i] = reward
+                        replay_next_states[i] = torch.from_numpy(next_state).float() if isinstance(next_state, np.ndarray) else next_state
+                        replay_dones[i] = done
+                    
+                    # Update networks using vectorized operations
+                    with torch.amp.autocast('cuda'):
+                        current_q_values = agent.policy_net(replay_states[:current_batch_size]).gather(1, replay_actions[:current_batch_size].unsqueeze(1))
+                        with torch.no_grad():
+                            next_q_values = agent.target_net(replay_next_states[:current_batch_size]).max(1)[0]
+                            expected_q_values = replay_rewards[:current_batch_size] + (1 - replay_dones[:current_batch_size].float()) * agent.gamma * next_q_values
+                        
+                        loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
+                    
+                    # Optimize
+                    agent.optimizer.zero_grad()
+                    if agent.scaler is not None:
+                        agent.scaler.scale(loss).backward()
+                        agent.scaler.step(agent.optimizer)
+                        agent.scaler.update()
+                    else:
+                        loss.backward()
+                        agent.optimizer.step()
+                    
+                    total_updates += 1
+                    update_counter += 1
             
             # Calculate portfolio values (including unrealized gains/losses)
             portfolio_values = []
@@ -427,7 +472,21 @@ def train_dqn_agent(args):
                     portfolio_value = env._calculate_portfolio_value(current_price)
                     portfolio_values.append(portfolio_value)
             
-            avg_portfolio = sum(portfolio_values) / max(1, len(portfolio_values)) if portfolio_values else avg_balance
+            avg_portfolio = sum(portfolio_values) / max(1, len(portfolio_values)) if portfolio_values else 0
+            
+            # Update progress bar with average metrics
+            avg_reward = sum(episode_rewards_per_env) / max(1, active_envs)
+            avg_balance = sum(balances) / max(1, active_envs) if balances else 0
+            avg_trades = sum(trade_counts) / max(1, active_envs) if trade_counts else 0
+            
+            gpu_util = ""
+            if device == "cuda" and step_counter % 50 == 0:
+                # Get GPU utilization percentage
+                try:
+                    gpu_mem = torch.cuda.memory_reserved() / torch.cuda.get_device_properties(0).total_memory * 100
+                    gpu_util = f", GPU:{gpu_mem:.1f}%"
+                except:
+                    pass
             
             progress_bar.set_postfix({
                 'reward': f"{avg_reward:.2f}",
@@ -435,59 +494,67 @@ def train_dqn_agent(args):
                 'portfolio': f"{avg_portfolio:.2f}",
                 'trades': f"{avg_trades:.0f}",
                 'active_envs': active_envs,
-                'updates': total_updates
+                'updates': total_updates,
+                'info': f"bs:{current_batch_size}{gpu_util}"
             })
             progress_bar.update(1)
             
             step_counter += 1
         
-        # Close progress bar
         progress_bar.close()
         
-        # Calculate episode metrics
+        # Episode summary
         episode_reward = sum(episode_rewards_per_env) / args.num_workers
         episode_profit = sum(env.balance - args.initial_balance for env in envs) / args.num_workers
-        episode_trade_count = sum(env.info.get('trades', 0) if hasattr(env, 'info') else 0 for env in envs) / args.num_workers
+        episode_trade_count = sum(env.info.get('total_trades', 0) if hasattr(env, 'info') else 0 for env in envs) / args.num_workers
         
         # Store episode metrics
         episode_rewards.append(episode_reward)
-        episode_profits.append(episode_profit)
-        episode_trades.append(episode_trade_count)
+        episode_balances.append(episode_profit)
+        episode_trade_counts.append(episode_trade_count)
+        
+        # Update networks and exploration
+        if episode % args.target_update == 0:
+            agent.target_net.load_state_dict(agent.policy_net.state_dict())
+            logger.info(f"Target network updated at episode {episode}")
+        
+        # Decay epsilon
+        agent.epsilon = max(agent.epsilon_end, agent.epsilon * agent.epsilon_decay)
+        
+        # Save model
+        if episode % args.save_interval == 0 or episode == args.episodes:
+            model_path = os.path.join(save_dir, f"dqn_agent_episode_{episode}.pt")
+            state_dict = {
+                'policy_net': agent.policy_net.state_dict(),
+                'optimizer': agent.optimizer.state_dict(),
+                'episode': episode,
+                'epsilon': agent.epsilon,
+            }
+            torch.save(state_dict, model_path)
+            logger.info(f"Model saved to {model_path}")
+            
+            # Save metrics
+            metrics = {
+                'episode_rewards': episode_rewards,
+                'episode_balances': episode_balances,
+                'episode_trade_counts': episode_trade_counts,
+            }
+            metrics_path = os.path.join(save_dir, f"metrics_episode_{episode}.pt")
+            torch.save(metrics, metrics_path)
         
         # Log episode results
-        logger.info(
-            f"Episode {episode}/{args.episodes} - "
-            f"Avg Reward: {episode_reward:.2f}, "
-            f"Avg Profit: {episode_profit:.2f}, "
-            f"Avg Trades: {episode_trade_count:.1f}, "
-            f"Epsilon: {agent.epsilon:.4f}, "
-            f"Buffer: {len(agent.memory)}"
-        )
+        logger.info(f"Episode {episode}/{args.episodes} - "
+                   f"Reward: {episode_reward:.2f}, Profit: {episode_profit:.2f}, "
+                   f"Trades: {episode_trade_count:.2f}, Epsilon: {agent.epsilon:.4f}, "
+                   f"Memory: {len(agent.memory)}, Updates: {total_updates}")
         
-        # Save model if it's the best so far
-        if episode_reward > best_reward:
-            best_reward = episode_reward
-            agent.save(os.path.join(args.output_dir, 'dqn_agent_best.pt'))
-            logger.info(f"New best model saved with reward {episode_reward:.2f}")
-        
-        # Save checkpoint periodically
-        if episode % args.save_frequency == 0:
-            agent.save(os.path.join(args.output_dir, f'dqn_agent_episode_{episode}.pt'))
-            logger.info(f"Checkpoint saved at episode {episode}")
+        # Evaluate model every few episodes
+        if args.eval_interval > 0 and episode % args.eval_interval == 0:
+            # TODO: Implement evaluation
+            pass
     
-    # Save final model
-    agent.save(os.path.join(args.output_dir, 'dqn_agent_final.pt'))
-    logger.info("Training completed. Final model saved.")
-    
-    # Plot training metrics
-    plot_training_metrics(
-        episode_rewards, 
-        episode_profits, 
-        episode_trades, 
-        args.output_dir
-    )
-    
-    return agent
+    logger.info("Training completed!")
+    return episode_rewards, episode_balances, episode_trade_counts
 
 def plot_training_results(rewards, profits, trades, output_dir):
     """
