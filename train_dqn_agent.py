@@ -284,7 +284,7 @@ def train_dqn_agent(args):
                     active_envs -= 1
             
             # Update agent (from common replay buffer) multiple times per step if specified
-            if len(agent.replay_buffer) > args.batch_size and update_counter >= args.num_workers:
+            if len(agent.memory) > args.batch_size and update_counter >= args.num_workers:
                 # Multiple updates per batch of experiences
                 for _ in range(args.updates_per_step):
                     loss = agent.update()
@@ -329,11 +329,11 @@ def train_dqn_agent(args):
                    f"Avg Profit: {avg_profit:.2f}, "
                    f"Avg Trades: {avg_trades:.1f}, "
                    f"Epsilon: {agent.epsilon:.4f}, "
-                   f"Buffer: {len(agent.replay_buffer)}")
+                   f"Buffer: {len(agent.memory)}")
         
         # Update target network
         if episode % args.update_target_frequency == 0:
-            agent.update_target_network()
+            agent.target_net.load_state_dict(agent.policy_net.state_dict())
             logger.info(f"Target network updated at episode {episode}")
         
         # Save model checkpoint

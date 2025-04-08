@@ -14,7 +14,7 @@ from typing import List
 import random
 from collections import deque
 import logging
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 # Setup logging
 logging.basicConfig(
@@ -136,10 +136,13 @@ class DQNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
         
         # Initialize optimizer with gradient clipping
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(
+            self.policy_net.parameters(),
+            lr=learning_rate
+        )
         
         # Initialize AMP GradScaler if using CUDA
-        self.scaler = GradScaler() if str(device).startswith("cuda") else None
+        self.scaler = GradScaler('cuda') if str(device).startswith("cuda") else None
         
         # Initialize replay buffer
         self.memory = deque(maxlen=buffer_size)
