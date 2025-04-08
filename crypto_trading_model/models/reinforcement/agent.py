@@ -9,6 +9,7 @@ import random
 from collections import deque, namedtuple
 import os
 import json
+import torch.nn.functional as F
 
 from .policy import BasePolicy, MLPPolicy, LSTMPolicy, MultiTimeframePolicy
 
@@ -177,11 +178,11 @@ class DQNAgent:
         self.optimizer.step()
         
         # Update target network if needed
-        self.steps += 1
         if self.steps % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
         
-        return loss.item()
+        self.steps += 1
+        return loss.detach().item()
     
     def _convert_states_to_tensor(self, states):
         """
@@ -619,21 +620,21 @@ class PPOAgent:
                 value_pred = self.value_net(states_batch)
                 value_loss = self.value_coef * F.mse_loss(value_pred, returns_batch)
                 
-                # Update policy network
-                self.policy_optimizer.zero_grad()
-                policy_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.max_grad_norm)
-                self.policy_optimizer.step()
+                # Total loss
+                loss = policy_loss + value_loss
                 
-                # Update value network
+                # Optimize
+                self.policy_optimizer.zero_grad()
                 self.value_optimizer.zero_grad()
-                value_loss.backward()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.max_grad_norm)
                 torch.nn.utils.clip_grad_norm_(self.value_net.parameters(), self.max_grad_norm)
+                self.policy_optimizer.step()
                 self.value_optimizer.step()
                 
-                # Store losses
-                policy_losses.append(policy_loss.item())
-                value_losses.append(value_loss.item())
+                # Record losses
+                policy_losses.append(policy_loss.detach().item())
+                value_losses.append(value_loss.detach().item())
         
         # Compute average losses
         avg_policy_loss = np.mean(policy_losses)

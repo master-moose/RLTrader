@@ -784,7 +784,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True,
         timing_stats['optimization'] += optim_end - optim_start
         
         # Track statistics
-        epoch_loss += loss.item()
+        epoch_loss += loss.detach().item()
         
         # Calculate accuracy (only if not using mixup or for mixup's first target)
         if not mixup_applied:
@@ -810,7 +810,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, use_mixup=True,
             if device.type == 'cuda':
                 gpu_info = f", GPU Mem: {torch.cuda.memory_allocated(device) / (1024 * 1024):.1f}MB"
                 
-            logger.info(f"Batch {batch_idx}/{len(dataloader)}: Loss={loss.item():.4f}, "
+            logger.info(f"Batch {batch_idx}/{len(dataloader)}: Loss={loss.detach().item():.4f}, "
                        f"Acc={batch_correct/targets.size(0):.4f}, "
                        f"LR={current_lr:.6f}, "
                        f"Throughput={samples_per_sec:.1f} samples/sec{gpu_info}")
@@ -876,7 +876,7 @@ def validate(model, dataloader, criterion, device, num_classes=3):
             
             # Calculate loss
             loss = criterion(outputs, targets)
-            val_loss += loss.item()
+            val_loss += loss.detach().item()
             
             # Calculate accuracy
             _, predicted = torch.max(outputs, 1)

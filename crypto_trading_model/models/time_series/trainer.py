@@ -11,6 +11,7 @@ import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+import torch.nn.functional as F
 
 from .model import MultiTimeframeModel, TimeSeriesTransformer, TimeSeriesForecaster
 
@@ -332,7 +333,7 @@ def train_time_series_model(model: nn.Module,
             optimizer.step()
             
             # Save predictions and targets for metrics
-            train_losses.append(loss.item())
+            train_losses.append(loss.detach().item())
             
             if is_forecasting:
                 train_predictions.append(outputs.detach().cpu())
@@ -380,7 +381,7 @@ def train_time_series_model(model: nn.Module,
                     loss = criterion(outputs, batch['label'])
                 
                 # Save predictions and targets for metrics
-                val_losses.append(loss.item())
+                val_losses.append(loss.detach().item())
                 
                 if is_forecasting:
                     val_predictions.append(outputs.detach().cpu())

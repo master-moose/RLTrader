@@ -425,7 +425,7 @@ def train_dqn_agent(args):
         # Calculate episode metrics
         episode_reward = sum(episode_rewards_per_env) / args.num_workers
         episode_profit = sum(env.balance - args.initial_balance for env in envs) / args.num_workers
-        episode_trade_count = sum(env.trade_count for env in envs) / args.num_workers
+        episode_trade_count = sum(env.info.get('trades', 0) if hasattr(env, 'info') else 0 for env in envs) / args.num_workers
         
         # Store episode metrics
         episode_rewards.append(episode_reward)
