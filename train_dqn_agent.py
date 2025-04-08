@@ -38,8 +38,8 @@ def parse_args():
     # Training parameters
     parser.add_argument('--episodes', type=int, default=1000,
                         help='Number of episodes to train')
-    parser.add_argument('--max_steps', type=int, default=None,
-                        help='Maximum steps per episode (None uses full data)')
+    parser.add_argument('--episode_length', type=int, default=10000,
+                        help='Length of each episode in steps (default: 10000)')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size for experience replay (increased from 64 for more stable learning)')
     parser.add_argument('--gamma', type=float, default=0.99,
@@ -54,6 +54,8 @@ def parse_args():
                         help='Learning rate for the Q-network (increased from 0.0001 for faster learning)')
     parser.add_argument('--update_target_frequency', type=int, default=10,
                         help='Frequency of target network updates (episodes)')
+    parser.add_argument('--updates_per_step', type=int, default=1,
+                        help='Number of network updates per environment step')
     
     # Environment parameters
     parser.add_argument('--window_size', type=int, default=20,
@@ -233,6 +235,15 @@ def train_dqn_agent(args):
         if not os.path.exists(train_data_path):
             raise FileNotFoundError(f"Training data not found at {train_data_path}")
     
+    # Load data to get its length (for random starting positions)
+    temp_env = TradingEnvironment(
+        data_path=train_data_path,
+        window_size=args.window_size,
+        device=device
+    )
+    data_length = temp_env.data_length
+    logger.info(f"Dataset length: {data_length} timesteps")
+    
     # Create multiple trading environments for vectorized training
     logger.info(f"Creating {args.num_workers} parallel environments for training")
     envs = []
@@ -245,8 +256,8 @@ def train_dqn_agent(args):
             reward_scaling=args.reward_scaling,
             device=device,
             trade_cooldown=20,  # Increased from 10 to prevent excessive trading with high fees
-            # Offset each environment by a random amount to increase diversity
-            start_step=int(i * (10000 / args.num_workers))
+            # Initial start step will be randomized in reset()
+            start_step=None  
         )
         envs.append(env)
     
@@ -284,29 +295,38 @@ def train_dqn_agent(args):
     # Track total updates and experience collected
     total_updates = 0
     total_experiences = 0
+    update_counter = 0
     
     for episode in range(1, args.episodes + 1):
-        # Reset all environments
-        states = [env.reset() for env in envs]
+        # Reset all environments with random starting points
+        states = []
+        for env in envs:
+            # Generate random starting point for this episode
+            random_start = np.random.randint(
+                args.window_size + 1, 
+                data_length - args.episode_length - 100  # Ensure room for the episode
+            )
+            env.start_step = random_start
+            states.append(env.reset())
+            
         dones = [False] * args.num_workers
         episode_rewards_per_env = [0] * args.num_workers
         steps_per_env = [0] * args.num_workers
         active_envs = args.num_workers
         
-        # Limit steps if specified
-        max_steps = args.max_steps if args.max_steps is not None else float('inf')
-        
-        # Find the environment with the longest remaining steps
-        max_env_steps = max([env.data_length - env.current_step for env in envs])
-        max_episode_steps = min(max_steps, max_env_steps)
+        # Episode length is now fixed by the argument
+        max_episode_steps = args.episode_length
         
         # Episode loop
         progress_bar = tqdm(total=max_episode_steps, 
                            desc=f"Episode {episode}/{args.episodes}", 
                            disable=False)
         
-        # Continue as long as at least one environment is active
-        while active_envs > 0 and all(steps < max_steps for steps in steps_per_env):
+        # Continue as long as at least one environment is active and steps are within limit
+        step_counter = 0
+        while active_envs > 0 and step_counter < max_episode_steps:
+            step_counter += 1
+            
             # For each active environment
             for env_idx in range(args.num_workers):
                 if dones[env_idx]:
@@ -318,9 +338,14 @@ def train_dqn_agent(args):
                 # Take step in environment
                 next_state, reward, done, info = envs[env_idx].step(action)
                 
+                # Force done if we've reached the episode length
+                if steps_per_env[env_idx] >= max_episode_steps - 1:
+                    done = True
+                
                 # Store transition in replay buffer
                 agent.store_transition(states[env_idx], action, reward, next_state, done)
                 total_experiences += 1
+                update_counter += 1
                 
                 # Update state and rewards
                 states[env_idx] = next_state
@@ -332,27 +357,31 @@ def train_dqn_agent(args):
                     dones[env_idx] = True
                     active_envs -= 1
             
-            # Update agent (from common replay buffer) - now done more frequently
-            if len(agent.replay_buffer) > args.batch_size:
-                loss = agent.update()
-                total_updates += 1
+            # Update agent (from common replay buffer) multiple times per step if specified
+            if len(agent.replay_buffer) > args.batch_size and update_counter >= args.num_workers:
+                # Multiple updates per batch of experiences
+                for _ in range(args.updates_per_step):
+                    loss = agent.update()
+                    total_updates += 1
+                
+                update_counter = 0
                 
                 # Log debug info occasionally
                 if args.debug and total_updates % 100 == 0:
                     logger.debug(f"Updates: {total_updates}, Loss: {loss:.4f}")
             
             # Update progress bar
-            progress_step = min([steps for steps in steps_per_env if steps > 0])
             progress_bar.update(1)
             
             # Find an active environment for the progress bar stats
             active_idx = next((i for i, d in enumerate(dones) if not d), 0)
-            progress_bar.set_postfix({
-                'reward': f"{episode_rewards_per_env[active_idx]:.2f}",
-                'balance': f"{envs[active_idx].balance:.2f}",
-                'trades': envs[active_idx].total_trades,
-                'active_envs': active_envs
-            })
+            if active_idx < len(envs):  # Ensure valid index
+                progress_bar.set_postfix({
+                    'reward': f"{episode_rewards_per_env[active_idx]:.2f}",
+                    'balance': f"{envs[active_idx].balance:.2f}",
+                    'trades': envs[active_idx].total_trades,
+                    'active_envs': active_envs
+                })
         
         progress_bar.close()
         
