@@ -147,8 +147,16 @@ class DQNAgent:
         # Initialize AMP GradScaler if we're using CUDA
         self.scaler = None
         if self.use_amp and str(self.device).startswith("cuda"):
-            self.scaler = GradScaler()
-            logger.info("Using Automatic Mixed Precision (AMP)")
+            try:
+                self.scaler = GradScaler()
+                logger.info("Using Automatic Mixed Precision (AMP)")
+                logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+                logger.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize AMP GradScaler: {str(e)}")
+                logger.warning("Falling back to full precision training")
+        elif self.use_amp:
+            logger.warning("AMP requested but not using CUDA device - falling back to full precision")
         
         logger.info(f"Using device: {self.device}")
         
