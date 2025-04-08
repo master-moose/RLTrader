@@ -224,22 +224,36 @@ def train_dqn_agent(args):
             # Get the dataset for this timeframe
             dataset = h5f[tf]
             
-            # Check if this is a dataset or a group
-            if isinstance(dataset, h5py.Group):
-                logger.info(f"Timeframe {tf} is a group, looking for datasets inside")
-                # If it's a group, find the actual dataset inside
-                if 'data' in dataset:
-                    dataset = dataset['data']
-                    logger.info(f"Found 'data' dataset in group {tf}")
-                else:
-                    # Try to find any dataset in the group
-                    dataset_names = list(dataset.keys())
-                    if dataset_names:
-                        dataset = dataset[dataset_names[0]]
-                        logger.info(f"Using dataset '{dataset_names[0]}' from group {tf}")
-                    else:
-                        logger.error(f"No datasets found in group {tf}")
-                        continue
+            # Function to recursively find a dataset in a group
+            def find_dataset(obj, path=""):
+                if isinstance(obj, h5py.Dataset):
+                    return obj, path
+                elif isinstance(obj, h5py.Group):
+                    # Try to find a dataset named 'data' first
+                    if 'data' in obj:
+                        return obj['data'], f"{path}/data"
+                    
+                    # Otherwise, look for any dataset in this group
+                    for name in obj.keys():
+                        if isinstance(obj[name], h5py.Dataset):
+                            return obj[name], f"{path}/{name}"
+                        
+                        # Recursively search in subgroups
+                        if isinstance(obj[name], h5py.Group):
+                            result, result_path = find_dataset(obj[name], f"{path}/{name}")
+                            if result is not None:
+                                return result, result_path
+                
+                return None, None
+            
+            # Try to find a dataset in the group
+            dataset, dataset_path = find_dataset(dataset)
+            
+            if dataset is None:
+                logger.error(f"No dataset found in group {tf}")
+                continue
+            
+            logger.info(f"Found dataset at {dataset_path} for timeframe {tf}")
             
             # Log dataset information
             logger.info(f"Dataset for {tf}: shape={dataset.shape}, dtype={dataset.dtype}")
