@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from typing import List
+from typing import List, Union
 import random
 from collections import deque
 import logging
@@ -142,7 +142,10 @@ class DQNAgent:
         )
         
         # Initialize AMP GradScaler if using CUDA
-        self.scaler = GradScaler('cuda') if str(device).startswith("cuda") else None
+        if str(device).startswith("cuda"):
+            self.scaler = GradScaler()
+        else:
+            self.scaler = None
         
         # Initialize replay buffer
         self.memory = deque(maxlen=buffer_size)
@@ -161,13 +164,13 @@ class DQNAgent:
         # Initialize logging
         self.logger = logging.getLogger(__name__)
     
-    def select_action(self, state: np.ndarray, training: bool = True) -> int:
+    def select_action(self, state: Union[np.ndarray, torch.Tensor], training: bool = True) -> int:
         """
         Select an action using epsilon-greedy policy.
         
         Parameters:
         -----------
-        state : np.ndarray
+        state : Union[np.ndarray, torch.Tensor]
             Current state representation
         training : bool
             Whether to use exploration (epsilon-greedy) or exploitation (greedy)
@@ -181,8 +184,20 @@ class DQNAgent:
             return random.randrange(self.action_dim)
         
         with torch.no_grad():
-            state = torch.FloatTensor(state).to(self.device)
+            # Convert state to tensor if it's not already
+            if not torch.is_tensor(state):
+                state = torch.FloatTensor(state).to(self.device)
+            elif state.device != self.device:
+                state = state.to(self.device)
+            
+            # Set network to evaluation mode for inference to handle batch norm with single samples
+            self.policy_net.eval()
             q_values = self.policy_net(state)
+            
+            # If in training mode, set the network back to train mode
+            if training:
+                self.policy_net.train()
+                
             return q_values.argmax().item()
     
     def store_transition(
@@ -261,7 +276,10 @@ class DQNAgent:
         
         # Use AMP context manager if available
         if self.scaler is not None:
-            with autocast():
+            # Get the device type as a string (e.g., 'cuda', 'cpu')
+            device_type = 'cuda' if str(self.device).startswith('cuda') else 'cpu'
+            
+            with autocast(device_type=device_type):
                 # Compute current Q values
                 current_q_values = self.policy_net(state_batch).gather(
                     1, action_batch.unsqueeze(1)
@@ -269,6 +287,8 @@ class DQNAgent:
                 
                 # Compute target Q values
                 with torch.no_grad():
+                    # Always use eval mode for target_net
+                    self.target_net.eval()
                     next_q_values = self.target_net(next_state_batch).max(1)[0]
                     target_q_values = (reward_batch + 
                                      (1 - done_batch) * self.gamma * next_q_values)
@@ -298,6 +318,8 @@ class DQNAgent:
             
             # Compute target Q values
             with torch.no_grad():
+                # Always use eval mode for target_net
+                self.target_net.eval()
                 next_q_values = self.target_net(next_state_batch).max(1)[0]
                 target_q_values = (reward_batch + 
                                  (1 - done_batch) * self.gamma * next_q_values)
