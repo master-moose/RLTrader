@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
-from crypto_trading_model.lstm_lightning import LSTMModel
+from crypto_trading_model.lstm_lightning import LightningTimeSeriesModel as LSTMModel
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

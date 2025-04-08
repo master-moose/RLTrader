@@ -68,7 +68,7 @@ class DQNAgent:
         self,
         state_dim: int,
         action_dim: int,
-        lstm_model_path: str,
+        lstm_model,
         hidden_dim: int = 128,
         learning_rate: float = 1e-4,
         gamma: float = 0.99,
@@ -89,8 +89,8 @@ class DQNAgent:
             Dimension of the state space
         action_dim : int
             Dimension of the action space (number of possible actions)
-        lstm_model_path : str
-            Path to pre-trained LSTM model
+        lstm_model : LightningTimeSeriesModel
+            Pre-trained LSTM model for state representation
         hidden_dim : int
             Size of hidden layers in Q-Network
         learning_rate : float
@@ -114,7 +114,7 @@ class DQNAgent:
         """
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.lstm_model_path = lstm_model_path
+        self.lstm_model = lstm_model
         self.hidden_dim = hidden_dim
         self.learning_rate = learning_rate
         self.gamma = gamma
@@ -148,86 +148,20 @@ class DQNAgent:
         # Initialize step counter
         self.steps = 0
         
-        # Load LSTM model for state representation
-        self._load_lstm_model()
+        # Set LSTM model to evaluation mode
+        if self.lstm_model:
+            self.lstm_model.eval()
+            self.lstm_model.to(self.device)
+            logger.info("LSTM model set to evaluation mode")
         
         # Metrics for tracking
         self.losses = []
         self.rewards = []
         self.epsilons = []
     
-    def _load_lstm_model(self):
-        """Load the pre-trained LSTM model for state representation"""
-        try:
-            # Placeholder for LSTM model loading
-            # This will be implemented based on your specific LSTM structure
-            logger.info(f"Loading LSTM model from {self.lstm_model_path}")
-            
-            # Check if the file exists
-            if not os.path.exists(self.lstm_model_path):
-                raise FileNotFoundError(f"LSTM model file not found at {self.lstm_model_path}")
-            
-            # Load the model
-            checkpoint = torch.load(self.lstm_model_path, map_location=self.device)
-            
-            # TODO: Initialize and load LSTM model based on your specific implementation
-            # self.lstm_model = ...
-            
-            logger.info("LSTM model loaded successfully")
-        except Exception as e:
-            logger.error(f"Error loading LSTM model: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            raise
-    
-    def get_state_representation(self, market_data):
+    def store_transition(self, state, action, reward, next_state, done):
         """
-        Extract state representation from market data using the pre-trained LSTM model.
-        
-        Parameters:
-        -----------
-        market_data : dict
-            Dictionary containing market data for different timeframes
-            
-        Returns:
-        --------
-        torch.Tensor
-            State representation tensor
-        """
-        # TODO: Implement based on your specific LSTM model architecture
-        # For now, return a dummy tensor
-        return torch.randn(self.state_dim).to(self.device)
-    
-    def select_action(self, state, evaluation=False):
-        """
-        Select an action using epsilon-greedy policy.
-        
-        Parameters:
-        -----------
-        state : torch.Tensor
-            Current state representation
-        evaluation : bool
-            Whether to use greedy policy (True) or epsilon-greedy (False)
-            
-        Returns:
-        --------
-        int
-            Selected action index
-        """
-        # During evaluation, use greedy policy
-        if evaluation or random.random() > self.epsilon:
-            with torch.no_grad():
-                self.q_network.eval()
-                q_values = self.q_network(state)
-                self.q_network.train()
-                return q_values.argmax().item()
-        # During training, use epsilon-greedy policy
-        else:
-            return random.randint(0, self.action_dim - 1)
-    
-    def store_experience(self, state, action, reward, next_state, done):
-        """
-        Store experience in replay buffer.
+        Store transition in replay buffer.
         
         Parameters:
         -----------
@@ -244,57 +178,87 @@ class DQNAgent:
         """
         self.replay_buffer.append(Experience(state, action, reward, next_state, done))
     
+    def select_action(self, state, explore=True):
+        """
+        Select an action using epsilon-greedy policy.
+        
+        Parameters:
+        -----------
+        state : torch.Tensor
+            Current state representation
+        explore : bool
+            Whether to use exploration (epsilon-greedy) or exploitation (greedy)
+            
+        Returns:
+        --------
+        int
+            Selected action index
+        """
+        # During evaluation or exploitation, use greedy policy
+        if not explore or random.random() > self.epsilon:
+            with torch.no_grad():
+                self.q_network.eval()
+                q_values = self.q_network(state)
+                self.q_network.train()
+                return q_values.argmax().item()
+        # During training with exploration, use epsilon-greedy policy
+        else:
+            return random.randint(0, self.action_dim - 1)
+    
     def update(self):
-        """Update the Q-Network using experience replay"""
+        """
+        Update the Q-Network using experience replay.
+        
+        Returns:
+        --------
+        float
+            Loss value
+        """
         # Check if enough experiences are available
         if len(self.replay_buffer) < self.batch_size:
-            return
+            return 0.0
         
         # Sample a batch of experiences
         experiences = random.sample(self.replay_buffer, self.batch_size)
         
-        # Convert batch of experiences to tensors
-        states = torch.stack([e.state for e in experiences])
-        actions = torch.tensor([e.action for e in experiences], dtype=torch.long).to(self.device)
-        rewards = torch.tensor([e.reward for e in experiences], dtype=torch.float32).to(self.device)
-        next_states = torch.stack([e.next_state for e in experiences])
-        dones = torch.tensor([e.done for e in experiences], dtype=torch.float32).to(self.device)
+        # Separate experiences into components
+        states = torch.stack([exp.state for exp in experiences])
+        actions = torch.tensor([exp.action for exp in experiences], dtype=torch.long).to(self.device)
+        rewards = torch.tensor([exp.reward for exp in experiences], dtype=torch.float).to(self.device)
+        next_states = torch.stack([exp.next_state for exp in experiences])
+        dones = torch.tensor([exp.done for exp in experiences], dtype=torch.float).to(self.device)
         
         # Compute current Q values
         q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         
-        # Compute next Q values using Double DQN
-        # 1. Get actions from current policy network
-        next_actions = self.q_network(next_states).argmax(dim=1, keepdim=True)
-        # 2. Get Q-values from target network for those actions
+        # Compute next Q values using Double DQN method
+        next_actions = self.q_network(next_states).argmax(1, keepdim=True)
         next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
         
         # Compute target Q values
         target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
         
         # Compute loss
-        loss = nn.functional.mse_loss(q_values, target_q_values)
+        loss = nn.MSELoss()(q_values, target_q_values.detach())
         
-        # Update the network
+        # Update network
         self.optimizer.zero_grad()
         loss.backward()
-        # Clip gradients to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.optimizer.step()
+        
+        # Update target network if needed
+        self.steps += 1
+        if self.steps % self.update_target_every == 0:
+            self.update_target_network()
         
         # Track metrics
         self.losses.append(loss.item())
         
-        # Update target network periodically
-        if self.steps % self.update_target_every == 0:
-            self.target_network.load_state_dict(self.q_network.state_dict())
-        
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        self.epsilons.append(self.epsilon)
-        
-        # Increment step counter
-        self.steps += 1
+        return loss.item()
+    
+    def update_target_network(self):
+        """Update the target network with current Q-network weights"""
+        self.target_network.load_state_dict(self.q_network.state_dict())
     
     def save(self, path):
         """
@@ -317,25 +281,24 @@ class DQNAgent:
         }, path)
         logger.info(f"Agent saved to {path}")
     
-    def load(self, path):
+    def load_state_dict(self, checkpoint):
         """
-        Load the agent's state.
+        Load the agent's state from a checkpoint.
         
         Parameters:
         -----------
-        path : str
-            Path to load the agent from
+        checkpoint : dict
+            Checkpoint dictionary containing agent's state
         """
-        checkpoint = torch.load(path, map_location=self.device)
         self.q_network.load_state_dict(checkpoint['q_network_state_dict'])
         self.target_network.load_state_dict(checkpoint['target_network_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.epsilon = checkpoint['epsilon']
         self.steps = checkpoint['steps']
-        self.losses = checkpoint['losses']
-        self.rewards = checkpoint['rewards'] 
-        self.epsilons = checkpoint['epsilons']
-        logger.info(f"Agent loaded from {path}")
+        self.losses = checkpoint.get('losses', [])
+        self.rewards = checkpoint.get('rewards', [])
+        self.epsilons = checkpoint.get('epsilons', [])
+        logger.info("Agent state loaded successfully")
     
     def plot_metrics(self, save_path=None):
         """
@@ -344,7 +307,7 @@ class DQNAgent:
         Parameters:
         -----------
         save_path : str
-            Path to save the plots
+            Path to save the plots, or None to display
         """
         plt.figure(figsize=(15, 10))
         
@@ -354,25 +317,28 @@ class DQNAgent:
         plt.title('Training Loss')
         plt.xlabel('Update Steps')
         plt.ylabel('Loss')
+        plt.grid(True)
         
         # Plot rewards
         plt.subplot(3, 1, 2)
         plt.plot(self.rewards)
         plt.title('Episode Rewards')
-        plt.xlabel('Episodes')
+        plt.xlabel('Episode')
         plt.ylabel('Reward')
+        plt.grid(True)
         
         # Plot epsilon
         plt.subplot(3, 1, 3)
         plt.plot(self.epsilons)
         plt.title('Exploration Rate (Epsilon)')
-        plt.xlabel('Update Steps')
+        plt.xlabel('Episode')
         plt.ylabel('Epsilon')
+        plt.grid(True)
         
         plt.tight_layout()
         
         if save_path:
             plt.savefig(save_path)
             logger.info(f"Metrics plot saved to {save_path}")
-        
-        plt.show() 
+        else:
+            plt.show() 

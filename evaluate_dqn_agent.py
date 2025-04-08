@@ -19,7 +19,7 @@ from datetime import datetime
 
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
-from crypto_trading_model.lstm_lightning import LSTMModel
+from crypto_trading_model.lstm_lightning import LightningTimeSeriesModel as LSTMModel
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -134,7 +134,7 @@ def load_agent(model_path, lstm_model_path, state_dim, action_dim, device=None):
         logger.info(f"LSTM model loaded successfully")
         
         # Load DQN agent
-        # Initialize DQN agent with default parameters (will be overridden by checkpoint)
+        # Initialize DQN agent with the LSTM model
         agent = DQNAgent(
             state_dim=state_dim,
             action_dim=action_dim,

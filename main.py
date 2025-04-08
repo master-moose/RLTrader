@@ -12,6 +12,9 @@ import json
 import subprocess
 from datetime import datetime
 
+# Import the correct model class
+from crypto_trading_model.lstm_lightning import LightningTimeSeriesModel
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
