@@ -337,7 +337,16 @@ def train_dqn_agent(args):
                     rewards.append(reward)
                     new_dones.append(done)
                     balances.append(info.get('balance', 0))
-                    trade_counts.append(info.get('trades', 0))
+                    # Get trades from the environment's info dictionary
+                    trade_counts.append(info.get('total_trades', 0))
+                    
+                    # Log balance changes to identify what's causing them
+                    if step_counter % 100 == 0 and i == 0:  # Only log for first environment every 100 steps
+                        logger.info(f"Environment {i} - Step {step_counter}: Action={actions[i].item()}, "
+                                    f"Balance={info.get('balance', 0):.2f}, "
+                                    f"Position={info.get('position', 0)}, "
+                                    f"Trades={info.get('total_trades', 0)}, "
+                                    f"Price={info.get('price', 0):.2f}")
                     
                     episode_rewards_per_env[i] += reward
                     steps_per_env[i] += 1
@@ -369,7 +378,7 @@ def train_dqn_agent(args):
                     replay_dones[i] = done
                 
                 # Update networks using vectorized operations
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     current_q_values = agent.policy_net(replay_states[:sample_size]).gather(1, replay_actions[:sample_size].unsqueeze(1))
                     with torch.no_grad():
                         next_q_values = agent.target_net(replay_next_states[:sample_size]).max(1)[0]
@@ -409,9 +418,21 @@ def train_dqn_agent(args):
             avg_balance = sum(b for i, b in enumerate(balances) if not dones[i]) / max(1, active_envs)
             avg_trades = sum(t for i, t in enumerate(trade_counts) if not dones[i]) / max(1, active_envs)
             
+            # Calculate portfolio values (including unrealized gains/losses)
+            portfolio_values = []
+            for i, env in enumerate(envs):
+                if not dones[i]:
+                    # Get current price and calculate portfolio value
+                    current_price = env._get_current_price()
+                    portfolio_value = env._calculate_portfolio_value(current_price)
+                    portfolio_values.append(portfolio_value)
+            
+            avg_portfolio = sum(portfolio_values) / max(1, len(portfolio_values)) if portfolio_values else avg_balance
+            
             progress_bar.set_postfix({
                 'reward': f"{avg_reward:.2f}",
                 'balance': f"{avg_balance:.2f}",
+                'portfolio': f"{avg_portfolio:.2f}",
                 'trades': f"{avg_trades:.0f}",
                 'active_envs': active_envs,
                 'updates': total_updates

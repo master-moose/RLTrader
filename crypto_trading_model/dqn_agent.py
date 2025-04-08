@@ -291,7 +291,7 @@ class DQNAgent:
             self.done_tensor[i] = done
         
         # Compute Q values and loss using AMP
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             # Get current Q values
             current_q_values = self.policy_net(self.state_tensor).gather(
                 1, self.action_tensor.unsqueeze(1)
