@@ -79,7 +79,7 @@ def parse_args():
     
     # Performance options
     parser.add_argument('--use_amp', action='store_true',
-                       help='Use Automatic Mixed Precision (AMP) for faster training on compatible GPUs')
+                        help='Use Automatic Mixed Precision (AMP) for faster training on compatible GPUs')
     
     # Saving options
     parser.add_argument('--save_frequency', type=int, default=50,
@@ -231,6 +231,15 @@ def train_dqn_agent(args):
         device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
     
+    # AMP verification
+    if args.use_amp:
+        logger.info("AMP requested via command line")
+        if device == "cuda" and torch.cuda.is_available():
+            cuda_version = torch.version.cuda if hasattr(torch.version, 'cuda') else "unknown"
+            logger.info(f"CUDA is available (version: {cuda_version}) - AMP should work")
+        else:
+            logger.warning("AMP requested but CUDA not available - AMP will be disabled")
+    
     # Load LSTM model
     lstm_model = load_lstm_model(args.lstm_model_path, device)
     
@@ -275,6 +284,7 @@ def train_dqn_agent(args):
     action_dim = envs[0].action_space
     
     # Create DQN agent
+    logger.info(f"Creating DQN agent with AMP: {args.use_amp}")
     agent = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
@@ -289,6 +299,12 @@ def train_dqn_agent(args):
         device=device,
         use_amp=args.use_amp  # Enable AMP if specified in command line
     )
+    
+    # Verify AMP setup
+    if hasattr(agent, 'scaler') and agent.scaler is not None:
+        logger.info("AMP GradScaler initialized - Mixed precision training ENABLED")
+    elif args.use_amp:
+        logger.warning("AMP was requested but GradScaler not initialized - check if CUDA is available")
     
     # Training loop
     episode_rewards = []
