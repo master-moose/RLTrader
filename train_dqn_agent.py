@@ -221,77 +221,31 @@ def train_dqn_agent(args):
         logger.info(f"Found timeframes: {timeframes}")
         
         for tf in timeframes:
-            # Get the dataset for this timeframe
-            dataset = h5f[tf]
+            # Get the group for this timeframe
+            group = h5f[tf]
             
-            # Function to recursively find a dataset in a group
-            def find_dataset(obj, path=""):
-                if isinstance(obj, h5py.Dataset):
-                    return obj, path
-                elif isinstance(obj, h5py.Group):
-                    # Try to find a dataset named 'data' first
-                    if 'data' in obj:
-                        return obj['data'], f"{path}/data"
-                    
-                    # Otherwise, look for any dataset in this group
-                    for name in obj.keys():
-                        if isinstance(obj[name], h5py.Dataset):
-                            return obj[name], f"{path}/{name}"
-                        
-                        # Recursively search in subgroups
-                        if isinstance(obj[name], h5py.Group):
-                            result, result_path = find_dataset(obj[name], f"{path}/{name}")
-                            if result is not None:
-                                return result, result_path
-                
-                return None, None
-            
-            # Try to find a dataset in the group
-            dataset, dataset_path = find_dataset(dataset)
-            
-            if dataset is None:
-                logger.error(f"No dataset found in group {tf}")
+            # Check if the group has a 'table' dataset
+            if 'table' not in group:
+                logger.error(f"No 'table' dataset found in group {tf}")
                 continue
             
-            logger.info(f"Found dataset at {dataset_path} for timeframe {tf}")
-            
-            # Log dataset information
-            logger.info(f"Dataset for {tf}: shape={dataset.shape}, dtype={dataset.dtype}")
-            
-            # Get column names from attributes or use defaults
-            columns = dataset.attrs.get('columns', 
-                        ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            logger.info(f"Columns for {tf}: {columns}")
+            # Get the table dataset
+            table = group['table']
+            logger.info(f"Found table dataset for {tf} with shape {table.shape} and dtype {table.dtype}")
             
             try:
-                # Read the entire dataset using proper HDF5 methods
-                data = np.array(dataset)  # Convert HDF5 dataset to numpy array
+                # Convert the structured array to a pandas DataFrame
+                # The structured array has a field for each column
+                data = table[:]  # Read the entire dataset
                 
-                # Check the actual shape of the data and adjust columns accordingly
-                data_shape = data.shape
-                logger.info(f"Data shape for timeframe {tf}: {data_shape}")
+                # Create a DataFrame from the structured array
+                df = pd.DataFrame(data)
                 
-                # Handle different data shapes
-                if len(data_shape) == 1:
-                    # If data is 1D, reshape it appropriately
-                    logger.warning(f"1D data detected for {tf}, attempting to reshape")
-                    # Try to infer the correct shape based on data length
-                    if len(data) % len(columns) == 0:
-                        rows = len(data) // len(columns)
-                        data = data.reshape(rows, len(columns))
-                        logger.info(f"Reshaped data to {data.shape}")
-                    else:
-                        # If we can't reshape properly, use only the first column
-                        logger.warning(f"Cannot reshape data properly, using only first column")
-                        data = data.reshape(-1, 1)
-                        columns = columns[:1]
-                elif len(data_shape) > 1 and data_shape[1] < len(columns):
-                    # If data has fewer columns than expected, adjust the columns list
-                    logger.warning(f"Data has {data_shape[1]} columns but {len(columns)} column names provided. Adjusting columns.")
-                    columns = columns[:data_shape[1]]
+                # Set the index column if it exists
+                if 'index' in df.columns:
+                    df.set_index('index', inplace=True)
                 
-                # Create DataFrame and set timestamp as index
-                df = pd.DataFrame(data, columns=columns)
+                # Convert timestamp to datetime if it exists
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
@@ -301,7 +255,7 @@ def train_dqn_agent(args):
                 
             except Exception as e:
                 logger.error(f"Error loading data for timeframe {tf}: {e}")
-                logger.error(f"Dataset info: shape={dataset.shape}, dtype={dataset.dtype}")
+                logger.error(f"Table info: shape={table.shape}, dtype={table.dtype}")
                 raise
     
     # Check if we successfully loaded any data
