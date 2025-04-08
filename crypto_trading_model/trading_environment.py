@@ -266,11 +266,57 @@ class TradingEnvironment:
         # Get price history for trend detection
         price_history = self._get_price_history(20)  # Get last 20 prices
         
-        # Execute action
-        if action == 1:  # Buy
+        # Check for stop loss conditions (new)
+        stop_loss_triggered = False
+        if self.position == 1 and self.position_price > 0:  # Long position
+            # Stop loss at 1.5% loss (previously 2%)
+            if current_price < self.position_price * 0.985:
+                stop_loss_triggered = True
+                logger.info(f"Long stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
+                
+        elif self.position == -1 and self.position_price > 0:  # Short position
+            # Stop loss at 1.5% loss (previously 2%)
+            if current_price > self.position_price * 1.015:
+                stop_loss_triggered = True
+                logger.info(f"Short stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
+        
+        # Force close position if stop loss triggered
+        if stop_loss_triggered:
+            if self.position == 1:  # Close long position
+                quantity = self.position_size if hasattr(self, 'position_size') else 0
+                profit = quantity * (current_price - self.position_price)
+                fee = quantity * current_price * self.transaction_fee
+                
+                # Update state
+                self.balance += quantity * current_price - fee
+                self.position = 0
+                self.position_price = 0.0
+                self.position_size = 0
+                self.total_trades += 1
+                self.total_profit += profit - fee
+                trade_executed = True
+                trade_type = "stop_loss_long"
+                
+            elif self.position == -1:  # Close short position
+                quantity = self.position_size if hasattr(self, 'position_size') else 0
+                profit = quantity * (self.position_price - current_price)
+                fee = quantity * current_price * self.transaction_fee
+                
+                # Update state
+                self.balance += profit - fee
+                self.position = 0
+                self.position_price = 0.0
+                self.position_size = 0
+                self.total_trades += 1
+                self.total_profit += profit - fee
+                trade_executed = True
+                trade_type = "stop_loss_short"
+        
+        # Execute action from agent if stop loss wasn't triggered
+        elif action == 1:  # Buy
             if self.position == 0 and not cooldown_active:  # No position -> Long
-                # Use only 25% of available balance to avoid all-in trades (reduced from 50%)
-                use_balance = min(self.balance * 0.25, self.initial_balance * 0.25)
+                # Use only 15% of available balance (reduced from 25%) to avoid large trades
+                use_balance = min(self.balance * 0.15, self.initial_balance * 0.15)
                 
                 # Only trade if we have enough balance (at least 1% of initial)
                 if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
@@ -307,8 +353,8 @@ class TradingEnvironment:
                 
         elif action == 2:  # Sell
             if self.position == 0 and not cooldown_active:  # No position -> Short
-                # Use only 25% of available balance as collateral (reduced from 50%)
-                use_balance = min(self.balance * 0.25, self.initial_balance * 0.25)
+                # Use only 15% of available balance as collateral (reduced from 25%)
+                use_balance = min(self.balance * 0.15, self.initial_balance * 0.15)
                 
                 # Only trade if we have enough balance (at least 1% of initial)
                 if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
@@ -353,82 +399,94 @@ class TradingEnvironment:
         if portfolio_value_before > 0:
             portfolio_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
         
-        # 2. Trade execution penalty - stronger penalty for excessive trading (increased penalty)
-        trade_penalty = -0.02 if trade_executed else 0
+        # 2. Trade execution penalty - stronger penalty for excessive trading
+        trade_penalty = -0.05 if trade_executed else 0  # Increased from -0.02
         
         # Additional penalty for trying to trade during cooldown
-        cooldown_penalty = -0.02 if cooldown_active and (action == 1 or action == 2) else 0
+        cooldown_penalty = -0.05 if cooldown_active and (action == 1 or action == 2) else 0  # Increased from -0.02
         
         # Reward for holding (not trading) - encourage patience
-        hold_reward = 0.0002 if action == 0 else 0
+        hold_reward = 0.001 if action == 0 else 0  # Increased from 0.0002
         
-        # 3. Trend-following component - reward for following the market trend
+        # 3. Trend-following component - improved trend detection
         trend_reward = 0
-        if len(price_history) >= 5:
-            # Calculate short-term trend
+        if len(price_history) >= 10:
+            # Calculate multiple timeframe trends
             short_trend = price_history[-1] / price_history[-5] - 1  # Last 5 periods
+            medium_trend = price_history[-1] / price_history[-10] - 1  # Last 10 periods
             
-            # Reward for trend-aligned actions
-            if self.position == 1 and short_trend > 0:  # Long in uptrend
-                trend_reward = 0.002
-            elif self.position == -1 and short_trend < 0:  # Short in downtrend
-                trend_reward = 0.002
-            elif self.position == 0 and abs(short_trend) < 0.002:  # Flat market, good to wait
-                trend_reward = 0.001
+            # Detect stronger trends
+            strong_uptrend = short_trend > 0.003 and medium_trend > 0.005
+            strong_downtrend = short_trend < -0.003 and medium_trend < -0.005
+            clear_sideways = abs(short_trend) < 0.001 and abs(medium_trend) < 0.002
+            
+            # Reward for well-aligned actions with strong trends
+            if self.position == 1 and strong_uptrend:  # Long in strong uptrend
+                trend_reward = 0.005  # Increased from 0.002
+            elif self.position == -1 and strong_downtrend:  # Short in strong downtrend
+                trend_reward = 0.005  # Increased from 0.002
+            elif self.position == 0 and clear_sideways:  # Flat in sideways market
+                trend_reward = 0.003  # Increased from 0.001
+            # Penalty for counter-trend positions
+            elif self.position == 1 and strong_downtrend:  # Long in downtrend
+                trend_reward = -0.004  # New penalty
+            elif self.position == -1 and strong_uptrend:  # Short in uptrend
+                trend_reward = -0.004  # New penalty
         
         # 4. Position holding component - encourage holding profitable positions
         position_reward = 0
         if self.position == 1 and current_price > self.position_price:  # Long position in profit
-            position_reward = 0.002
+            position_reward = 0.003  # Increased from 0.002
         elif self.position == -1 and current_price < self.position_price:  # Short position in profit
-            position_reward = 0.002
+            position_reward = 0.003  # Increased from 0.002
         
-        # Apply penalty for holding losing positions
+        # Apply penalty for holding losing positions (redundant with stop loss, but keeping as backup)
         holding_loss_penalty = 0
-        if self.position == 1 and current_price < self.position_price * 0.98:  # 2% loss in long (increased sensitivity)
-            holding_loss_penalty = -0.01
-        elif self.position == -1 and current_price > self.position_price * 1.02:  # 2% loss in short (increased sensitivity)
-            holding_loss_penalty = -0.01
+        if self.position == 1 and current_price < self.position_price * 0.98:  # 2% loss in long
+            holding_loss_penalty = -0.02  # Increased from -0.01
+        elif self.position == -1 and current_price > self.position_price * 1.02:  # 2% loss in short
+            holding_loss_penalty = -0.02  # Increased from -0.01
             
         # 5. Profit realization reward - bonus for taking profits
         profit_reward = 0
-        if trade_type == "close_long" and profit > 0:
+        if trade_type in ["close_long", "close_short"] and profit > 0:
             profit_pct = profit / (self.position_size * self.position_price) if self.position_size * self.position_price > 0 else 0
-            profit_reward = 0.05 * min(profit_pct * 100, 5)  # Scale with % profit, max 5% (increased reward)
-        elif trade_type == "close_short" and profit > 0:
-            profit_pct = profit / (self.position_size * self.position_price) if self.position_size * self.position_price > 0 else 0
-            profit_reward = 0.05 * min(profit_pct * 100, 5)  # Scale with % profit, max 5% (increased reward)
+            profit_reward = 0.08 * min(profit_pct * 100, 5)  # Increased from 0.05
         
-        # 6. Balance maintenance - reward for maintaining/growing account balance (strengthened)
+        # 6. Balance maintenance - reward for maintaining/growing account balance
         balance_reward = 0
         if self.balance > self.initial_balance:  # Growing account
-            balance_reward = 0.005
+            balance_reward = 0.01  # Increased from 0.005
         elif self.balance > self.initial_balance * 0.95:  # Preserving capital
-            balance_reward = 0.003
+            balance_reward = 0.005  # Increased from 0.003
         elif self.balance > self.initial_balance * 0.9:  # Minor drawdown
-            balance_reward = 0.001
+            balance_reward = 0.002  # Increased from 0.001
         
         # Apply strong penalty if balance drops too low
         low_balance_penalty = 0
         if self.balance < self.initial_balance * 0.8:  # Lost more than 20%
-            low_balance_penalty = -0.01
+            low_balance_penalty = -0.02  # Increased from -0.01
         elif self.balance < self.initial_balance * 0.7:  # Lost more than 30%
-            low_balance_penalty = -0.03
+            low_balance_penalty = -0.05  # Increased from -0.03
         elif self.balance < self.initial_balance * 0.65:  # Lost more than 35%
-            low_balance_penalty = -0.05
+            low_balance_penalty = -0.1  # Increased from -0.05
+        
+        # 7. Stop loss penalty - extra penalty for hitting stop loss
+        stop_loss_penalty = -0.03 if stop_loss_triggered else 0  # New penalty
         
         # Combine all reward components
         reward = (
-            portfolio_change * 3.0 +       # Main component with stronger weight (increased)
+            portfolio_change * 5.0 +       # Main component with increased weight (from 3.0)
             trade_penalty +
             cooldown_penalty +
             hold_reward +
-            trend_reward +                 # New trend component
+            trend_reward +
             position_reward +
             holding_loss_penalty +
             profit_reward +
             balance_reward +
-            low_balance_penalty
+            low_balance_penalty +
+            stop_loss_penalty              # New component
         ) * self.reward_scaling
         
         # Apply reward clipping to handle extreme values

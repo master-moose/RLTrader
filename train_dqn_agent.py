@@ -237,7 +237,7 @@ def train_dqn_agent(args):
         transaction_fee=args.transaction_fee,
         reward_scaling=args.reward_scaling,
         device=device,
-        trade_cooldown=10  # Add cooldown period to prevent excessive trading
+        trade_cooldown=20  # Increased from 10 to prevent excessive trading with high fees
     )
     
     # Create DQN agent
@@ -250,7 +250,7 @@ def train_dqn_agent(args):
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay=args.epsilon_decay,
-        buffer_size=50000,
+        buffer_size=100000,  # Increased from 50000 for more diverse experiences
         batch_size=args.batch_size,
         device=device
     )
