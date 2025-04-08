@@ -101,12 +101,12 @@ def load_agent(model_path, lstm_model_path, state_dim, action_dim, device=None):
         else:
             # Default configuration if not found in checkpoint
             lstm_config = {
-                'input_dim': 5,
-                'hidden_dim': 128,
+                'input_dims': {'15m': 5, '4h': 5, '1d': 5},  # Dictionary of input dimensions for each timeframe
+                'hidden_dims': 128,
                 'num_layers': 2,
                 'dropout': 0.2,
                 'learning_rate': 0.001,
-                'output_dim': 3
+                'num_classes': 3  # Changed from output_dim to num_classes
             }
             logger.warning("Using default LSTM configuration as it was not found in the checkpoint")
         

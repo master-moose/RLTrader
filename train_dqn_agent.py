@@ -117,12 +117,12 @@ def load_lstm_model(model_path, device=None):
         else:
             # Default configuration if not found in checkpoint
             model_config = {
-                'input_dim': 5,
-                'hidden_dim': 128,
+                'input_dims': {'15m': 5, '4h': 5, '1d': 5},  # Dictionary of input dimensions for each timeframe
+                'hidden_dims': 128,
                 'num_layers': 2,
                 'dropout': 0.2,
                 'learning_rate': 0.001,
-                'output_dim': 3
+                'num_classes': 3  # Changed from output_dim to num_classes
             }
             logger.warning("Using default LSTM configuration as it was not found in the checkpoint")
         
@@ -147,7 +147,7 @@ def load_lstm_model(model_path, device=None):
         model.eval()
         model.to(device)
         
-        logger.info(f"LSTM model loaded successfully, input_dim={model_config['input_dim']}, hidden_dim={model_config['hidden_dim']}")
+        logger.info(f"LSTM model loaded successfully, hidden_dim={model_config['hidden_dims']}")
         
         return model
     
