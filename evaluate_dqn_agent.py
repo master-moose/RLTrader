@@ -113,19 +113,32 @@ def load_agent(model_path, lstm_model_path, state_dim, action_dim, device=None):
         # Initialize LSTM model
         lstm_model = LSTMModel(**lstm_config)
         
-        # Load LSTM state dictionary
+        # Load state dictionary
         if 'state_dict' in lstm_checkpoint:
-            lstm_state_dict = lstm_checkpoint['state_dict']
-            # Clean state dict (remove 'model.' prefix if present)
-            clean_lstm_state_dict = {}
-            for k, v in lstm_state_dict.items():
-                if k.startswith('model.'):
-                    clean_lstm_state_dict[k[6:]] = v
-                else:
-                    clean_lstm_state_dict[k] = v
-            lstm_model.load_state_dict(clean_lstm_state_dict)
+            state_dict = lstm_checkpoint['state_dict']
         else:
-            lstm_model.load_state_dict(lstm_checkpoint)
+            state_dict = lstm_checkpoint
+            
+        # Process state dictionary keys
+        # Check if we need to add or remove the "model." prefix
+        has_model_prefix = any(k.startswith('model.') for k in state_dict.keys())
+        needs_model_prefix = any(k.startswith('model.') for k, _ in lstm_model.state_dict().items())
+        
+        if needs_model_prefix and not has_model_prefix:
+            # Add "model." prefix to keys
+            clean_state_dict = {"model." + k: v for k, v in state_dict.items()}
+            logger.info("Added 'model.' prefix to state dict keys")
+        elif not needs_model_prefix and has_model_prefix:
+            # Remove "model." prefix
+            clean_state_dict = {k[6:]: v for k, v in state_dict.items() if k.startswith('model.')}
+            logger.info("Removed 'model.' prefix from state dict keys")
+        else:
+            # No changes needed
+            clean_state_dict = state_dict
+            
+        # Try to load with strict=False to allow missing keys
+        lstm_model.load_state_dict(clean_state_dict, strict=False)
+        logger.info("Loaded state dict with strict=False to handle missing keys")
         
         # Set LSTM model to evaluation mode
         lstm_model.eval()

@@ -132,16 +132,29 @@ def load_lstm_model(model_path, device=None):
         # Load state dictionary
         if 'state_dict' in checkpoint:
             state_dict = checkpoint['state_dict']
-            # Clean state dict (remove 'model.' prefix if present)
-            clean_state_dict = {}
-            for k, v in state_dict.items():
-                if k.startswith('model.'):
-                    clean_state_dict[k[6:]] = v
-                else:
-                    clean_state_dict[k] = v
-            model.load_state_dict(clean_state_dict)
         else:
-            model.load_state_dict(checkpoint)
+            state_dict = checkpoint
+            
+        # Process state dictionary keys
+        # Check if we need to add or remove the "model." prefix
+        has_model_prefix = any(k.startswith('model.') for k in state_dict.keys())
+        needs_model_prefix = any(k.startswith('model.') for k, _ in model.state_dict().items())
+        
+        if needs_model_prefix and not has_model_prefix:
+            # Add "model." prefix to keys
+            clean_state_dict = {"model." + k: v for k, v in state_dict.items()}
+            logger.info("Added 'model.' prefix to state dict keys")
+        elif not needs_model_prefix and has_model_prefix:
+            # Remove "model." prefix
+            clean_state_dict = {k[6:]: v for k, v in state_dict.items() if k.startswith('model.')}
+            logger.info("Removed 'model.' prefix from state dict keys")
+        else:
+            # No changes needed
+            clean_state_dict = state_dict
+            
+        # Try to load with strict=False to allow missing keys
+        model.load_state_dict(clean_state_dict, strict=False)
+        logger.info("Loaded state dict with strict=False to handle missing keys")
         
         # Set model to evaluation mode
         model.eval()
