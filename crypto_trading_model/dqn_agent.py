@@ -178,6 +178,22 @@ class DQNAgent:
         done : bool
             Whether the episode is done
         """
+        # Validate inputs to ensure they're tensors with expected dimensions
+        if not isinstance(state, torch.Tensor) or state.dim() != 1:
+            logger.warning(f"Invalid state shape: {state.shape if hasattr(state, 'shape') else 'not a tensor'}")
+            return
+            
+        if not isinstance(next_state, torch.Tensor) or next_state.dim() != 1:
+            logger.warning(f"Invalid next_state shape: {next_state.shape if hasattr(next_state, 'shape') else 'not a tensor'}")
+            return
+        
+        # For debugging purposes
+        if len(self.replay_buffer) > 0 and len(self.replay_buffer) % 100 == 0:
+            # Get sample dimensions from buffer
+            sample_state = self.replay_buffer[0].state
+            if state.shape[0] != sample_state.shape[0]:
+                logger.info(f"State dimension change detected: {sample_state.shape[0]} -> {state.shape[0]}")
+        
         self.replay_buffer.append(Experience(state, action, reward, next_state, done))
     
     def select_action(self, state, explore=True):
@@ -223,11 +239,38 @@ class DQNAgent:
         # Sample a batch of experiences
         experiences = random.sample(self.replay_buffer, self.batch_size)
         
-        # Separate experiences into components
-        states = torch.stack([exp.state for exp in experiences])
+        # Check for state dimension consistency and find max dimension
+        state_dims = [exp.state.shape[0] for exp in experiences]
+        max_dim = max(state_dims)
+        
+        # Pad states if necessary to ensure consistent dimensions
+        padded_states = []
+        padded_next_states = []
+        
+        for exp in experiences:
+            # Handle state
+            if exp.state.shape[0] < max_dim:
+                # Pad state with zeros
+                padded_state = torch.zeros(max_dim, dtype=torch.float32, device=self.device)
+                padded_state[:exp.state.shape[0]] = exp.state
+                padded_states.append(padded_state)
+            else:
+                padded_states.append(exp.state)
+            
+            # Handle next_state
+            if exp.next_state.shape[0] < max_dim:
+                # Pad next_state with zeros
+                padded_next_state = torch.zeros(max_dim, dtype=torch.float32, device=self.device)
+                padded_next_state[:exp.next_state.shape[0]] = exp.next_state
+                padded_next_states.append(padded_next_state)
+            else:
+                padded_next_states.append(exp.next_state)
+        
+        # Stack tensors
+        states = torch.stack(padded_states)
         actions = torch.tensor([exp.action for exp in experiences], dtype=torch.long).to(self.device)
         rewards = torch.tensor([exp.reward for exp in experiences], dtype=torch.float).to(self.device)
-        next_states = torch.stack([exp.next_state for exp in experiences])
+        next_states = torch.stack(padded_next_states)
         dones = torch.tensor([exp.done for exp in experiences], dtype=torch.float).to(self.device)
         
         # Compute current Q values

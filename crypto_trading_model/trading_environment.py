@@ -381,8 +381,20 @@ class TradingEnvironment:
             # Get the dataframe for this timeframe
             df = self.market_data[tf]
             
+            # Handle edge cases near the end of the dataset
+            # Ensure we have at least window_size datapoints
+            start_idx = max(0, min(self.current_step - self.window_size, len(df) - self.window_size))
+            end_idx = min(start_idx + self.window_size, len(df))
+            
             # Extract the window of data
-            window = df.iloc[self.current_step - self.window_size:self.current_step]
+            window = df.iloc[start_idx:end_idx]
+            
+            # If window size is smaller than expected, pad with the last value
+            if len(window) < self.window_size:
+                padding_needed = self.window_size - len(window)
+                # Create padding dataframe with repeated last row
+                padding = pd.concat([window.iloc[[-1]]] * padding_needed)
+                window = pd.concat([window, padding]).reset_index(drop=True)
             
             # Extract features (excluding index and timestamp)
             for col in df.columns:
