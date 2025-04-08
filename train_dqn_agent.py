@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import traceback
 from datetime import datetime
 from tqdm import tqdm
+import torch.nn.functional as F
 
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
@@ -262,15 +263,31 @@ def train_dqn_agent(args):
     
     # Pre-allocate tensors for states to avoid repeated allocations
     states_tensor = torch.zeros((args.num_workers, state_dim), device=device)
+    actions_tensor = torch.zeros(args.num_workers, dtype=torch.long, device=device)
+    rewards_tensor = torch.zeros(args.num_workers, device=device)
+    next_states_tensor = torch.zeros((args.num_workers, state_dim), device=device)
+    dones_tensor = torch.zeros(args.num_workers, dtype=torch.bool, device=device)
+    
+    # Pre-allocate replay buffer tensors
+    replay_states = torch.zeros((args.batch_size, state_dim), device=device)
+    replay_actions = torch.zeros(args.batch_size, dtype=torch.long, device=device)
+    replay_rewards = torch.zeros(args.batch_size, device=device)
+    replay_next_states = torch.zeros((args.batch_size, state_dim), device=device)
+    replay_dones = torch.zeros(args.batch_size, dtype=torch.bool, device=device)
+    
+    # Enable CUDA graph for faster training
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     
     for episode in range(1, args.episodes + 1):
         # Reset all environments with random starting points
         states = []
         for env in envs:
-            # Generate random starting point for this episode
             random_start = np.random.randint(
                 args.window_size + 1, 
-                data_length - args.episode_length - 100  # Ensure room for the episode
+                data_length - args.episode_length - 100
             )
             env.start_step = random_start
             states.append(env.reset())
@@ -295,18 +312,16 @@ def train_dqn_agent(args):
                            desc=f"Episode {episode}/{args.episodes}", 
                            disable=False)
         
-        # Continue as long as at least one environment is active and steps are within limit
         step_counter = 0
         while active_envs > 0 and step_counter < max_episode_steps:
-            # Select actions for all environments at once
-            actions = []
-            for i in range(args.num_workers):
-                if not dones[i]:
-                    # Use the pre-allocated tensor for this environment
-                    action = agent.select_action(states_tensor[i], training=True)
-                    actions.append(action)
-                else:
-                    actions.append(0)  # Dummy action for done environments
+            # Select actions for all environments at once using vectorized operations
+            with torch.no_grad():
+                q_values = agent.policy_net(states_tensor)
+                actions = torch.where(
+                    torch.rand(args.num_workers, device=device) < agent.epsilon,
+                    torch.randint(0, action_dim, (args.num_workers,), device=device),
+                    q_values.argmax(dim=1)
+                )
             
             # Step all environments
             next_states = []
@@ -317,38 +332,73 @@ def train_dqn_agent(args):
             
             for i in range(args.num_workers):
                 if not dones[i]:
-                    next_state, reward, done, info = envs[i].step(actions[i])
+                    next_state, reward, done, info = envs[i].step(actions[i].item())
                     next_states.append(next_state)
                     rewards.append(reward)
                     new_dones.append(done)
                     balances.append(info.get('balance', 0))
                     trade_counts.append(info.get('trades', 0))
                     
-                    # Update episode rewards and steps
                     episode_rewards_per_env[i] += reward
                     steps_per_env[i] += 1
                     
-                    # Update states tensor for next iteration
                     if isinstance(next_state, np.ndarray):
-                        states_tensor[i] = torch.from_numpy(next_state).float()
+                        next_states_tensor[i] = torch.from_numpy(next_state).float()
                     else:
-                        states_tensor[i] = next_state
+                        next_states_tensor[i] = next_state
                 else:
-                    next_states.append(states[i])  # Keep old state for done environments
+                    next_states.append(states[i])
                     rewards.append(0)
                     new_dones.append(True)
                     balances.append(0)
                     trade_counts.append(0)
             
+            # Store transitions in replay buffer using vectorized operations
+            if len(agent.memory) >= agent.batch_size:
+                # Sample batch indices
+                indices = np.random.choice(len(agent.memory), args.batch_size, replace=False)
+                batch = [agent.memory[i] for i in indices]
+                
+                # Convert batch to tensors efficiently
+                for i, (state, action, reward, next_state, done) in enumerate(batch):
+                    replay_states[i] = torch.from_numpy(state).float() if isinstance(state, np.ndarray) else state
+                    replay_actions[i] = action
+                    replay_rewards[i] = reward
+                    replay_next_states[i] = torch.from_numpy(next_state).float() if isinstance(next_state, np.ndarray) else next_state
+                    replay_dones[i] = done
+                
+                # Update networks using vectorized operations
+                with torch.cuda.amp.autocast():
+                    current_q_values = agent.policy_net(replay_states).gather(1, replay_actions.unsqueeze(1))
+                    with torch.no_grad():
+                        next_q_values = agent.target_net(replay_next_states).max(1)[0]
+                        expected_q_values = replay_rewards + (1 - replay_dones.float()) * agent.gamma * next_q_values
+                    
+                    loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
+                
+                # Optimize
+                agent.optimizer.zero_grad()
+                if agent.scaler is not None:
+                    agent.scaler.scale(loss).backward()
+                    agent.scaler.step(agent.optimizer)
+                    agent.scaler.update()
+                else:
+                    loss.backward()
+                    agent.optimizer.step()
+                
+                total_updates += 1
+                update_counter += 1
+            
             # Store transitions in replay buffer
             for i in range(args.num_workers):
                 if not dones[i]:
-                    agent.store_transition(states[i], actions[i], rewards[i], next_states[i], new_dones[i])
+                    agent.memory.append((states[i], actions[i].item(), rewards[i], next_states[i], new_dones[i]))
                     total_experiences += 1
             
             # Update states and dones
             states = next_states
             dones = new_dones
+            states_tensor.copy_(next_states_tensor)
             
             # Count active environments
             active_envs = sum(1 for d in dones if not d)
@@ -362,16 +412,10 @@ def train_dqn_agent(args):
                 'reward': f"{avg_reward:.2f}",
                 'balance': f"{avg_balance:.2f}",
                 'trades': f"{avg_trades:.0f}",
-                'active_envs': active_envs
+                'active_envs': active_envs,
+                'updates': total_updates
             })
             progress_bar.update(1)
-            
-            # Update the agent if we have enough experiences
-            if len(agent.memory) >= agent.batch_size:
-                for _ in range(args.updates_per_step):
-                    loss = agent.update()
-                    total_updates += 1
-                    update_counter += 1
             
             step_counter += 1
         

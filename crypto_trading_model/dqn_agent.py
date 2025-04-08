@@ -14,7 +14,7 @@ from typing import List, Union
 import random
 from collections import deque
 import logging
-from torch.amp import GradScaler, autocast
+from torch.amp import GradScaler
 import torch.nn.functional as F
 
 # Setup logging
@@ -67,6 +67,15 @@ class QNetwork(nn.Module):
         layers.append(nn.Linear(prev_dim, action_dim))
         
         self.network = nn.Sequential(*layers)
+        
+        # Initialize weights using orthogonal initialization
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward pass through the network"""
@@ -138,16 +147,22 @@ class DQNAgent:
         self.policy_net = QNetwork(state_dim, action_dim, hidden_dims).to(device)
         self.target_net = QNetwork(state_dim, action_dim, hidden_dims).to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()  # Set target network to evaluation mode
         
         # Initialize optimizer with gradient clipping
         self.optimizer = optim.Adam(
             self.policy_net.parameters(),
-            lr=learning_rate
+            lr=learning_rate,
+            eps=1e-5  # Increase epsilon for better numerical stability
         )
         
         # Initialize AMP GradScaler if using CUDA
         if str(device).startswith("cuda"):
             self.scaler = GradScaler()
+            # Enable TF32 for faster training on Ampere GPUs
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
         else:
             self.scaler = None
         
@@ -170,8 +185,19 @@ class DQNAgent:
         
         # Initialize verbose mode
         self.verbose = verbose
+        
+        # Pre-allocate tensors for faster training
+        self.state_tensor = torch.zeros((batch_size, state_dim), device=device)
+        self.action_tensor = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self.reward_tensor = torch.zeros(batch_size, device=device)
+        self.next_state_tensor = torch.zeros((batch_size, state_dim), device=device)
+        self.done_tensor = torch.zeros(batch_size, dtype=torch.bool, device=device)
     
-    def select_action(self, state: Union[np.ndarray, torch.Tensor], training: bool = True) -> int:
+    def select_action(
+        self, 
+        state: Union[np.ndarray, torch.Tensor], 
+        training: bool = True
+    ) -> int:
         """
         Select an action using epsilon-greedy policy.
         
@@ -197,7 +223,7 @@ class DQNAgent:
             elif state.device != self.device:
                 state = state.to(self.device)
             
-            # Set network to evaluation mode for inference to handle batch norm with single samples
+            # Set network to evaluation mode for inference
             self.policy_net.eval()
             q_values = self.policy_net(state)
             
@@ -250,47 +276,40 @@ class DQNAgent:
         # Sample a batch of experiences
         batch = random.sample(self.memory, self.batch_size)
         
-        # Convert batch to tensors, handling both numpy arrays and tensors
-        state_batch = []
-        action_batch = []
-        reward_batch = []
-        next_state_batch = []
-        done_batch = []
+        # Convert batch to tensors efficiently
+        for i, (state, action, reward, next_state, done) in enumerate(batch):
+            self.state_tensor[i] = (
+                torch.from_numpy(state).float() 
+                if isinstance(state, np.ndarray) else state
+            )
+            self.action_tensor[i] = action
+            self.reward_tensor[i] = reward
+            self.next_state_tensor[i] = (
+                torch.from_numpy(next_state).float() 
+                if isinstance(next_state, np.ndarray) else next_state
+            )
+            self.done_tensor[i] = done
         
-        for state, action, reward, next_state, done in batch:
-            # Convert numpy arrays to tensors if needed
-            if isinstance(state, np.ndarray):
-                state = torch.from_numpy(state).float()
-            if isinstance(next_state, np.ndarray):
-                next_state = torch.from_numpy(next_state).float()
+        # Compute Q values and loss using AMP
+        with torch.cuda.amp.autocast():
+            # Get current Q values
+            current_q_values = self.policy_net(self.state_tensor).gather(
+                1, self.action_tensor.unsqueeze(1)
+            )
             
-            state_batch.append(state)
-            action_batch.append(action)
-            reward_batch.append(reward)
-            next_state_batch.append(next_state)
-            done_batch.append(done)
+            # Get next Q values from target network
+            with torch.no_grad():
+                next_q_values = self.target_net(self.next_state_tensor).max(1)[0]
+                expected_q_values = (
+                    self.reward_tensor + 
+                    (1 - self.done_tensor.float()) * self.gamma * next_q_values
+                )
+            
+            # Compute loss
+            loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
         
-        # Stack tensors and move to device
-        state_batch = torch.stack(state_batch).to(self.device)
-        action_batch = torch.tensor(action_batch, device=self.device)
-        reward_batch = torch.tensor(reward_batch, dtype=torch.float32, device=self.device)
-        next_state_batch = torch.stack(next_state_batch).to(self.device)
-        done_batch = torch.tensor(done_batch, dtype=torch.float32, device=self.device)
-        
-        # Get current Q values
-        current_q_values = self.policy_net(state_batch).gather(1, action_batch.unsqueeze(1))
-        
-        # Get next Q values from target network
-        with torch.no_grad():
-            next_q_values = self.target_net(next_state_batch).max(1)[0]
-            expected_q_values = reward_batch + (1 - done_batch) * self.gamma * next_q_values
-        
-        # Compute loss
-        loss = F.smooth_l1_loss(current_q_values.squeeze(), expected_q_values)
-        
-        # Optimize the model
+        # Optimize
         self.optimizer.zero_grad()
-        
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -304,9 +323,11 @@ class DQNAgent:
         if self.steps_done % self.target_update == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
             if self.verbose:
-                logger.info(f"Target network updated at step {self.steps_done}")
+                self.logger.info(
+                    f"Target network updated at step {self.steps_done}"
+                )
         
-        return loss.item()
+        return loss.detach().item()
     
     def save(self, path: str) -> None:
         """
