@@ -221,13 +221,18 @@ def train_dqn_agent(args):
         logger.info(f"Found timeframes: {timeframes}")
         
         for tf in timeframes:
-            # Convert h5 dataset to pandas DataFrame
-            dataset = h5f[tf][:]
-            columns = h5f[tf].attrs.get('columns', 
+            # Get the dataset for this timeframe
+            dataset = h5f[tf]
+            
+            # Get column names from attributes or use defaults
+            columns = dataset.attrs.get('columns', 
                         ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
+            # Read the entire dataset into a numpy array
+            data = dataset[()]
+            
             # Create DataFrame and set timestamp as index
-            df = pd.DataFrame(dataset, columns=columns)
+            df = pd.DataFrame(data, columns=columns)
             if 'timestamp' in df.columns:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
