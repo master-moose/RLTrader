@@ -84,6 +84,8 @@ def parse_args():
     # Debug
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug mode')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Enable verbose logging (including stop loss messages)')
     
     return parser.parse_args()
 
@@ -259,7 +261,8 @@ def train_dqn_agent(args):
             device=device,
             trade_cooldown=args.trade_cooldown,  # Use command-line parameter
             # Initial start step will be randomized in reset()
-            start_step=None  
+            start_step=None,
+            verbose=args.verbose  # Pass verbose flag to environment
         )
         envs.append(env)
     

@@ -34,7 +34,8 @@ class TradingEnvironment:
         lookback_window: int = 5,
         device: str = None,
         trade_cooldown: int = 0,
-        start_step: int = None
+        start_step: int = None,
+        verbose: bool = False
     ):
         """
         Initialize the trading environment.
@@ -61,6 +62,8 @@ class TradingEnvironment:
             Minimum number of steps between trades to prevent overtrading
         start_step : int, optional
             Starting position in the data (for vectorized environments), defaults to window_size
+        verbose : bool
+            Whether to show detailed logging including stop loss messages
         """
         self.data_path = data_path
         self.window_size = window_size
@@ -71,6 +74,7 @@ class TradingEnvironment:
         self.lookback_window = lookback_window
         self.trade_cooldown = trade_cooldown
         self.start_step = start_step
+        self.verbose = verbose
         
         # Determine device
         if device is None:
@@ -286,13 +290,19 @@ class TradingEnvironment:
             # Stop loss at 1.5% loss (previously 2%)
             if current_price < self.position_price * 0.985:
                 stop_loss_triggered = True
-                logger.info(f"Long stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
+                if self.verbose:
+                    logger.info(f"Long stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
+                else:
+                    logger.debug(f"Long stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
                 
         elif self.position == -1 and self.position_price > 0:  # Short position
             # Stop loss at 1.5% loss (previously 2%)
             if current_price > self.position_price * 1.015:
                 stop_loss_triggered = True
-                logger.info(f"Short stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
+                if self.verbose:
+                    logger.info(f"Short stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
+                else:
+                    logger.debug(f"Short stop loss triggered at price {current_price:.2f} (entry: {self.position_price:.2f})")
         
         # Force close position if stop loss triggered
         if stop_loss_triggered:
