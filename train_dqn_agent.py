@@ -77,6 +77,10 @@ def parse_args():
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (cpu or cuda, None for auto-detection)')
     
+    # Performance options
+    parser.add_argument('--use_amp', action='store_true',
+                       help='Use Automatic Mixed Precision (AMP) for faster training on compatible GPUs')
+    
     # Saving options
     parser.add_argument('--save_frequency', type=int, default=50,
                         help='Frequency to save model checkpoints (episodes)')
@@ -282,7 +286,8 @@ def train_dqn_agent(args):
         epsilon_decay=args.epsilon_decay,
         buffer_size=100000,  # Increased for more diverse experiences
         batch_size=args.batch_size,
-        device=device
+        device=device,
+        use_amp=args.use_amp  # Enable AMP if specified in command line
     )
     
     # Training loop

@@ -16,6 +16,7 @@ import torch.optim as optim
 from collections import deque, namedtuple
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Union, Optional, Any
+from torch.cuda.amp import autocast, GradScaler  # Import AMP tools
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -86,7 +87,8 @@ class DQNAgent:
         batch_size: int = 64,
         buffer_size: int = 100000,
         update_target_every: int = 10,
-        device: str = None
+        device: str = None,
+        use_amp: bool = True  # New parameter to enable/disable AMP
     ):
         """
         Initialize the DQN agent.
@@ -119,6 +121,8 @@ class DQNAgent:
             Number of steps between updates to target network
         device : str
             Device to use for training ('cpu' or 'cuda')
+        use_amp : bool
+            Whether to use Automatic Mixed Precision for faster training
         """
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -132,12 +136,19 @@ class DQNAgent:
         self.batch_size = batch_size
         self.buffer_size = buffer_size
         self.update_target_every = update_target_every
+        self.use_amp = use_amp
         
         # Determine device
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
+        
+        # Initialize AMP GradScaler if we're using CUDA
+        self.scaler = None
+        if self.use_amp and str(self.device).startswith("cuda"):
+            self.scaler = GradScaler()
+            logger.info("Using Automatic Mixed Precision (AMP)")
         
         logger.info(f"Using device: {self.device}")
         
@@ -232,6 +243,34 @@ class DQNAgent:
         else:
             return random.randint(0, self.action_dim - 1)
     
+    def store_transitions_batch(self, states, actions, rewards, next_states, dones):
+        """
+        Store a batch of transitions in the replay buffer at once.
+        
+        Parameters:
+        -----------
+        states : torch.Tensor
+            Batch of current states 
+        actions : torch.Tensor
+            Batch of selected actions
+        rewards : torch.Tensor
+            Batch of rewards received
+        next_states : torch.Tensor
+            Batch of next states
+        dones : torch.Tensor
+            Batch of episode termination flags
+        """
+        # Add experiences to buffer in batch
+        batch_size = states.shape[0]
+        for i in range(batch_size):
+            self.replay_buffer.append(Experience(
+                states[i],
+                actions[i].item() if torch.is_tensor(actions[i]) else actions[i],
+                rewards[i].item() if torch.is_tensor(rewards[i]) else rewards[i],
+                next_states[i],
+                bool(dones[i].item()) if torch.is_tensor(dones[i]) else bool(dones[i])
+            ))
+    
     def update(self):
         """
         Update the Q-Network using experience replay.
@@ -294,39 +333,86 @@ class DQNAgent:
         rewards = torch.tensor(rewards_list, dtype=torch.float).to(self.device)
         next_states = torch.stack(padded_next_states)
         dones = torch.tensor([exp.done for exp in experiences], dtype=torch.float).to(self.device)
+
+        # AMP training path
+        if self.scaler is not None:
+            # Zero gradients for next round
+            self.optimizer.zero_grad()
+            
+            # Use mixed precision for forward pass
+            with autocast():
+                # Compute current Q values - states already has batch dimension
+                q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+                
+                # Compute next Q values using Double DQN method - next_states already has batch dimension
+                with torch.no_grad():
+                    next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+                    next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+                
+                # Compute target Q values
+                target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
+                
+                # Check for NaN values in target Q-values
+                if torch.isnan(target_q_values).any() or torch.isinf(target_q_values).any():
+                    logger.warning("NaN or Inf detected in target Q-values, skipping update")
+                    return 0.0
+                
+                # Compute loss 
+                loss = nn.MSELoss()(q_values, target_q_values.detach())
+                
+            # Check for NaN loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning(f"NaN or Inf loss detected: {loss.item()}, skipping update")
+                return 0.0
+            
+            # Use scaler to automatically scale gradients for mixed precision
+            self.scaler.scale(loss).backward()
+            
+            # Apply gradient clipping to prevent exploding gradients (on scaled gradients)
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+            
+            # Perform scaled optimizer step and update scaler
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
         
-        # Compute current Q values - states already has batch dimension
-        q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-        
-        # Compute next Q values using Double DQN method
-        # next_states already has batch dimension
-        next_actions = self.q_network(next_states).argmax(1, keepdim=True)
-        next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
-        
-        # Compute target Q values
-        target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
-        
-        # Check for NaN values in target Q-values
-        if torch.isnan(target_q_values).any() or torch.isinf(target_q_values).any():
-            logger.warning("NaN or Inf detected in target Q-values, skipping update")
-            return 0.0
-        
-        # Compute loss
-        loss = nn.MSELoss()(q_values, target_q_values.detach())
-        
-        # Check for NaN loss
-        if torch.isnan(loss) or torch.isinf(loss):
-            logger.warning(f"NaN or Inf loss detected: {loss.item()}, skipping update")
-            return 0.0
-        
-        # Update network
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
-        
-        self.optimizer.step()
+        else:
+            # Original full-precision path
+            # Zero gradients for next round
+            self.optimizer.zero_grad()
+            
+            # Compute current Q values - states already has batch dimension
+            q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            
+            # Compute next Q values using Double DQN method - next_states already has batch dimension
+            with torch.no_grad():
+                next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+                next_q_values = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+            
+            # Compute target Q values
+            target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
+            
+            # Check for NaN values in target Q-values
+            if torch.isnan(target_q_values).any() or torch.isinf(target_q_values).any():
+                logger.warning("NaN or Inf detected in target Q-values, skipping update")
+                return 0.0
+            
+            # Compute loss
+            loss = nn.MSELoss()(q_values, target_q_values.detach())
+            
+            # Check for NaN loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.warning(f"NaN or Inf loss detected: {loss.item()}, skipping update")
+                return 0.0
+            
+            # Backward pass
+            loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+            
+            # Optimizer step
+            self.optimizer.step()
         
         # Update target network if needed
         self.steps += 1
@@ -359,7 +445,9 @@ class DQNAgent:
             'steps': self.steps,
             'losses': self.losses,
             'rewards': self.rewards,
-            'epsilons': self.epsilons
+            'epsilons': self.epsilons,
+            'use_amp': self.use_amp,
+            'scaler': self.scaler.state_dict() if self.scaler is not None else None
         }, path)
         logger.info(f"Agent saved to {path}")
     
@@ -380,6 +468,14 @@ class DQNAgent:
         self.losses = checkpoint.get('losses', [])
         self.rewards = checkpoint.get('rewards', [])
         self.epsilons = checkpoint.get('epsilons', [])
+        
+        # Load AMP state if available
+        self.use_amp = checkpoint.get('use_amp', False)
+        if self.use_amp and str(self.device).startswith("cuda"):
+            self.scaler = GradScaler()
+            if checkpoint.get('scaler') is not None:
+                self.scaler.load_state_dict(checkpoint['scaler'])
+        
         logger.info("Agent state loaded successfully")
     
     def plot_metrics(self, save_path=None):
