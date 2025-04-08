@@ -18,12 +18,13 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from concurrent.futures import ThreadPoolExecutor
 import psutil
+import h5py
+import pandas as pd
 
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.utils import set_seeds
-from crypto_trading_model.data_processing.data_loader import load_processed_data
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -201,26 +202,42 @@ def train_dqn_agent(args):
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         logger.info(f"GPU: {gpu_name} with {gpu_memory:.1f} GB memory")
 
-    # Load data from specified path
+    # Load data from specified path using h5py
     data_path = args.data_dir
     logger.info(f"Loading data from {data_path}")
     
-    # Use the existing load_processed_data function
-    # Assuming data is already processed and has the processed_ prefix
-    market_data = load_processed_data("BTC_USDT", prefix="synthetic")
+    # Check which h5 file to use
+    h5_file_path = os.path.join(data_path, "synthetic_dataset.h5")
+    if not os.path.exists(h5_file_path):
+        h5_file_path = os.path.join(data_path, "train_data.h5")
+        
+    if not os.path.exists(h5_file_path):
+        raise ValueError(f"No HDF5 data file found in {data_path}")
     
-    # If no data was loaded, try loading from different prefixes
-    if not market_data:
-        logger.warning("No data found with 'synthetic' prefix, trying 'processed'")
-        market_data = load_processed_data("BTC_USDT", prefix="processed")
+    # Load data from h5 file
+    market_data = {}
+    with h5py.File(h5_file_path, 'r') as h5f:
+        timeframes = list(h5f.keys())
+        logger.info(f"Found timeframes: {timeframes}")
+        
+        for tf in timeframes:
+            # Convert h5 dataset to pandas DataFrame
+            dataset = h5f[tf][:]
+            columns = h5f[tf].attrs.get('columns', 
+                        ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # Create DataFrame and set timestamp as index
+            df = pd.DataFrame(dataset, columns=columns)
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+            
+            market_data[tf] = df
+            logger.info(f"Loaded {len(df)} rows for timeframe {tf}")
     
-    # If still no data, try with 'train' prefix
+    # Check if we successfully loaded any data
     if not market_data:
-        logger.warning("No data found with 'processed' prefix, trying 'train'")
-        market_data = load_processed_data("BTC_USDT", prefix="train")
-    
-    if not market_data:
-        raise ValueError(f"Could not load market data from {data_path}")
+        raise ValueError("Failed to load market data from H5 files")
         
     data_length = len(next(iter(market_data.values())))  # Get length from first timeframe
     logger.info(f"Data loaded, {data_length} samples found")
