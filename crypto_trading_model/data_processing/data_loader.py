@@ -13,10 +13,9 @@ import ccxt
 import logging
 from datetime import datetime, timedelta
 
-# Import from parent directory
+# Import from the correct location
 import sys
-sys.path.append('..')
-from config import DATA_SETTINGS, PATHS
+from crypto_trading_model.config import DATA_SETTINGS, PATHS
 
 # Setup logging
 logging.basicConfig(
