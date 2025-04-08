@@ -1,204 +1,325 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""
+Main entry point for the LSTM-DQN cryptocurrency trading system.
+"""
+
 import os
-import json
 import argparse
 import logging
-import sys
-from pathlib import Path
+import json
+import subprocess
+from datetime import datetime
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('crypto_trading.log')
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='LSTM-DQN Cryptocurrency Trading System')
+    
+    # Mode selection
+    parser.add_argument('--mode', type=str, required=True, 
+                      choices=['train_lstm', 'evaluate_lstm', 'train_dqn', 'evaluate_dqn', 'all'],
+                      help='Operation mode (train_lstm, evaluate_lstm, train_dqn, evaluate_dqn, all)')
+    
+    # Common parameters
+    parser.add_argument('--data_dir', type=str, default='data/synthetic',
+                      help='Directory containing the data')
+    parser.add_argument('--output_dir', type=str, default='models',
+                      help='Directory to save models and results')
+    
+    # LSTM parameters
+    parser.add_argument('--lstm_max_epochs', type=int, default=100,
+                      help='Maximum epochs for LSTM training')
+    parser.add_argument('--batch_size', type=int, default=128,
+                      help='Batch size for training')
+    parser.add_argument('--learning_rate', type=float, default=0.001,
+                      help='Learning rate')
+    parser.add_argument('--lstm_model_path', type=str, default=None,
+                      help='Path to the LSTM model checkpoint for evaluation or DQN training')
+    
+    # DQN parameters
+    parser.add_argument('--dqn_episodes', type=int, default=1000,
+                      help='Number of episodes for DQN training')
+    parser.add_argument('--dqn_model_path', type=str, default=None,
+                      help='Path to the DQN model for evaluation')
+    
+    # Environment parameters
+    parser.add_argument('--window_size', type=int, default=20,
+                      help='Window size for observations')
+    parser.add_argument('--initial_balance', type=float, default=10000.0,
+                      help='Initial balance for trading')
+    parser.add_argument('--transaction_fee', type=float, default=0.001,
+                      help='Transaction fee as a percentage')
+    
+    # Device
+    parser.add_argument('--device', type=str, default=None,
+                      help='Device to use (cpu or cuda, None for auto-detection)')
+    
+    return parser.parse_args()
+
+def train_lstm(args):
+    """
+    Train the LSTM model.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    """
+    logger.info("Starting LSTM model training...")
+    
+    # Build command
+    cmd = [
+        "python", "train_improved_lstm.py",
+        "--data_dir", args.data_dir,
+        "--max_epochs", str(args.lstm_max_epochs),
+        "--batch_size", str(args.batch_size),
+        "--learning_rate", str(args.learning_rate)
     ]
-)
-logger = logging.getLogger('crypto_trading_model')
+    
+    if args.device:
+        cmd.extend(["--device", args.device])
+    
+    # Execute command
+    logger.info(f"Executing command: {' '.join(cmd)}")
+    subprocess.run(cmd)
+    
+    logger.info("LSTM model training completed.")
 
-def setup_directories():
-    """Create necessary directories for the project."""
-    directories = [
-        'data/raw',
-        'data/processed',
-        'data/synthetic',
-        'output/time_series',
-        'output/reinforcement/dqn',
-        'output/reinforcement/ppo',
-        'output/ensemble',
-        'output/backtest',
-        'logs'
+def evaluate_lstm(args):
+    """
+    Evaluate the LSTM model.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    """
+    logger.info("Starting LSTM model evaluation...")
+    
+    # Check if model path is provided
+    if not args.lstm_model_path:
+        # Try to find the best model
+        checkpoint_dir = os.path.join("models", "checkpoints")
+        if os.path.exists(checkpoint_dir):
+            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.ckpt')]
+            if checkpoints:
+                # Sort by validation loss
+                checkpoints.sort(key=lambda x: float(x.split('val_loss=')[1].split('.ckpt')[0]))
+                best_model = os.path.join(checkpoint_dir, checkpoints[0])
+                logger.info(f"Found best model: {best_model}")
+            else:
+                logger.error("No checkpoints found. Please provide --lstm_model_path")
+                return
+        else:
+            logger.error("No checkpoint directory found. Please provide --lstm_model_path")
+            return
+    else:
+        best_model = args.lstm_model_path
+    
+    # Build command
+    cmd = [
+        "python", "evaluate_lstm.py",
+        "--model_dir", os.path.join(args.output_dir, "lstm_improved"),
+        "--model_path", best_model,
+        "--data_dir", args.data_dir,
+        "--batch_size", str(args.batch_size)
     ]
     
-    for directory in directories:
-        Path(directory).mkdir(parents=True, exist_ok=True)
-        logger.info(f"Created directory: {directory}")
+    if args.device:
+        cmd.extend(["--device", args.device])
     
-    logger.info("Directory setup complete.")
+    # Execute command
+    logger.info(f"Executing command: {' '.join(cmd)}")
+    subprocess.run(cmd)
+    
+    logger.info("LSTM model evaluation completed.")
 
-def load_config(config_path):
-    """Load configuration from a JSON file."""
-    try:
-        with open(config_path, 'r') as file:
-            config = json.load(file)
-        logger.info(f"Loaded configuration from {config_path}")
-        return config
-    except Exception as e:
-        logger.error(f"Error loading config from {config_path}: {str(e)}")
-        sys.exit(1)
+def train_dqn(args):
+    """
+    Train the DQN agent.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    """
+    logger.info("Starting DQN agent training...")
+    
+    # Check if LSTM model path is provided
+    if not args.lstm_model_path:
+        # Try to find the best model
+        checkpoint_dir = os.path.join("models", "checkpoints")
+        if os.path.exists(checkpoint_dir):
+            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.ckpt')]
+            if checkpoints:
+                # Sort by validation loss
+                checkpoints.sort(key=lambda x: float(x.split('val_loss=')[1].split('.ckpt')[0]))
+                lstm_model = os.path.join(checkpoint_dir, checkpoints[0])
+                logger.info(f"Found best LSTM model: {lstm_model}")
+            else:
+                logger.error("No checkpoints found. Please provide --lstm_model_path")
+                return
+        else:
+            logger.error("No checkpoint directory found. Please provide --lstm_model_path")
+            return
+    else:
+        lstm_model = args.lstm_model_path
+    
+    # Create output directory
+    dqn_output_dir = os.path.join(args.output_dir, "dqn")
+    os.makedirs(dqn_output_dir, exist_ok=True)
+    
+    # Build command
+    cmd = [
+        "python", "train_dqn_agent.py",
+        "--lstm_model_path", lstm_model,
+        "--data_dir", args.data_dir,
+        "--episodes", str(args.dqn_episodes),
+        "--output_dir", dqn_output_dir,
+        "--window_size", str(args.window_size),
+        "--initial_balance", str(args.initial_balance),
+        "--transaction_fee", str(args.transaction_fee)
+    ]
+    
+    if args.device:
+        cmd.extend(["--device", args.device])
+    
+    # Execute command
+    logger.info(f"Executing command: {' '.join(cmd)}")
+    subprocess.run(cmd)
+    
+    logger.info("DQN agent training completed.")
 
-def run_progressive_learning(config_path):
-    """Run the progressive learning pipeline."""
-    from crypto_trading_model.progressive_learning import run_progressive_learning
+def evaluate_dqn(args):
+    """
+    Evaluate the DQN agent.
     
-    config = load_config(config_path)
-    logger.info("Starting progressive learning pipeline...")
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    """
+    logger.info("Starting DQN agent evaluation...")
     
-    # Extract configuration parameters
-    data_path = config['data_settings']['data_path']
-    timeframes = config['data_settings']['timeframes']
-    output_dir = config['data_settings']['output_dir']
-    start_stage = config['progressive_learning']['start_stage']
-    end_stage = config['progressive_learning']['end_stage']
+    # Check if DQN model path is provided
+    if not args.dqn_model_path:
+        # Try to find the best model
+        dqn_model_dir = os.path.join(args.output_dir, "dqn")
+        if os.path.exists(dqn_model_dir):
+            if os.path.exists(os.path.join(dqn_model_dir, "dqn_agent_best.pt")):
+                dqn_model = os.path.join(dqn_model_dir, "dqn_agent_best.pt")
+                logger.info(f"Found best DQN model: {dqn_model}")
+            elif os.path.exists(os.path.join(dqn_model_dir, "dqn_agent_final.pt")):
+                dqn_model = os.path.join(dqn_model_dir, "dqn_agent_final.pt")
+                logger.info(f"Found final DQN model: {dqn_model}")
+            else:
+                logger.error("No DQN models found. Please provide --dqn_model_path")
+                return
+        else:
+            logger.error("No DQN model directory found. Please provide --dqn_model_path")
+            return
+    else:
+        dqn_model = args.dqn_model_path
     
-    # Run the progressive learning pipeline
-    run_progressive_learning(
-        data_path=data_path,
-        timeframes=timeframes,
-        output_dir=output_dir,
-        config_path=config_path,  # Pass the full config for the pipeline
-        start_stage=start_stage,
-        end_stage=end_stage
-    )
+    # Check if LSTM model path is provided
+    if not args.lstm_model_path:
+        # Try to find the best model
+        checkpoint_dir = os.path.join("models", "checkpoints")
+        if os.path.exists(checkpoint_dir):
+            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith('.ckpt')]
+            if checkpoints:
+                # Sort by validation loss
+                checkpoints.sort(key=lambda x: float(x.split('val_loss=')[1].split('.ckpt')[0]))
+                lstm_model = os.path.join(checkpoint_dir, checkpoints[0])
+                logger.info(f"Found best LSTM model: {lstm_model}")
+            else:
+                logger.error("No checkpoints found. Please provide --lstm_model_path")
+                return
+        else:
+            logger.error("No checkpoint directory found. Please provide --lstm_model_path")
+            return
+    else:
+        lstm_model = args.lstm_model_path
     
-    logger.info("Progressive learning pipeline completed.")
+    # Create output directory
+    evaluation_dir = os.path.join("evaluation_results", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(evaluation_dir, exist_ok=True)
+    
+    # Build command
+    cmd = [
+        "python", "evaluate_dqn_agent.py",
+        "--model_path", dqn_model,
+        "--lstm_model_path", lstm_model,
+        "--data_dir", args.data_dir,
+        "--output_dir", evaluation_dir,
+        "--window_size", str(args.window_size),
+        "--initial_balance", str(args.initial_balance),
+        "--transaction_fee", str(args.transaction_fee)
+    ]
+    
+    if args.device:
+        cmd.extend(["--device", args.device])
+    
+    # Execute command
+    logger.info(f"Executing command: {' '.join(cmd)}")
+    subprocess.run(cmd)
+    
+    logger.info("DQN agent evaluation completed.")
+    logger.info(f"Results saved to {evaluation_dir}")
 
-def generate_synthetic_data(config_path):
-    """Generate synthetic data for training."""
-    from crypto_trading_model.synthetic_data.dataset_builder import build_synthetic_dataset, save_dataset, create_train_val_test_split
+def run_all(args):
+    """
+    Run the entire pipeline from LSTM training to DQN evaluation.
     
-    config = load_config(config_path)
-    logger.info("Starting synthetic data generation...")
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    """
+    logger.info("Starting full pipeline...")
     
-    # Extract configuration parameters
-    num_samples = config['synthetic_data']['num_samples']
-    pattern_distribution = config['synthetic_data']['pattern_distribution']
-    include_indicators = config['synthetic_data']['include_indicators']
-    output_dir = config['synthetic_data']['output_dir']
+    # 1. Train LSTM model
+    train_lstm(args)
     
-    logger.info(f"Generating {num_samples} samples with pattern distribution: {pattern_distribution}")
+    # 2. Evaluate LSTM model
+    evaluate_lstm(args)
     
-    # Generate synthetic dataset
-    dataset = build_synthetic_dataset(
-        num_samples=num_samples,
-        pattern_distribution=pattern_distribution,
-        with_indicators=include_indicators
-    )
+    # 3. Train DQN agent
+    train_dqn(args)
     
-    # Save the dataset
-    save_dataset(dataset, output_dir=output_dir)
+    # 4. Evaluate DQN agent
+    evaluate_dqn(args)
     
-    # Create train/val/test splits
-    train_ratio = config['synthetic_data']['train_ratio']
-    val_ratio = config['synthetic_data']['val_ratio']
-    test_ratio = config['synthetic_data']['test_ratio']
-    shuffle = config['synthetic_data']['shuffle']
-    
-    create_train_val_test_split(
-        dataset=dataset,
-        train_ratio=train_ratio,
-        val_ratio=val_ratio,
-        test_ratio=test_ratio,
-        shuffle=shuffle,
-        output_dir=output_dir
-    )
-    
-    logger.info(f"Synthetic data generation complete. Data saved to {output_dir}")
-
-def run_standalone_time_series(config_path):
-    """Run standalone time series model training."""
-    from crypto_trading_model.models.time_series.trainer import run_time_series_training
-    
-    config = load_config(config_path)
-    logger.info("Starting standalone time series model training...")
-    
-    # Run the time series training
-    run_time_series_training(config)
-    
-    logger.info("Standalone time series model training completed.")
-
-def run_standalone_dqn(config_path):
-    """Run standalone DQN agent training."""
-    from crypto_trading_model.models.reinforcement.dqn_agent import run_dqn_training
-    
-    config = load_config(config_path)
-    logger.info("Starting standalone DQN agent training...")
-    
-    # Run the DQN training
-    run_dqn_training(config)
-    
-    logger.info("Standalone DQN agent training completed.")
-
-def run_standalone_ppo(config_path):
-    """Run standalone PPO agent training."""
-    from crypto_trading_model.models.reinforcement.ppo_agent import run_ppo_training
-    
-    config = load_config(config_path)
-    logger.info("Starting standalone PPO agent training...")
-    
-    # Run the PPO training
-    run_ppo_training(config)
-    
-    logger.info("Standalone PPO agent training completed.")
-
-def run_backtest(config_path):
-    """Run backtest on trained models."""
-    from crypto_trading_model.evaluation.backtest import run_backtest as run_backtest_eval
-    
-    config = load_config(config_path)
-    logger.info("Starting backtest...")
-    
-    # Run the backtest
-    run_backtest_eval(config)
-    
-    logger.info("Backtest completed.")
+    logger.info("Full pipeline completed successfully!")
 
 def main():
-    """Main entry point for the application."""
-    parser = argparse.ArgumentParser(description='Crypto Trading Model')
+    """Main function."""
+    args = parse_args()
     
-    # Required arguments
-    parser.add_argument('--action', required=True,
-                       choices=['setup', 'synthetic', 'progressive', 'time_series', 'dqn', 'ppo', 'backtest'],
-                       help='Action to perform')
+    # Create output directories
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "lstm_improved"), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, "dqn"), exist_ok=True)
     
-    # Optional arguments
-    parser.add_argument('--config', type=str, default='crypto_trading_model/config/config.json',
-                       help='Path to configuration file')
-    
-    args = parser.parse_args()
-    
-    # Perform the requested action
-    if args.action == 'setup':
-        setup_directories()
-    elif args.action == 'synthetic':
-        generate_synthetic_data(args.config)
-    elif args.action == 'progressive':
-        run_progressive_learning(args.config)
-    elif args.action == 'time_series':
-        run_standalone_time_series(args.config)
-    elif args.action == 'dqn':
-        run_standalone_dqn(args.config)
-    elif args.action == 'ppo':
-        run_standalone_ppo(args.config)
-    elif args.action == 'backtest':
-        run_backtest(args.config)
+    # Execute selected mode
+    if args.mode == 'train_lstm':
+        train_lstm(args)
+    elif args.mode == 'evaluate_lstm':
+        evaluate_lstm(args)
+    elif args.mode == 'train_dqn':
+        train_dqn(args)
+    elif args.mode == 'evaluate_dqn':
+        evaluate_dqn(args)
+    elif args.mode == 'all':
+        run_all(args)
     else:
-        logger.error(f"Invalid action: {args.action}")
-        sys.exit(1)
+        logger.error(f"Unknown mode: {args.mode}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 
