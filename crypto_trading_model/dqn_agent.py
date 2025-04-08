@@ -144,7 +144,7 @@ class DQNAgent:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
-        
+            
         # Initialize AMP GradScaler if we're using CUDA
         self.scaler = None
         if self.use_amp and str(self.device).startswith("cuda"):
@@ -158,11 +158,11 @@ class DQNAgent:
                 if self.learning_rate > 0.0001:
                     logger.info(f"Reducing learning rate for AMP stability: {self.learning_rate} -> {self.learning_rate * 0.6}")
                     self.learning_rate *= 0.6
-                    # Recreate optimizer with the reduced learning rate
-                    self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
+                    # Note: optimizer will be created with reduced learning rate below
             except Exception as e:
                 logger.warning(f"Failed to initialize AMP GradScaler: {str(e)}")
                 logger.warning("Falling back to full precision training")
+                self.scaler = None
         elif self.use_amp:
             logger.warning("AMP requested but not using CUDA device - falling back to full precision")
         
@@ -174,8 +174,8 @@ class DQNAgent:
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.target_network.eval()  # Target network is used for evaluation only
         
-        # Initialize optimizer
-        self.optimizer = optim.Adam(self.q_network.parameters(), lr=learning_rate)
+        # Initialize optimizer - now that q_network exists
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
         
         # Initialize replay buffer
         self.replay_buffer = deque(maxlen=buffer_size)
