@@ -12,6 +12,7 @@ import logging
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import traceback
 from datetime import datetime
 from tqdm import tqdm
 
@@ -93,44 +94,22 @@ def parse_args():
     
     return parser.parse_args()
 
-def load_lstm_model(model_path, device=None):
-    """
-    Load a pre-trained LSTM model for state representation.
-    
-    Parameters:
-    -----------
-    model_path : str
-        Path to the LSTM model checkpoint
-    device : str, optional
-        Device to load the model on ('cpu' or 'cuda')
-        
-    Returns:
-    --------
-    LightningTimeSeriesModel
-        Loaded LSTM model
-    """
+def load_lstm_model(model_path, device):
+    """Load the trained LSTM model."""
     try:
-        # Import the model class
-        from crypto_trading_model.lstm_model import LightningTimeSeriesModel
+        logger.info(f"Loading LSTM model from {model_path}")
         
-        # Get a compatible device
-        from crypto_trading_model.dqn_agent import get_compatible_device
-        compatible_device = get_compatible_device(device)
-        
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"LSTM model not found at {model_path}")
+            
         # Load the model
-        if os.path.exists(model_path):
-            logger.info(f"Loading LSTM model from {model_path}")
-            model = LightningTimeSeriesModel.load_from_checkpoint(model_path)
-            model.to(compatible_device)
-            model.eval()  # Set to evaluation mode
-            return model
-        else:
-            logger.info(f"Creating a new LSTM model without loading weights from checkpoint")
-            # Create a new model with default parameters
-            model = LightningTimeSeriesModel()
-            model.to(compatible_device)
-            model.eval()  # Set to evaluation mode
-            return model
+        model = LSTMModel.load_from_checkpoint(model_path)
+        model = model.to(device)
+        model.eval()  # Set to evaluation mode
+        
+        logger.info("LSTM model loaded successfully")
+        return model
+        
     except Exception as e:
         logger.error(f"Error loading LSTM model: {str(e)}")
         logger.error(traceback.format_exc())
