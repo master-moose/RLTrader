@@ -33,7 +33,8 @@ class TradingEnvironment:
         use_position_features: bool = True,
         lookback_window: int = 5,
         device: str = None,
-        trade_cooldown: int = 0
+        trade_cooldown: int = 0,
+        start_step: int = None
     ):
         """
         Initialize the trading environment.
@@ -58,6 +59,8 @@ class TradingEnvironment:
             Device to use for computation ('cpu' or 'cuda')
         trade_cooldown : int
             Minimum number of steps between trades to prevent overtrading
+        start_step : int, optional
+            Starting position in the data (for vectorized environments), defaults to window_size
         """
         self.data_path = data_path
         self.window_size = window_size
@@ -67,6 +70,7 @@ class TradingEnvironment:
         self.use_position_features = use_position_features
         self.lookback_window = lookback_window
         self.trade_cooldown = trade_cooldown
+        self.start_step = start_step
         
         # Determine device
         if device is None:
@@ -151,8 +155,14 @@ class TradingEnvironment:
         numpy.ndarray
             Initial observation
         """
-        # Reset position in the data
-        self.current_step = self.window_size
+        # Reset position in the data, using start_step if provided
+        if self.start_step is not None and self.start_step > self.window_size:
+            # Use the provided start step, but ensure enough context for window
+            max_start = len(self.market_data[self.primary_tf]) - 2000  # Leave room for episode
+            self.current_step = min(self.start_step, max_start)
+        else:
+            # Start at the beginning of the data (after window)
+            self.current_step = self.window_size
         
         # Reset account state
         self.balance = self.initial_balance

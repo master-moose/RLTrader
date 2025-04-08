@@ -65,6 +65,10 @@ def parse_args():
     parser.add_argument('--reward_scaling', type=float, default=0.0001,
                         help='Scaling factor for rewards (smaller value for numerical stability)')
     
+    # Parallelization
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Number of parallel environments to run')
+    
     # Device
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (cpu or cuda, None for auto-detection)')
@@ -229,28 +233,38 @@ def train_dqn_agent(args):
         if not os.path.exists(train_data_path):
             raise FileNotFoundError(f"Training data not found at {train_data_path}")
     
-    # Create trading environment
-    env = TradingEnvironment(
-        data_path=train_data_path,
-        window_size=args.window_size,
-        initial_balance=args.initial_balance,
-        transaction_fee=args.transaction_fee,
-        reward_scaling=args.reward_scaling,
-        device=device,
-        trade_cooldown=20  # Increased from 10 to prevent excessive trading with high fees
-    )
+    # Create multiple trading environments for vectorized training
+    logger.info(f"Creating {args.num_workers} parallel environments for training")
+    envs = []
+    for i in range(args.num_workers):
+        env = TradingEnvironment(
+            data_path=train_data_path,
+            window_size=args.window_size,
+            initial_balance=args.initial_balance,
+            transaction_fee=args.transaction_fee,
+            reward_scaling=args.reward_scaling,
+            device=device,
+            trade_cooldown=20,  # Increased from 10 to prevent excessive trading with high fees
+            # Offset each environment by a random amount to increase diversity
+            start_step=int(i * (10000 / args.num_workers))
+        )
+        envs.append(env)
+    
+    # Use the first environment's state dimension
+    state_dim = envs[0].state_dim
+    action_dim = envs[0].action_space
     
     # Create DQN agent
     agent = DQNAgent(
-        state_dim=env.state_dim,
-        action_dim=env.action_space,
+        state_dim=state_dim,
+        action_dim=action_dim,
         lstm_model=lstm_model,
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay=args.epsilon_decay,
-        buffer_size=100000,  # Increased from 50000 for more diverse experiences
+        buffer_size=100000,  # Increased for more diverse experiences
         batch_size=args.batch_size,
         device=device
     )
@@ -266,48 +280,78 @@ def train_dqn_agent(args):
         json.dump(vars(args), f, indent=4)
     
     logger.info("Starting training...")
+    
+    # Track total updates and experience collected
+    total_updates = 0
+    total_experiences = 0
+    
     for episode in range(1, args.episodes + 1):
-        # Reset environment
-        state = env.reset()
-        done = False
-        episode_reward = 0
-        steps = 0
+        # Reset all environments
+        states = [env.reset() for env in envs]
+        dones = [False] * args.num_workers
+        episode_rewards_per_env = [0] * args.num_workers
+        steps_per_env = [0] * args.num_workers
+        active_envs = args.num_workers
         
         # Limit steps if specified
         max_steps = args.max_steps if args.max_steps is not None else float('inf')
         
+        # Find the environment with the longest remaining steps
+        max_env_steps = max([env.data_length - env.current_step for env in envs])
+        max_episode_steps = min(max_steps, max_env_steps)
+        
         # Episode loop
-        progress_bar = tqdm(total=min(max_steps, env.data_length - env.current_step), 
+        progress_bar = tqdm(total=max_episode_steps, 
                            desc=f"Episode {episode}/{args.episodes}", 
                            disable=False)
         
-        while not done and steps < max_steps:
-            # Select action
-            action = agent.select_action(state)
+        # Continue as long as at least one environment is active
+        while active_envs > 0 and all(steps < max_steps for steps in steps_per_env):
+            # For each active environment
+            for env_idx in range(args.num_workers):
+                if dones[env_idx]:
+                    continue
+                
+                # Select action for this environment
+                action = agent.select_action(states[env_idx])
+                
+                # Take step in environment
+                next_state, reward, done, info = envs[env_idx].step(action)
+                
+                # Store transition in replay buffer
+                agent.store_transition(states[env_idx], action, reward, next_state, done)
+                total_experiences += 1
+                
+                # Update state and rewards
+                states[env_idx] = next_state
+                episode_rewards_per_env[env_idx] += reward
+                steps_per_env[env_idx] += 1
+                
+                # Check if this environment is done
+                if done:
+                    dones[env_idx] = True
+                    active_envs -= 1
             
-            # Take step in environment
-            next_state, reward, done, info = env.step(action)
-            
-            # Store transition in replay buffer
-            agent.store_transition(state, action, reward, next_state, done)
-            
-            # Update agent
+            # Update agent (from common replay buffer) - now done more frequently
             if len(agent.replay_buffer) > args.batch_size:
                 loss = agent.update()
-                if args.debug and steps % 100 == 0:
-                    logger.debug(f"Step {steps}, Loss: {loss:.4f}")
-            
-            # Update state and rewards
-            state = next_state
-            episode_reward += reward
-            steps += 1
+                total_updates += 1
+                
+                # Log debug info occasionally
+                if args.debug and total_updates % 100 == 0:
+                    logger.debug(f"Updates: {total_updates}, Loss: {loss:.4f}")
             
             # Update progress bar
+            progress_step = min([steps for steps in steps_per_env if steps > 0])
             progress_bar.update(1)
+            
+            # Find an active environment for the progress bar stats
+            active_idx = next((i for i, d in enumerate(dones) if not d), 0)
             progress_bar.set_postfix({
-                'reward': f"{episode_reward:.2f}",
-                'balance': f"{info['balance']:.2f}",
-                'trades': info['total_trades']
+                'reward': f"{episode_rewards_per_env[active_idx]:.2f}",
+                'balance': f"{envs[active_idx].balance:.2f}",
+                'trades': envs[active_idx].total_trades,
+                'active_envs': active_envs
             })
         
         progress_bar.close()
@@ -315,16 +359,22 @@ def train_dqn_agent(args):
         # Decay epsilon
         agent.epsilon = max(args.epsilon_end, agent.epsilon * args.epsilon_decay)
         
-        # Store episode statistics
-        episode_rewards.append(episode_reward)
-        episode_profits.append(env.total_profit)
-        episode_trades.append(env.total_trades)
+        # Calculate average statistics across environments
+        avg_episode_reward = sum(episode_rewards_per_env) / args.num_workers
+        avg_profit = sum([env.total_profit for env in envs]) / args.num_workers
+        avg_trades = sum([env.total_trades for env in envs]) / args.num_workers
+        
+        # Store episode statistics (using averages)
+        episode_rewards.append(avg_episode_reward)
+        episode_profits.append(avg_profit)
+        episode_trades.append(avg_trades)
         
         logger.info(f"Episode {episode}/{args.episodes} - "
-                   f"Reward: {episode_reward:.2f}, "
-                   f"Profit: {env.total_profit:.2f}, "
-                   f"Trades: {env.total_trades}, "
-                   f"Epsilon: {agent.epsilon:.4f}")
+                   f"Avg Reward: {avg_episode_reward:.2f}, "
+                   f"Avg Profit: {avg_profit:.2f}, "
+                   f"Avg Trades: {avg_trades:.1f}, "
+                   f"Epsilon: {agent.epsilon:.4f}, "
+                   f"Buffer: {len(agent.replay_buffer)}")
         
         # Update target network
         if episode % args.update_target_frequency == 0:
@@ -338,8 +388,8 @@ def train_dqn_agent(args):
             logger.info(f"Model checkpoint saved to {checkpoint_path}")
         
         # Save best model
-        if episode_reward > best_reward:
-            best_reward = episode_reward
+        if avg_episode_reward > best_reward:
+            best_reward = avg_episode_reward
             best_model_path = os.path.join(args.output_dir, "dqn_agent_best.pt")
             agent.save(best_model_path)
             logger.info(f"New best model saved with reward {best_reward:.2f}")
@@ -352,7 +402,7 @@ def train_dqn_agent(args):
     # Plot and save training results
     plot_training_results(episode_rewards, episode_profits, episode_trades, args.output_dir)
     
-    logger.info("Training completed.")
+    logger.info(f"Training completed. Total updates: {total_updates}, experiences: {total_experiences}")
 
 def plot_training_results(rewards, profits, trades, output_dir):
     """
