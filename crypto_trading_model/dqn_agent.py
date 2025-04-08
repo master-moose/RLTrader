@@ -498,8 +498,8 @@ class DQNAgent:
         if self.steps % self.update_target_every == 0:
             self.update_target_network()
         
-        # Track metrics
-        self.losses.append(loss.item())
+        # Store loss for tracking
+        self.losses.append(loss.detach().item())
         
         return loss.item()
     
