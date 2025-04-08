@@ -194,21 +194,27 @@ class DQNAgent:
         done: bool
     ) -> None:
         """
-        Store transition in replay buffer.
+        Store a transition in the replay buffer.
         
         Parameters:
         -----------
         state : np.ndarray
-            Current state representation
+            Current state
         action : int
-            Selected action
+            Action taken
         reward : float
             Reward received
         next_state : np.ndarray
-            Next state representation
+            Next state
         done : bool
             Whether the episode is done
         """
+        # Convert tensors to numpy arrays if needed
+        if torch.is_tensor(state):
+            state = state.cpu().numpy()
+        if torch.is_tensor(next_state):
+            next_state = next_state.cpu().numpy()
+            
         self.memory.append((state, action, reward, next_state, done))
     
     def update(self) -> float:
@@ -225,21 +231,33 @@ class DQNAgent:
         
         # Sample batch from memory
         batch = random.sample(self.memory, self.batch_size)
-        state_batch = torch.FloatTensor(
-            np.array([x[0] for x in batch])
-        ).to(self.device)
-        action_batch = torch.LongTensor(
-            np.array([x[1] for x in batch])
-        ).to(self.device)
-        reward_batch = torch.FloatTensor(
-            np.array([x[2] for x in batch])
-        ).to(self.device)
-        next_state_batch = torch.FloatTensor(
-            np.array([x[3] for x in batch])
-        ).to(self.device)
-        done_batch = torch.FloatTensor(
-            np.array([x[4] for x in batch])
-        ).to(self.device)
+        
+        # Process batch data, ensuring proper conversion to tensors
+        state_batch = []
+        action_batch = []
+        reward_batch = []
+        next_state_batch = []
+        done_batch = []
+        
+        for state, action, reward, next_state, done in batch:
+            # Convert state to numpy if it's a tensor
+            if torch.is_tensor(state):
+                state = state.cpu().numpy()
+            if torch.is_tensor(next_state):
+                next_state = next_state.cpu().numpy()
+                
+            state_batch.append(state)
+            action_batch.append(action)
+            reward_batch.append(reward)
+            next_state_batch.append(next_state)
+            done_batch.append(done)
+        
+        # Convert to tensors and move to device
+        state_batch = torch.FloatTensor(np.array(state_batch)).to(self.device)
+        action_batch = torch.LongTensor(np.array(action_batch)).to(self.device)
+        reward_batch = torch.FloatTensor(np.array(reward_batch)).to(self.device)
+        next_state_batch = torch.FloatTensor(np.array(next_state_batch)).to(self.device)
+        done_batch = torch.FloatTensor(np.array(done_batch)).to(self.device)
         
         # Use AMP context manager if available
         if self.scaler is not None:
