@@ -236,7 +236,8 @@ def train_dqn_agent(args):
         initial_balance=args.initial_balance,
         transaction_fee=args.transaction_fee,
         reward_scaling=args.reward_scaling,
-        device=device
+        device=device,
+        trade_cooldown=10  # Add cooldown period to prevent excessive trading
     )
     
     # Create DQN agent

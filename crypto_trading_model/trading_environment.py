@@ -32,7 +32,8 @@ class TradingEnvironment:
         reward_scaling: float = 0.01,
         use_position_features: bool = True,
         lookback_window: int = 5,
-        device: str = None
+        device: str = None,
+        trade_cooldown: int = 0
     ):
         """
         Initialize the trading environment.
@@ -55,6 +56,8 @@ class TradingEnvironment:
             Number of past positions to include in the state
         device : str
             Device to use for computation ('cpu' or 'cuda')
+        trade_cooldown : int
+            Minimum number of steps between trades to prevent overtrading
         """
         self.data_path = data_path
         self.window_size = window_size
@@ -63,6 +66,7 @@ class TradingEnvironment:
         self.reward_scaling = reward_scaling
         self.use_position_features = use_position_features
         self.lookback_window = lookback_window
+        self.trade_cooldown = trade_cooldown
         
         # Determine device
         if device is None:
@@ -133,8 +137,8 @@ class TradingEnvironment:
         
         # Add position features if used
         if self.use_position_features:
-            # Current position + position history + balance + unrealized PnL + position size
-            feature_count += 1 + self.lookback_window + 1 + 1 + 1
+            # Current position + position history + balance + unrealized PnL + position size + cooldown
+            feature_count += 1 + self.lookback_window + 1 + 1 + 1 + 1
         
         return feature_count
     
@@ -162,6 +166,9 @@ class TradingEnvironment:
         self.total_profit = 0.0
         self.returns = []
         
+        # Reset trade cooldown counter - start with full cooldown period passed
+        self.steps_since_last_trade = self.trade_cooldown
+        
         # Get initial observation
         observation = self._get_observation()
         
@@ -185,17 +192,28 @@ class TradingEnvironment:
         current_price = self._get_current_price()
         
         # Execute action and calculate reward
-        reward = self._execute_action(action, current_price)
+        reward, trade_executed = self._execute_action(action, current_price)
         
         # Update position history
         self.position_history.pop(0)
         self.position_history.append(self.position)
+        
+        # Update trade cooldown
+        if trade_executed:
+            self.steps_since_last_trade = 0
+        else:
+            self.steps_since_last_trade += 1
         
         # Move to the next step
         self.current_step += 1
         
         # Check if episode is done
         done = self.current_step >= self.data_length - 1
+        
+        # Also end episode early if balance drops too low (prevent complete depletion)
+        if self.balance < self.initial_balance * 0.1:  # Lost 90% of initial balance
+            logger.warning(f"Ending episode early due to low balance: {self.balance:.2f}")
+            done = True
         
         # Get new observation
         observation = self._get_observation()
@@ -207,7 +225,8 @@ class TradingEnvironment:
             'balance': self.balance,
             'position': self.position,
             'total_trades': self.total_trades,
-            'total_profit': self.total_profit
+            'total_profit': self.total_profit,
+            'cooldown': self.steps_since_last_trade < self.trade_cooldown
         }
         
         return observation, reward, done, info
@@ -230,8 +249,8 @@ class TradingEnvironment:
             
         Returns:
         --------
-        float
-            Reward for the action
+        tuple
+            (reward, trade_executed)
         """
         # Calculate portfolio value before action
         portfolio_value_before = self._calculate_portfolio_value(current_price)
@@ -241,28 +260,33 @@ class TradingEnvironment:
         trade_type = "none"
         profit = 0
         
+        # Check if we're in cooldown period - prevent trading too frequently
+        cooldown_active = self.trade_cooldown > 0 and self.steps_since_last_trade < self.trade_cooldown
+        
         # Execute action
         if action == 1:  # Buy
-            if self.position == 0:  # No position -> Long
-                # Use 95% of available balance for the position to avoid rounding issues
-                use_balance = self.balance * 0.95
+            if self.position == 0 and not cooldown_active:  # No position -> Long
+                # Use only 50% of available balance to avoid all-in trades
+                use_balance = min(self.balance * 0.5, self.initial_balance * 0.3)
                 
-                # Calculate quantity to buy
-                quantity = use_balance / current_price
-                fee = quantity * current_price * self.transaction_fee
-                
-                # Store position size for later calculations
-                self.position_size = quantity
-                
-                # Update state
-                self.balance -= (quantity * current_price + fee)
-                self.position = 1
-                self.position_price = current_price
-                self.total_trades += 1
-                trade_executed = True
-                trade_type = "open_long"
-                
-            elif self.position == -1:  # Short -> No position (close short)
+                # Only trade if we have enough balance (at least 1% of initial)
+                if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
+                    # Calculate quantity to buy
+                    quantity = use_balance / current_price
+                    fee = quantity * current_price * self.transaction_fee
+                    
+                    # Store position size for later calculations
+                    self.position_size = quantity
+                    
+                    # Update state
+                    self.balance -= (quantity * current_price + fee)
+                    self.position = 1
+                    self.position_price = current_price
+                    self.total_trades += 1
+                    trade_executed = True
+                    trade_type = "open_long"
+                    
+            elif self.position == -1 and not cooldown_active:  # Short -> No position (close short)
                 # Close short position
                 quantity = self.position_size if hasattr(self, 'position_size') else 0
                 profit = quantity * (self.position_price - current_price)
@@ -279,26 +303,28 @@ class TradingEnvironment:
                 trade_type = "close_short"
                 
         elif action == 2:  # Sell
-            if self.position == 0:  # No position -> Short
-                # Use 95% of available balance as collateral
-                use_balance = self.balance * 0.95
+            if self.position == 0 and not cooldown_active:  # No position -> Short
+                # Use only 50% of available balance as collateral
+                use_balance = min(self.balance * 0.5, self.initial_balance * 0.3)
                 
-                # Calculate quantity to sell short
-                quantity = use_balance / current_price
-                fee = quantity * current_price * self.transaction_fee
+                # Only trade if we have enough balance (at least 1% of initial)
+                if use_balance >= self.initial_balance * 0.01 and self.balance > 100:
+                    # Calculate quantity to sell short
+                    quantity = use_balance / current_price
+                    fee = quantity * current_price * self.transaction_fee
+                    
+                    # Store position size for later
+                    self.position_size = quantity
+                    
+                    # Update state
+                    self.balance -= fee
+                    self.position = -1
+                    self.position_price = current_price
+                    self.total_trades += 1
+                    trade_executed = True
+                    trade_type = "open_short"
                 
-                # Store position size for later
-                self.position_size = quantity
-                
-                # Update state
-                self.balance -= fee
-                self.position = -1
-                self.position_price = current_price
-                self.total_trades += 1
-                trade_executed = True
-                trade_type = "open_short"
-                
-            elif self.position == 1:  # Long -> No position (close long)
+            elif self.position == 1 and not cooldown_active:  # Long -> No position (close long)
                 # Close long position
                 quantity = self.position_size if hasattr(self, 'position_size') else 0
                 profit = quantity * (current_price - self.position_price)
@@ -324,35 +350,63 @@ class TradingEnvironment:
         if portfolio_value_before > 0:
             portfolio_change = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
         
-        # 2. Trade execution penalty - small penalty for excessive trading
-        trade_penalty = -0.0005 if trade_executed else 0
+        # 2. Trade execution penalty - stronger penalty for excessive trading
+        trade_penalty = -0.01 if trade_executed else 0
+        
+        # Additional penalty for trying to trade during cooldown
+        cooldown_penalty = -0.02 if cooldown_active and (action == 1 or action == 2) else 0
+        
+        # Reward for holding (not trading) - encourage patience
+        hold_reward = 0.0001 if action == 0 else 0
         
         # 3. Position holding component - encourage holding profitable positions
         position_reward = 0
         if self.position == 1 and current_price > self.position_price:  # Long position in profit
-            position_reward = 0.0002
+            position_reward = 0.001
         elif self.position == -1 and current_price < self.position_price:  # Short position in profit
-            position_reward = 0.0002
+            position_reward = 0.001
+        
+        # Apply penalty for holding losing positions
+        holding_loss_penalty = 0
+        if self.position == 1 and current_price < self.position_price * 0.95:  # 5% loss in long
+            holding_loss_penalty = -0.005
+        elif self.position == -1 and current_price > self.position_price * 1.05:  # 5% loss in short
+            holding_loss_penalty = -0.005
             
         # 4. Profit realization reward - bonus for taking profits
         profit_reward = 0
         if trade_type == "close_long" and profit > 0:
-            profit_reward = 0.001
+            profit_pct = profit / (self.position_size * self.position_price) if self.position_size * self.position_price > 0 else 0
+            profit_reward = 0.02 * min(profit_pct * 100, 5)  # Scale with % profit, max 5%
         elif trade_type == "close_short" and profit > 0:
-            profit_reward = 0.001
+            profit_pct = profit / (self.position_size * self.position_price) if self.position_size * self.position_price > 0 else 0
+            profit_reward = 0.02 * min(profit_pct * 100, 5)  # Scale with % profit, max 5%
         
         # 5. Balance maintenance - reward for maintaining/growing account balance
         balance_reward = 0
-        if self.balance > self.initial_balance * 0.8:  # Still have most of our balance
-            balance_reward = 0.0001
+        if self.balance > self.initial_balance:  # Growing account
+            balance_reward = 0.002
+        elif self.balance > self.initial_balance * 0.9:  # Preserving capital
+            balance_reward = 0.001
+        
+        # Apply strong penalty if balance drops too low
+        low_balance_penalty = 0
+        if self.balance < self.initial_balance * 0.5:  # Lost more than 50%
+            low_balance_penalty = -0.01
+        elif self.balance < self.initial_balance * 0.25:  # Lost more than 75%
+            low_balance_penalty = -0.05
         
         # Combine all reward components
         reward = (
-            portfolio_change * 1.0 +  # Main component
+            portfolio_change * 2.0 +       # Main component with stronger weight
             trade_penalty +
+            cooldown_penalty +
+            hold_reward +
             position_reward +
+            holding_loss_penalty +
             profit_reward +
-            balance_reward
+            balance_reward +
+            low_balance_penalty
         ) * self.reward_scaling
         
         # Apply reward clipping to handle extreme values
@@ -366,7 +420,7 @@ class TradingEnvironment:
             logger.debug(f"Large reward: {reward:.4f}, Action: {action}, Position: {self.position}, " +
                         f"Portfolio change: {portfolio_change:.4f}")
         
-        return reward
+        return reward, trade_executed
     
     def _calculate_portfolio_value(self, current_price):
         """
@@ -490,6 +544,7 @@ class TradingEnvironment:
         # 3. Current balance (normalized)
         # 4. Unrealized PnL
         # 5. Position size relative to initial balance
+        # 6. Cooldown status (normalized)
         
         # Calculate unrealized PnL
         current_price = self._get_current_price()
@@ -506,13 +561,17 @@ class TradingEnvironment:
             position_value = self.position_size * current_price
             position_size_pct = position_value / self.initial_balance
         
+        # Cooldown status - normalized to [0, 1] where 0 means cooling down, 1 means ready to trade
+        cooldown_status = min(1.0, self.steps_since_last_trade / self.trade_cooldown) if self.trade_cooldown > 0 else 1.0
+        
         # Combine position features
         position_features = [
             self.position,                                 # Current position
             *self.position_history,                        # Position history
             self.balance / self.initial_balance,           # Normalized balance
             np.clip(unrealized_pnl, -1.0, 1.0),           # Clipped unrealized PnL
-            np.clip(position_size_pct, 0.0, 3.0)           # Normalized position size
+            np.clip(position_size_pct, 0.0, 3.0),         # Normalized position size
+            cooldown_status                                # Trading cooldown status
         ]
         
         return np.array(position_features, dtype=np.float32)
