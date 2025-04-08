@@ -115,10 +115,40 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         # Load the saved model weights
         logger.info(f"Loading model weights from {model_path}...")
         try:
-            model.model.load_state_dict(torch.load(model_path))
+            # Check if this is a Lightning checkpoint file
+            if model_path.endswith('.ckpt'):
+                # Load checkpoint file
+                checkpoint = torch.load(model_path)
+                
+                # Handle both newer and older PyTorch Lightning checkpoint formats
+                if 'state_dict' in checkpoint:
+                    # Get the state dict from the checkpoint
+                    state_dict = checkpoint['state_dict']
+                    
+                    # Remove 'model.' prefix if present
+                    clean_state_dict = {}
+                    for key, value in state_dict.items():
+                        if key.startswith('model.'):
+                            clean_key = key[len('model.'):]
+                            clean_state_dict[clean_key] = value
+                        else:
+                            clean_state_dict[key] = value
+                    
+                    # Load the state dict
+                    model.model.load_state_dict(clean_state_dict)
+                else:
+                    # Try direct loading
+                    model.load_state_dict(checkpoint)
+            else:
+                # Regular state dict file
+                model.model.load_state_dict(torch.load(model_path))
+            
             model.eval()  # Set to evaluation mode
+            logger.info("Model loaded successfully")
         except Exception as e:
             logger.error(f"Error loading model weights: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
         
         # Load test data
