@@ -16,7 +16,7 @@ import torch.optim as optim
 from collections import deque, namedtuple
 import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Union, Optional, Any
-from torch.cuda.amp import GradScaler  # Remove autocast import
+from torch.amp import GradScaler  # Import from torch.amp instead of torch.cuda.amp
 from torch.amp import autocast  # Use the new location for autocast
 
 # Setup logging
@@ -147,25 +147,13 @@ class DQNAgent:
             
         # Initialize AMP GradScaler if we're using CUDA
         self.scaler = None
+        # First store the adjusted learning rate but don't try to create optimizer yet
         if self.use_amp and str(self.device).startswith("cuda"):
-            try:
-                self.scaler = GradScaler()
-                logger.info("Using Automatic Mixed Precision (AMP)")
-                logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
-                logger.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
-                
-                # When using AMP, use a smaller learning rate for better stability
-                if self.learning_rate > 0.0001:
-                    logger.info(f"Reducing learning rate for AMP stability: {self.learning_rate} -> {self.learning_rate * 0.6}")
-                    self.learning_rate *= 0.6
-                    # Note: optimizer will be created with reduced learning rate below
-            except Exception as e:
-                logger.warning(f"Failed to initialize AMP GradScaler: {str(e)}")
-                logger.warning("Falling back to full precision training")
-                self.scaler = None
-        elif self.use_amp:
-            logger.warning("AMP requested but not using CUDA device - falling back to full precision")
-        
+            # Adjust learning rate for AMP stability up front
+            if self.learning_rate > 0.0001:
+                logger.info(f"Reducing learning rate for AMP stability: {self.learning_rate} -> {self.learning_rate * 0.6}")
+                self.learning_rate *= 0.6
+
         logger.info(f"Using device: {self.device}")
         
         # Initialize networks
@@ -176,6 +164,21 @@ class DQNAgent:
         
         # Initialize optimizer - now that q_network exists
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
+        
+        # Now initialize the GradScaler AFTER networks and optimizer exist
+        if self.use_amp and str(self.device).startswith("cuda"):
+            try:
+                # Use the new API location (torch.amp instead of torch.cuda.amp)
+                self.scaler = GradScaler()
+                logger.info("Using Automatic Mixed Precision (AMP)")
+                logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+                logger.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize AMP GradScaler: {str(e)}")
+                logger.warning("Falling back to full precision training")
+                self.scaler = None
+        elif self.use_amp:
+            logger.warning("AMP requested but not using CUDA device - falling back to full precision")
         
         # Initialize replay buffer
         self.replay_buffer = deque(maxlen=buffer_size)
