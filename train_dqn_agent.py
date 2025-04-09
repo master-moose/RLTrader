@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 import psutil
 import h5py
 import pandas as pd
+import gym
 
 # Setup logging first so it's available for import statements
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,47 +30,52 @@ logger = logging.getLogger(__name__)
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
-# FinRL imports
+# Define a fallback for INDICATORS in case we can't import it
+INDICATORS = ['macd', 'rsi', 'cci', 'dx']
+
+# FinRL imports - simpler structure with direct imports
 try:
-    # For FinRL 0.3.7
-    from finrl.meta.env_crypto_trading.env_cryptocurrency import (
-        CryptocurrencyTradingEnv
-    )
-    from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-    from finrl.agents.stablebaselines3.models import DRLAgent
-    from finrl.meta.config import INDICATORS
-    logger.info("Using FinRL 0.3.7 import paths")
-except ImportError:
+    # Try importing directly from finrl package
+    from finrl.apps import config
+    from finrl.finrl_meta import env_stock_trading
+    from finrl.agents.stablebaselines3 import models
+    from finrl.preprocessing import preprocessors
+    
+    # Use the stock trading environment as fallback
+    from finrl.finrl_meta.env_stock_trading.env_stocktrading import StockTradingEnv
+    
+    # Get the DRLAgent class
+    DRLAgent = models.DRLAgent
+    
+    # Get the FeatureEngineer
+    FeatureEngineer = preprocessors.FeatureEngineer
+    
+    # If we can access config.INDICATORS, use it
     try:
-        # For newer versions (fallback 1)
-        from finrl.applications.cryptocurrency_trading.cryptocurrency_trading import (
-            CryptocurrencyTradingEnv
-        )
-        from finrl.applications.preprocessor.preprocessors import FeatureEngineer
-        from finrl.applications.models import DRLAgent
-        from finrl.config import INDICATORS
-        logger.info("Using newer FinRL import paths (fallback 1)")
-    except ImportError:
-        try:
-            # For older versions (fallback 2)
-            from finrl.env_cryptocurrency_trading.env_cryptocurrency import (
-                CryptocurrencyTradingEnv
-            )
-            from finrl.preprocessing.preprocessors import FeatureEngineer
-            from finrl.drl.models import DRLAgent
-            from finrl.config.config import INDICATORS
-            logger.info("Using older FinRL import paths (fallback 2)")
-        except ImportError:
-            # For stock trading as last resort
-            logger.warning(
-                "Could not find CryptocurrencyTradingEnv, using StockTradingEnv as fallback"
-            )
-            from finrl.meta.env_stock_trading.env_stocktrading import (
-                StockTradingEnv as CryptocurrencyTradingEnv
-            )
-            from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-            from finrl.agents.stablebaselines3.models import DRLAgent
-            from finrl.meta.config import INDICATORS
+        INDICATORS = config.INDICATORS
+    except AttributeError:
+        logger.warning("Using default INDICATORS list")
+    
+    logger.info("Successfully imported FinRL components")
+    
+except ImportError as e:
+    logger.error(f"Error importing FinRL: {e}")
+    from stable_baselines3.common.base_class import BaseAlgorithm
+    DRLAgent = BaseAlgorithm
+    logger.warning("Using BaseAlgorithm from stable-baselines3 as fallback")
+    
+    # Simple stub for FeatureEngineer if needed
+    class FeatureEngineer:
+        def __init__(self, **kwargs):
+            pass
+        
+        def preprocess_data(self, df):
+            logger.warning("Using stub FeatureEngineer")
+            return df
+
+# Create an alias for StockTradingEnv
+CryptocurrencyTradingEnv = StockTradingEnv
+logger.info("Using StockTradingEnv as CryptocurrencyTradingEnv")
 
 # Original imports
 from crypto_trading_model.dqn_agent import DQNAgent
