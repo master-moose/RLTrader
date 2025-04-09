@@ -23,9 +23,23 @@ import h5py
 import pandas as pd
 
 # FinRL imports
-from finrl.applications.cryptocurrency_trading.cryptocurrency_trading import (
-    CryptocurrencyTradingEnv
-)
+try:
+    # Try the first path (most likely in 0.3.7)
+    from finrl.meta.env_crypto_trading.env_cryptocurrency import (
+        CryptocurrencyTradingEnv
+    )
+except ImportError:
+    try:
+        # Try alternative path
+        from finrl.meta.env_cryptocurrency_trading.env_cryptocurrency import (
+            CryptocurrencyTradingEnv
+        )
+    except ImportError:
+        # If all else fails, use stock trading env as fallback
+        from finrl.meta.env_stock_trading.env_stocktrading import (
+            StockTradingEnv as CryptocurrencyTradingEnv
+        )
+
 from finrl.agents.stablebaseline3.models import DRLAgent as FinRLAgent
 from finrl.config import INDICATORS
 from finrl.preprocessing.preprocessors import FeatureEngineer
