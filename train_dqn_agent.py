@@ -362,7 +362,7 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
         # Reset the index to get the index as a column if it's not already a column
         df = df.reset_index()
     
-    # Make sure we have a date column
+    # CRITICAL FIX: Make sure we have a date column before ANY processing
     if 'date' not in df.columns:
         # Create a date column from timestamp or index, or create a synthetic one
         if 'timestamp' in df.columns:
@@ -374,7 +374,7 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
             logger.info("Creating synthetic dates for the data")
             df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
     
-    # Ensure date is a datetime type
+    # Always ensure date is a datetime type
     df['date'] = pd.to_datetime(df['date'])
     
     # Manually add some technical indicators to avoid FinRL preprocessing errors
@@ -395,11 +395,6 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
     for col in ['macd', 'rsi', 'cci', 'dx']:
         df[col] = df_safe[col]
     
-    # Set the index to date for FinRL compatibility
-    # If the date column already exists as index, this will be a no-op
-    if df.index.name != 'date':
-        df = df.set_index('date')
-    
     # Try to use FinRL's feature engineering
     try:
         # Create FeatureEngineer
@@ -413,16 +408,29 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
         
         try:
             logger.info("Attempting to preprocess data with FinRL's FeatureEngineer")
-            # Reset index but drop the index column to avoid duplicate 'date'
-            # Then FinRL will process the date column that already exists
-            temp_df = df.reset_index(drop=True)
+            # CRITICAL: Ensure date column exists and is not an index
+            temp_df = df.copy()
+            if 'date' not in temp_df.columns:
+                # If date is in the index but not in columns, reset it properly
+                if temp_df.index.name == 'date':
+                    temp_df = temp_df.reset_index()
+                else:
+                    # Create a synthetic date column as last resort
+                    temp_df['date'] = pd.date_range(start='2020-01-01', periods=len(temp_df), freq='1h')
+            
+            # Log the columns to help with debugging
+            logger.info(f"Columns before FeatureEngineer: {temp_df.columns.tolist()}")
+            if 'date' not in temp_df.columns:
+                logger.error("Critical error: 'date' column still missing")
+                raise ValueError("Missing 'date' column - cannot proceed with FinRL preprocessing")
+                
             processed = fe.preprocess_data(temp_df)
             logger.info(f"Processed data with shape: {processed.shape}")
             
             # Ensure we have a date column
             if 'date' not in processed.columns:
                 logger.warning("FinRL preprocessing removed date column, adding it back")
-                processed['date'] = df.index.values
+                processed['date'] = df.index.values if isinstance(df.index, pd.DatetimeIndex) else df['date'].values
                 
             return processed
         except Exception as e:
@@ -430,36 +438,26 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
             logger.error(traceback.format_exc())
             
             # Return our manually preprocessed dataframe
-            # Reset index with drop=True to avoid duplicate 'date' column
-            df_result = df.copy()
             # Make sure date column exists after reset
-            df_result = df_result.reset_index()
-            # Rename duplicated date column if needed
-            if 'date' in df_result.columns and df_result.index.name == 'date':
-                df_result = df_result.rename_axis(None)
+            df_result = df.copy()
+            if 'date' not in df_result.columns:
+                if df_result.index.name == 'date':
+                    df_result = df_result.reset_index()
+                else:
+                    df_result['date'] = pd.date_range(start='2020-01-01', periods=len(df_result), freq='1h')
             return df_result
     except Exception as e:
         logger.error(f"Error setting up feature engineering: {e}")
         # Return dataframe with added date and technical indicators
         logger.info("Using basic dataframe with manual indicators")
         # Reset the index and ensure we return a dataframe with a date column
-        try:
-            # Try first with dropping the index to avoid duplicates
-            result_df = df.reset_index(drop=False)
-            # If date column already exists as regular column (not just index)
-            if 'date' in result_df.columns and result_df.index.name == 'date':
-                # Rename the index to avoid conflicts on next reset
-                result_df = result_df.rename_axis(None)
-            return result_df
-        except ValueError:
-            # If that fails, try with a different approach
-            # Copy to avoid modifying the original during reset
-            result_df = df.copy()
-            # If we have a date index and a date column, rename the column
-            if result_df.index.name == 'date' and 'date' in result_df.columns:
-                result_df = result_df.rename(columns={'date': 'date_col'})
-            # Then reset index safely
-            return result_df.reset_index()
+        result_df = df.copy()
+        if 'date' not in result_df.columns:
+            if result_df.index.name == 'date':
+                result_df = result_df.reset_index()
+            else:
+                result_df['date'] = pd.date_range(start='2020-01-01', periods=len(result_df), freq='1h')
+        return result_df
 
 def create_finrl_env(processed_data, args, env_id=0):
     """
@@ -493,9 +491,8 @@ def create_finrl_env(processed_data, args, env_id=0):
     else:
         action_space = 3  # buy, hold, sell (discrete)
     
-    # Define environment parameters
+    # Define environment parameters - CRITICAL: Only use parameters that FinRL 0.3.7 accepts
     env_kwargs = {
-        "hmax": 100,  # Max number of shares to trade
         "initial_amount": args.initial_balance,
         "buy_cost_pct": args.transaction_fee,
         "sell_cost_pct": args.transaction_fee,
@@ -504,18 +501,23 @@ def create_finrl_env(processed_data, args, env_id=0):
         "tech_indicator_list": INDICATORS,
         "action_space": action_space,
         "reward_scaling": args.reward_scaling,
-        "window_size": args.window_size
     }
+    
+    # Add hmax only if not using placeholder StockTradingEnv
+    if hasattr(StockTradingEnv, '__module__') and 'finrl' in StockTradingEnv.__module__:
+        env_kwargs["hmax"] = 100  # Max number of shares to trade
+    
+    logger.info(f"Creating environment with parameters: {env_kwargs}")
     
     # Process data for environment
     train_data = processed_data.copy()
     
-    # Ensure we have a date column
+    # CRITICAL: Ensure we have a date column
     if 'date' not in train_data.columns:
         logger.warning("No date column found in processed data, creating one")
         train_data['date'] = pd.date_range(start='2020-01-01', periods=len(train_data), freq='1h')
     
-    # Sort by date and tic
+    # Sort by date and tic - required by FinRL
     try:
         train_data = train_data.sort_values(['date', 'tic'], ignore_index=True)
     except Exception as e:
@@ -525,7 +527,11 @@ def create_finrl_env(processed_data, args, env_id=0):
     
     # Create an integer index from date values for FinRL
     try:
-        train_data.index = train_data['date'].factorize()[0]
+        # Add a temporary numeric column based on date factorization
+        factorized_dates, _ = train_data['date'].factorize()
+        train_data['date_id'] = factorized_dates
+        # Use this as index instead of modifying the original index
+        train_data = train_data.set_index('date_id')
     except Exception as e:
         logger.error(f"Error setting factorized index: {e}")
         # Use simple sequential index if factorize fails
@@ -533,6 +539,7 @@ def create_finrl_env(processed_data, args, env_id=0):
     
     # Create environment
     try:
+        logger.info(f"Creating environment with StockTradingEnv class: {StockTradingEnv}")
         env = CryptocurrencyTradingEnv(df=train_data, **env_kwargs)
         
         # For single process environment
@@ -542,7 +549,21 @@ def create_finrl_env(processed_data, args, env_id=0):
     except Exception as e:
         logger.error(f"Error creating environment: {e}")
         logger.error(traceback.format_exc())
-        raise
+        
+        # Try with a more minimal set of parameters as fallback
+        try:
+            minimal_kwargs = {
+                "df": train_data,
+                "stock_dim": stock_dimension,
+                "initial_amount": args.initial_balance,
+                "transaction_cost_pct": args.transaction_fee
+            }
+            logger.info(f"Attempting with minimal parameters: {minimal_kwargs}")
+            env = CryptocurrencyTradingEnv(**minimal_kwargs)
+            return DummyVecEnv([lambda: env])
+        except Exception as fallback_error:
+            logger.error(f"Fallback also failed: {fallback_error}")
+            raise
 
 def train_dqn_agent(args):
     """
