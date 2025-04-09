@@ -40,7 +40,26 @@ except ImportError:
             StockTradingEnv as CryptocurrencyTradingEnv
         )
 
-from finrl.agents.stablebaseline3.models import DRLAgent as FinRLAgent
+# Try different possible paths for DRLAgent in FinRL 0.3.7
+try:
+    # Try first path
+    from finrl.meta.agents_meta.models import (
+        DRLAgent as FinRLAgent
+    )
+except ImportError:
+    try:
+        # Try second path
+        from finrl.agents.models import DRLAgent as FinRLAgent
+    except ImportError:
+        try:
+            # Try third path
+            from finrl.meta.agents.models import DRLAgent as FinRLAgent
+        except ImportError:
+            # Original path as last resort
+            from finrl.agents.stablebaseline3.models import (
+                DRLAgent as FinRLAgent
+            )
+
 from finrl.config import INDICATORS
 from finrl.preprocessing.preprocessors import FeatureEngineer
 from stable_baselines3.common.vec_env import DummyVecEnv
