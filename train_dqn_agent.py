@@ -33,47 +33,84 @@ from stable_baselines3.common.utils import set_random_seed
 # Define a fallback for INDICATORS in case we can't import it
 INDICATORS = ['macd', 'rsi', 'cci', 'dx']
 
-# FinRL imports - simpler structure with direct imports
+# Define a basic StockTradingEnv class that can be used if imports fail
+class StockTradingEnv(gym.Env):
+    """Placeholder StockTradingEnv in case FinRL imports fail"""
+    def __init__(self, df=None, **kwargs):
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(100,), dtype=np.float32
+        )
+        self.action_space = gym.spaces.Discrete(3)  # buy, hold, sell
+        logger.warning("Using placeholder StockTradingEnv - NOT FUNCTIONAL!")
+        
+    def reset(self):
+        return np.zeros(100)
+        
+    def step(self, action):
+        return np.zeros(100), 0, True, {}
+
+# Try different known import paths for FinRL 0.3.7
 try:
-    # Try importing directly from finrl package
-    from finrl.apps import config
-    from finrl.finrl_meta import env_stock_trading
-    from finrl.agents.stablebaselines3 import models
-    from finrl.preprocessing import preprocessors
-    
-    # Use the stock trading environment as fallback
-    from finrl.finrl_meta.env_stock_trading.env_stocktrading import StockTradingEnv
-    
-    # Get the DRLAgent class
-    DRLAgent = models.DRLAgent
-    
-    # Get the FeatureEngineer
-    FeatureEngineer = preprocessors.FeatureEngineer
-    
-    # If we can access config.INDICATORS, use it
+    # Try importing the components directly
     try:
-        INDICATORS = config.INDICATORS
-    except AttributeError:
-        logger.warning("Using default INDICATORS list")
+        from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+        from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+        from finrl.agents.stablebaselines3.models import DRLAgent
+        logger.info("Using FinRL 0.3.7 direct path imports")
+    except ImportError:
+        # Try alternate paths
+        try:
+            from finrl.env_stock_trading.env_stocktrading import StockTradingEnv
+            from finrl.preprocessing.preprocessors import FeatureEngineer
+            from finrl.drl.stable_baselines3.models import DRLAgent
+            logger.info("Using FinRL 0.3.7 alternate path imports")
+        except ImportError:
+            # Try another possible layout
+            try:
+                from finrl.applications.stock_trading.stock_trading import StockTradingEnv
+                from finrl.applications.preprocessor.preprocessors import FeatureEngineer
+                from finrl.applications.models import DRLAgent
+                logger.info("Using FinRL 0.3.7 applications path imports")
+            except ImportError:
+                # Last attempt
+                logger.error("Failed to import StockTradingEnv from any known path")
+                from stable_baselines3.common.base_class import BaseAlgorithm as DRLAgent
+                # Note: StockTradingEnv is already defined above as a fallback
+                # Define a stub for FeatureEngineer
+                class FeatureEngineer:
+                    def __init__(self, **kwargs):
+                        pass
+                    def preprocess_data(self, df):
+                        logger.warning("Using fallback FeatureEngineer - returning unprocessed data")
+                        return df
     
-    logger.info("Successfully imported FinRL components")
-    
-except ImportError as e:
-    logger.error(f"Error importing FinRL: {e}")
-    from stable_baselines3.common.base_class import BaseAlgorithm
-    DRLAgent = BaseAlgorithm
+    # Try to import INDICATORS
+    try:
+        from finrl.meta.config import INDICATORS
+    except ImportError:
+        try:
+            from finrl.config import INDICATORS
+        except ImportError:
+            try:
+                from finrl.config.config import INDICATORS
+            except ImportError:
+                logger.warning(f"Using default INDICATORS: {INDICATORS}")
+
+except Exception as e:
+    logger.error(f"Error setting up FinRL imports: {e}")
+    # StockTradingEnv is already defined above
+    from stable_baselines3.common.base_class import BaseAlgorithm as DRLAgent
     logger.warning("Using BaseAlgorithm from stable-baselines3 as fallback")
     
-    # Simple stub for FeatureEngineer if needed
+    # Define a minimal FeatureEngineer stub
     class FeatureEngineer:
         def __init__(self, **kwargs):
             pass
-        
         def preprocess_data(self, df):
-            logger.warning("Using stub FeatureEngineer")
+            logger.warning("Using stub FeatureEngineer - returning unprocessed data")
             return df
 
-# Create an alias for StockTradingEnv
+# Create alias for CryptocurrencyTradingEnv
 CryptocurrencyTradingEnv = StockTradingEnv
 logger.info("Using StockTradingEnv as CryptocurrencyTradingEnv")
 
