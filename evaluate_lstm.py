@@ -127,27 +127,40 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
     
     # Load model using train_lightning_model
     try:
-        # Create a dummy train/val loader to initialize the model
-        logger.info("Loading model architecture...")
-        model, _ = train_lightning_model(
-            config_path=temp_config_path,
-            max_epochs=1,  # We won't actually train
-            verbose=True
-        )
-        
-        if model is None:
-            logger.error("Failed to initialize model architecture")
-            return None
-        
-        # Load the saved model weights
-        logger.info(f"Loading model weights from {model_path}...")
-        try:
-            # Check if this is a Lightning checkpoint file
-            if model_path.endswith('.ckpt'):
-                # Load checkpoint file
-                checkpoint = torch.load(model_path)
+        # Check if this is a Lightning checkpoint file
+        if model_path.endswith('.ckpt'):
+            logger.info(f"Loading model directly from checkpoint: {model_path}")
+            try:
+                # Import the LightningModule class
+                from crypto_trading_model.lstm_lightning import LightningTimeSeriesModel
                 
-                # Handle both newer and older PyTorch Lightning checkpoint formats
+                # Load the checkpoint directly
+                model = LightningTimeSeriesModel.load_from_checkpoint(
+                    model_path,
+                    map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                )
+                logger.info("Model loaded successfully from checkpoint")
+                
+            except Exception as e:
+                logger.error(f"Error loading model from checkpoint: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                
+                # Fall back to regular initialization
+                logger.warning("Falling back to configuration-based initialization")
+                model, _ = train_lightning_model(
+                    config_path=temp_config_path,
+                    max_epochs=1,  # We won't actually train
+                    verbose=True
+                )
+                
+                if model is None:
+                    logger.error("Failed to initialize model architecture")
+                    return None
+                
+                # Try to load checkpoint with strict=False
+                logger.info("Attempting to load checkpoint with strict=False...")
+                checkpoint = torch.load(model_path)
                 if 'state_dict' in checkpoint:
                     # Get the state dict from the checkpoint
                     state_dict = checkpoint['state_dict']
@@ -161,34 +174,44 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                         else:
                             clean_state_dict[key] = value
                     
-                    # Load the state dict
+                    # Load the state dict with strict=False
                     model.model.load_state_dict(clean_state_dict, strict=False)
                 else:
                     # Try direct loading
                     model.load_state_dict(checkpoint, strict=False)
-            else:
-                # Regular state dict file
-                try:
-                    # Attempt to load the state dict directly
-                    model.model.load_state_dict(torch.load(model_path))
-                except Exception as direct_load_error:
-                    logger.warning(f"Direct loading failed: {str(direct_load_error)}")
-                    logger.info("Attempting to load with strict=False...")
                     
-                    # Try loading with strict=False to allow for parameter mismatches
-                    model.model.load_state_dict(torch.load(model_path), strict=False)
-                    logger.warning(
-                        "Model loaded with strict=False - some parameters may "
-                        "be missing or unused"
-                    )
+                logger.warning("Model loaded with strict=False - some parameters may be missing or unused")
+        else:
+            # Create a dummy train/val loader to initialize the model
+            logger.info("Loading model architecture...")
+            model, _ = train_lightning_model(
+                config_path=temp_config_path,
+                max_epochs=1,  # We won't actually train
+                verbose=True
+            )
             
-            model.eval()  # Set to evaluation mode
-            logger.info("Model loaded successfully")
-        except Exception as e:
-            logger.error(f"Error loading model weights: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
+            if model is None:
+                logger.error("Failed to initialize model architecture")
+                return None
+            
+            # Load the saved model weights
+            logger.info(f"Loading model weights from {model_path}...")
+            try:
+                # Attempt to load the state dict directly
+                model.model.load_state_dict(torch.load(model_path))
+            except Exception as direct_load_error:
+                logger.warning(f"Direct loading failed: {str(direct_load_error)}")
+                logger.info("Attempting to load with strict=False...")
+                
+                # Try loading with strict=False to allow for parameter mismatches
+                model.model.load_state_dict(torch.load(model_path), strict=False)
+                logger.warning(
+                    "Model loaded with strict=False - some parameters may "
+                    "be missing or unused"
+                )
+        
+        model.eval()  # Set to evaluation mode
+        logger.info("Model ready for evaluation")
         
         # Load test data
         import h5py
