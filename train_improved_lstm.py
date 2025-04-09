@@ -20,6 +20,7 @@ import platform
 from sklearn.utils.class_weight import compute_class_weight
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
+import traceback
 
 # Setup multiprocessing to work on both Windows and Linux
 if sys.platform.startswith('win'):
@@ -379,17 +380,45 @@ def train_model(data_paths, config_path=None, output_dir='models/lstm_improved',
             verbose=True
         )
         
-        # Save the model
+        # Save the model - original way (final weights)
         if model:
-            model_path = os.path.join(output_dir, 'final_model.pt')
-            torch.save(model.model.state_dict(), model_path)
-            logger.info(f"Saved final model to {model_path}")
+            # Save the final model weights
+            final_model_path = os.path.join(output_dir, 'final_model.pt')
+            torch.save(model.model.state_dict(), final_model_path)
+            logger.info(f"Saved final model to {final_model_path}")
+            
+            # Save the best model weights (from best checkpoint)
+            if trainer.checkpoint_callback.best_model_path:
+                # Load the best checkpoint
+                best_checkpoint_path = trainer.checkpoint_callback.best_model_path
+                logger.info(f"Best checkpoint found at: {best_checkpoint_path}")
+                
+                try:
+                    # Load the best model state from checkpoint
+                    best_checkpoint = torch.load(best_checkpoint_path)
+                    
+                    # Create a new instance of the model with the same configuration
+                    best_model_path = os.path.join(output_dir, 'best_model.pt')
+                    
+                    # Extract the model state dictionary from the checkpoint
+                    if 'state_dict' in best_checkpoint:
+                        # Remove the "model." prefix from keys if it exists (Lightning convention)
+                        state_dict = {k.replace('model.', ''): v for k, v in best_checkpoint['state_dict'].items()}
+                        # Save just the model state dict
+                        torch.save(state_dict, best_model_path)
+                        logger.info(f"Saved best model weights to {best_model_path}")
+                    else:
+                        logger.warning("No state_dict found in best checkpoint")
+                except Exception as e:
+                    logger.error(f"Error loading best checkpoint: {str(e)}")
+                    logger.error(traceback.format_exc())
         else:
             logger.error("Training failed to return a valid model")
             
         return model
     except Exception as e:
         logger.error(f"Error during model training: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 def main():
