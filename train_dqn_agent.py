@@ -333,39 +333,69 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
     if 'tic' not in df.columns:
         df['tic'] = 'CRYPTO'
     
-    if df.index.name != 'date' and not isinstance(df.index, pd.DatetimeIndex):
-        df.reset_index(inplace=True)
-        if 'timestamp' in df.columns:
-            df.rename(columns={'timestamp': 'date'}, inplace=True)
-        elif 'index' in df.columns and pd.api.types.is_datetime64_any_dtype(df['index']):
-            df.rename(columns={'index': 'date'}, inplace=True)
-        else:
-            # If no date column, create one
-            df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
+    # Reset the index to get the index as a column if it's not already a column
+    df.reset_index(inplace=True)
     
-    # Make sure date is a datetime index
-    if 'date' in df.columns and df.index.name != 'date':
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
+    # Create a date column from timestamp or index, or create a synthetic one
+    if 'timestamp' in df.columns:
+        df['date'] = pd.to_datetime(df['timestamp'])
+    elif 'index' in df.columns and pd.api.types.is_datetime64_any_dtype(df['index']):
+        df['date'] = pd.to_datetime(df['index'])
+    else:
+        # Create synthetic dates
+        logger.info("Creating synthetic dates for the data")
+        df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
+    
+    # Ensure date is a datetime type
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # Manually add some technical indicators to avoid FinRL preprocessing errors
+    logger.info("Adding basic technical indicators manually")
+    df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
+    df['rsi'] = 100 - (100 / (1 + (df['close'].diff().clip(lower=0).rolling(window=14).sum() / 
+                                  abs(df['close'].diff().clip(upper=0)).rolling(window=14).sum())))
+    df['cci'] = (df['close'] - df['close'].rolling(window=20).mean()) / (0.015 * df['close'].rolling(window=20).std())
+    df['dx'] = abs(df['close'].diff()) / df['close'] * 100
+    
+    # Set the index back to date for compatibility with FinRL
+    df.set_index('date', inplace=True)
+    
+    # Add a date column even with date index (FinRL expects both)
+    df['date'] = df.index
     
     # Calculate additional technical indicators using FinRL
-    fe = FeatureEngineer(
-        use_technical_indicator=True,
-        tech_indicator_list=INDICATORS,
-        use_vix=False,
-        use_turbulence=False,
-        user_defined_feature=False
-    )
-    
     try:
-        processed = fe.preprocess_data(df)
-        logger.info(f"Processed data with shape: {processed.shape}")
-        return processed
+        fe = FeatureEngineer(
+            use_technical_indicator=True,
+            tech_indicator_list=INDICATORS,
+            use_vix=False,
+            use_turbulence=False,
+            user_defined_feature=False
+        )
+        
+        try:
+            logger.info("Attempting to preprocess data with FinRL's FeatureEngineer")
+            processed = fe.preprocess_data(df.reset_index())
+            logger.info(f"Processed data with shape: {processed.shape}")
+            
+            # Ensure we have a date column even after preprocessing
+            if 'date' not in processed.columns:
+                logger.warning("FinRL preprocessing removed date column, adding it back")
+                processed['date'] = df.index.values
+                
+            return processed
+        except Exception as e:
+            logger.error(f"Error in FinRL preprocessing: {e}")
+            logger.error(traceback.format_exc())
+            
+            # Return our manually preprocessed dataframe
+            logger.info("Falling back to manually preprocessed data")
+            return df.reset_index()
     except Exception as e:
-        logger.error(f"Error preprocessing data: {e}")
-        logger.error(traceback.format_exc())
-        # Return original dataframe with basic columns if preprocessing fails
-        return df
+        logger.error(f"Error setting up feature engineering: {e}")
+        # Return dataframe with added date and technical indicators
+        logger.info("Using basic dataframe with manual indicators")
+        return df.reset_index()
 
 def create_finrl_env(processed_data, args, env_id=0):
     """
@@ -415,16 +445,40 @@ def create_finrl_env(processed_data, args, env_id=0):
     
     # Process data for environment
     train_data = processed_data.copy()
-    train_data = train_data.sort_values(['date', 'tic'], ignore_index=True)
-    train_data.index = train_data.date.factorize()[0]
+    
+    # Ensure we have a date column
+    if 'date' not in train_data.columns:
+        logger.warning("No date column found in processed data, creating one")
+        train_data['date'] = pd.date_range(start='2020-01-01', periods=len(train_data), freq='1h')
+    
+    # Sort by date and tic
+    try:
+        train_data = train_data.sort_values(['date', 'tic'], ignore_index=True)
+    except Exception as e:
+        logger.error(f"Error sorting data: {e}")
+        # If the sort fails, just reset the index
+        train_data = train_data.reset_index(drop=True)
+    
+    # Create an integer index from date values for FinRL
+    try:
+        train_data.index = train_data['date'].factorize()[0]
+    except Exception as e:
+        logger.error(f"Error setting factorized index: {e}")
+        # Use simple sequential index if factorize fails
+        train_data.index = np.arange(len(train_data))
     
     # Create environment
-    env = CryptocurrencyTradingEnv(df=train_data, **env_kwargs)
-    
-    # For single process environment
-    env_train = DummyVecEnv([lambda: env])
-    
-    return env_train
+    try:
+        env = CryptocurrencyTradingEnv(df=train_data, **env_kwargs)
+        
+        # For single process environment
+        env_train = DummyVecEnv([lambda: env])
+        
+        return env_train
+    except Exception as e:
+        logger.error(f"Error creating environment: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 def train_dqn_agent(args):
     """
