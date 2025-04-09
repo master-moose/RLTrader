@@ -55,17 +55,14 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         Dictionary containing evaluation metrics
     """
     # Paths to the model and configuration files
-    config_path = os.path.join(model_dir, 'config.json')
+    local_config_path = os.path.join(model_dir, 'config.json')
+    time_series_config_path = 'crypto_trading_model/config/time_series_config.json'
     
     # If model_path not specified, use default location
     if model_path is None:
         model_path = os.path.join(model_dir, 'final_model.pt')
     
-    # Check if files exist
-    if not os.path.exists(config_path):
-        logger.error(f"Configuration file not found at {config_path}")
-        return None
-    
+    # Check if model file exists
     if not os.path.exists(model_path):
         logger.error(f"Model file not found at {model_path}")
         return None
@@ -76,9 +73,18 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         logger.error(f"Test data file not found at {test_path}")
         return None
     
-    # Load configuration from the model directory
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+    # First try to load time_series_config.json, then fall back to local config
+    if os.path.exists(time_series_config_path):
+        logger.info(f"Loading configuration from {time_series_config_path}")
+        with open(time_series_config_path, 'r') as f:
+            config = json.load(f)
+    elif os.path.exists(local_config_path):
+        logger.info(f"Loading configuration from {local_config_path}")
+        with open(local_config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        logger.error(f"Configuration file not found at {local_config_path} or {time_series_config_path}")
+        return None
     
     # Make sure the configuration has all required keys
     if 'data' not in config:
@@ -124,6 +130,8 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
     temp_config_path = os.path.join(model_dir, 'eval_config.json')
     with open(temp_config_path, 'w') as f:
         json.dump(config, f, indent=2)
+    
+    logger.info(f"Using model configuration: {config}")
     
     # Load model using train_lightning_model
     try:
@@ -175,10 +183,18 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                             clean_state_dict[key] = value
                     
                     # Load the state dict with strict=False
-                    model.model.load_state_dict(clean_state_dict, strict=False)
+                    try:
+                        model.model.load_state_dict(clean_state_dict, strict=False)
+                    except Exception as e:
+                        logger.error(f"Error loading checkpoint state_dict: {str(e)}")
+                        return None
                 else:
                     # Try direct loading
-                    model.load_state_dict(checkpoint, strict=False)
+                    try:
+                        model.load_state_dict(checkpoint, strict=False)
+                    except Exception as e:
+                        logger.error(f"Error loading checkpoint directly: {str(e)}")
+                        return None
                     
                 logger.warning("Model loaded with strict=False - some parameters may be missing or unused")
         else:
@@ -204,11 +220,15 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                 logger.info("Attempting to load with strict=False...")
                 
                 # Try loading with strict=False to allow for parameter mismatches
-                model.model.load_state_dict(torch.load(model_path), strict=False)
-                logger.warning(
-                    "Model loaded with strict=False - some parameters may "
-                    "be missing or unused"
-                )
+                try:
+                    model.model.load_state_dict(torch.load(model_path), strict=False)
+                    logger.warning(
+                        "Model loaded with strict=False - some parameters may "
+                        "be missing or unused"
+                    )
+                except Exception as e:
+                    logger.error(f"Could not load model weights: {str(e)}")
+                    return None
         
         model.eval()  # Set to evaluation mode
         logger.info("Model ready for evaluation")
