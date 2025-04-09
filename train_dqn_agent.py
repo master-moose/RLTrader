@@ -23,10 +23,12 @@ import h5py
 import pandas as pd
 
 # FinRL imports
-from finrl.agents.stablebaseline3.models import DRLAgent
-from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from finrl.applications.cryptocurrency_trading.cryptocurrency_trading import (
+    CryptocurrencyTradingEnv
+)
+from finrl.agents.stablebaseline3.models import DRLAgent as FinRLAgent
 from finrl.config import INDICATORS
+from finrl.preprocessing.preprocessors import FeatureEngineer
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
@@ -295,7 +297,10 @@ def create_finrl_env(processed_data, args, env_id=0):
         state_space += 2  # Add position and unrealized PnL
         
     # Define action space dimension
-    action_space = 3  # buy, hold, sell
+    if args.finrl_model in ['ddpg', 'td3', 'sac']:
+        action_space = 1  # Continuous action space for these algorithms
+    else:
+        action_space = 3  # buy, hold, sell (discrete)
     
     # Define environment parameters
     env_kwargs = {
@@ -317,7 +322,7 @@ def create_finrl_env(processed_data, args, env_id=0):
     train_data.index = train_data.date.factorize()[0]
     
     # Create environment
-    env = StockTradingEnv(df=train_data, **env_kwargs)
+    env = CryptocurrencyTradingEnv(df=train_data, **env_kwargs)
     
     # For single process environment
     env_train = DummyVecEnv([lambda: env])
@@ -473,7 +478,7 @@ def train_with_finrl(args, market_data, device):
         logger.warning(f"Failed to parse net_arch, using default: {net_arch}")
     
     # Initialize DRL agent
-    drl_agent = DRLAgent(env=env_train)
+    drl_agent = FinRLAgent(env=env_train)
     
     # Train model with the selected algorithm
     model_params = {
@@ -488,45 +493,29 @@ def train_with_finrl(args, market_data, device):
     
     # Choose the appropriate algorithm
     if args.finrl_model == 'dqn':
-        model, _ = drl_agent.train_DQN(
-            model_name="DQN",
-            model_kwargs=model_params,
-            total_timesteps=args.total_timesteps
-        )
+        model = drl_agent.get_model("dqn", model_kwargs=model_params)
     elif args.finrl_model == 'ppo':
-        model, _ = drl_agent.train_PPO(
-            model_name="PPO",
-            model_kwargs=model_params,
-            total_timesteps=args.total_timesteps
-        )
+        model = drl_agent.get_model("ppo", model_kwargs=model_params)
     elif args.finrl_model == 'a2c':
-        model, _ = drl_agent.train_A2C(
-            model_name="A2C",
-            model_kwargs=model_params,
-            total_timesteps=args.total_timesteps
-        )
+        model = drl_agent.get_model("a2c", model_kwargs=model_params)
     elif args.finrl_model == 'ddpg':
-        model, _ = drl_agent.train_DDPG(
-            model_name="DDPG",
-            model_kwargs=model_params,
-            total_timesteps=args.total_timesteps
-        )
+        model = drl_agent.get_model("ddpg", model_kwargs=model_params)
     elif args.finrl_model == 'td3':
-        model, _ = drl_agent.train_TD3(
-            model_name="TD3",
-            model_kwargs=model_params,
-            total_timesteps=args.total_timesteps
-        )
+        model = drl_agent.get_model("td3", model_kwargs=model_params)
     elif args.finrl_model == 'sac':
-        model, _ = drl_agent.train_SAC(
-            model_name="SAC",
-            model_kwargs=model_params,
-            total_timesteps=args.total_timesteps
-        )
+        model = drl_agent.get_model("sac", model_kwargs=model_params)
+    
+    # Train the model
+    logger.info(f"Training {args.finrl_model.upper()} model for {args.total_timesteps} timesteps")
+    trained_model = drl_agent.train_model(
+        model=model,
+        tb_log_name=args.finrl_model,
+        total_timesteps=args.total_timesteps
+    )
     
     # Save the final model
     model_path = os.path.join(save_dir, f"finrl_{args.finrl_model}_final.zip")
-    model.save(model_path)
+    trained_model.save(model_path)
     logger.info(f"Model saved to {model_path}")
     
     # Run evaluation and calculate performance metrics
@@ -540,8 +529,8 @@ def train_with_finrl(args, market_data, device):
     env_test = create_finrl_env(test_data, args, env_id=1)
     
     # Run test
-    df_account_value, df_actions = drl_agent.DRL_prediction(
-        model=model,
+    df_account_value, df_actions = drl_agent.predict(
+        model=trained_model,
         environment=env_test
     )
     
