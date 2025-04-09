@@ -21,32 +21,61 @@ from concurrent.futures import ThreadPoolExecutor
 import psutil
 import h5py
 import pandas as pd
-import sys
-import gym
-from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-from finrl.meta.data_processors.processor_cryptocurrencies import (
-    CryptocurrencyTradingEnv,
-)
-from finrl.meta.env_cryptocurrency_trading.env_multiple_crypto import CryptoEnv
-from finrl.agents.stablebaselines3 import DRLAgent
-from finrl.config import INDICATORS
-from stable_baselines3.common.logger import configure
 
-from utils.notifications import send_telegram_notification
-from utils.logs import setup_logging
-from utils.hdf5_utils import load_data_from_hdf5
-from utils.time_measurement import timeit
-from utils.device_info import get_device_info
+# Setup logging first so it's available for import statements
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.utils import set_random_seed
+
+# FinRL imports
+try:
+    # For FinRL 0.3.7
+    from finrl.meta.env_crypto_trading.env_cryptocurrency import (
+        CryptocurrencyTradingEnv
+    )
+    from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+    from finrl.agents.stablebaselines3.models import DRLAgent
+    from finrl.meta.config import INDICATORS
+    logger.info("Using FinRL 0.3.7 import paths")
+except ImportError:
+    try:
+        # For newer versions (fallback 1)
+        from finrl.applications.cryptocurrency_trading.cryptocurrency_trading import (
+            CryptocurrencyTradingEnv
+        )
+        from finrl.applications.preprocessor.preprocessors import FeatureEngineer
+        from finrl.applications.models import DRLAgent
+        from finrl.config import INDICATORS
+        logger.info("Using newer FinRL import paths (fallback 1)")
+    except ImportError:
+        try:
+            # For older versions (fallback 2)
+            from finrl.env_cryptocurrency_trading.env_cryptocurrency import (
+                CryptocurrencyTradingEnv
+            )
+            from finrl.preprocessing.preprocessors import FeatureEngineer
+            from finrl.drl.models import DRLAgent
+            from finrl.config.config import INDICATORS
+            logger.info("Using older FinRL import paths (fallback 2)")
+        except ImportError:
+            # For stock trading as last resort
+            logger.warning(
+                "Could not find CryptocurrencyTradingEnv, using StockTradingEnv as fallback"
+            )
+            from finrl.meta.env_stock_trading.env_stocktrading import (
+                StockTradingEnv as CryptocurrencyTradingEnv
+            )
+            from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+            from finrl.agents.stablebaselines3.models import DRLAgent
+            from finrl.meta.config import INDICATORS
 
 # Original imports
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.utils import set_seeds
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # Define trade evaluation constants
 GOOD_TRADE_THRESHOLD = 0.001  # 0.1% profit threshold for a good trade
@@ -649,7 +678,7 @@ def train_with_finrl(args, market_data, device):
     # Create and train the model
     try:
         logger.info(f"Creating {args.finrl_model.upper()} model with FinRL")
-        agent = FinRLAgent(env=env_train)
+        agent = DRLAgent(env=env_train)
         
         # Get the model based on the selected algorithm
         model = agent.get_model(args.finrl_model, model_kwargs=model_params)
