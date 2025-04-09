@@ -3,6 +3,7 @@
 
 """
 Train a DQN agent for cryptocurrency trading using the LSTM model for state representation.
+With FinRL integration for improved GPU utilization.
 """
 
 import os
@@ -21,6 +22,15 @@ import psutil
 import h5py
 import pandas as pd
 
+# FinRL imports
+from finrl.agents.stablebaseline3.models import DRLAgent
+from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from finrl.config import INDICATORS
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.utils import set_random_seed
+
+# Original imports
 from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
@@ -112,6 +122,18 @@ def parse_args():
     parser.add_argument('--eval_interval', type=int, default=0,
                         help='Frequency to evaluate model (episodes, 0 to disable)')
     
+    # FinRL specific options
+    parser.add_argument('--use_finrl', action='store_true',
+                        help='Use FinRL framework for training')
+    parser.add_argument('--finrl_model', type=str, choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
+                        default='dqn', help='FinRL algorithm to use')
+    parser.add_argument('--net_arch', type=str, default='[256,256]',
+                        help='Network architecture for FinRL models')
+    parser.add_argument('--tensorboard_log', type=str, default='./tensorboard_logs',
+                        help='TensorBoard log directory')
+    parser.add_argument('--total_timesteps', type=int, default=1000000,
+                        help='Total timesteps for FinRL training')
+    
     # Debug
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug mode')
@@ -177,6 +199,131 @@ def load_lstm_model(model_path, device):
         logger.error(traceback.format_exc())
         raise
 
+def prepare_crypto_data_for_finrl(market_data, primary_timeframe='1h'):
+    """
+    Convert crypto data to format that FinRL can use.
+    
+    Parameters:
+    -----------
+    market_data : dict
+        Dictionary containing market data for different timeframes
+    primary_timeframe : str
+        Primary timeframe to use
+        
+    Returns:
+    --------
+    df : pd.DataFrame
+        Processed data in FinRL format
+    """
+    # Get the primary timeframe data
+    df = market_data[primary_timeframe].copy()
+    
+    # Rename columns to match FinRL expectations
+    # Assuming the dataframe has price columns like 'open', 'high', 'low', 'close'
+    column_map = {
+        'open': 'open',
+        'high': 'high',
+        'low': 'low',
+        'close': 'close',
+        'volume': 'volume'
+    }
+    
+    df = df.rename(columns={old: new for old, new in column_map.items() if old in df.columns})
+    
+    # Add required columns for FinRL
+    if 'tic' not in df.columns:
+        df['tic'] = 'CRYPTO'
+    
+    if df.index.name != 'date' and not isinstance(df.index, pd.DatetimeIndex):
+        df.reset_index(inplace=True)
+        if 'timestamp' in df.columns:
+            df.rename(columns={'timestamp': 'date'}, inplace=True)
+        elif 'index' in df.columns and pd.api.types.is_datetime64_any_dtype(df['index']):
+            df.rename(columns={'index': 'date'}, inplace=True)
+        else:
+            # If no date column, create one
+            df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
+    
+    # Make sure date is a datetime index
+    if 'date' in df.columns and df.index.name != 'date':
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+    
+    # Calculate additional technical indicators using FinRL
+    fe = FeatureEngineer(
+        use_technical_indicator=True,
+        tech_indicator_list=INDICATORS,
+        use_vix=False,
+        use_turbulence=False,
+        user_defined_feature=False
+    )
+    
+    try:
+        processed = fe.preprocess_data(df)
+        logger.info(f"Processed data with shape: {processed.shape}")
+        return processed
+    except Exception as e:
+        logger.error(f"Error preprocessing data: {e}")
+        logger.error(traceback.format_exc())
+        # Return original dataframe with basic columns if preprocessing fails
+        return df
+
+def create_finrl_env(processed_data, args, env_id=0):
+    """
+    Create a FinRL environment from processed data.
+    
+    Parameters:
+    -----------
+    processed_data : pd.DataFrame
+        Processed data from prepare_crypto_data_for_finrl
+    args : argparse.Namespace
+        Command line arguments
+    env_id : int
+        Environment ID
+        
+    Returns:
+    --------
+    env : gym.Env
+        FinRL environment
+    """
+    # Define the stock dimension (number of unique stocks/cryptos)
+    stock_dimension = len(processed_data['tic'].unique())
+    
+    # Define state space dimension
+    state_space = 1 + 2*stock_dimension + len(INDICATORS)*stock_dimension
+    if args.use_position_features:
+        state_space += 2  # Add position and unrealized PnL
+        
+    # Define action space dimension
+    action_space = 3  # buy, hold, sell
+    
+    # Define environment parameters
+    env_kwargs = {
+        "hmax": 100,  # Max number of shares to trade
+        "initial_amount": args.initial_balance,
+        "buy_cost_pct": args.transaction_fee,
+        "sell_cost_pct": args.transaction_fee,
+        "state_space": state_space,
+        "stock_dim": stock_dimension,
+        "tech_indicator_list": INDICATORS,
+        "action_space": action_space,
+        "reward_scaling": args.reward_scaling,
+        "window_size": args.window_size
+    }
+    
+    # Process data for environment
+    train_data = processed_data.copy()
+    train_data = train_data.sort_values(['date', 'tic'], ignore_index=True)
+    train_data.index = train_data.date.factorize()[0]
+    
+    # Create environment
+    env = StockTradingEnv(df=train_data, **env_kwargs)
+    
+    # For single process environment
+    env_train = DummyVecEnv([lambda: env])
+    
+    return env_train
+
 def train_dqn_agent(args):
     """
     Train the DQN agent.
@@ -187,7 +334,10 @@ def train_dqn_agent(args):
         Command line arguments
     """
     # Set seeds for reproducibility
-    set_seeds(args.seed)
+    if args.use_finrl:
+        set_random_seed(args.seed)
+    else:
+        set_seeds(args.seed)
     
     # Set device
     use_cuda = torch.cuda.is_available() and (args.device == 'cuda' or args.use_amp)
@@ -269,12 +419,192 @@ def train_dqn_agent(args):
     data_length = len(next(iter(market_data.values())))  # Get length from first timeframe
     logger.info(f"Data loaded, {data_length} samples found")
 
+    # Choose between FinRL and custom implementation
+    if args.use_finrl:
+        logger.info("Using FinRL framework for training")
+        return train_with_finrl(args, market_data, device)
+    else:
+        logger.info("Using custom DQN implementation for training")
+        return train_with_custom_dqn(args, market_data, data_length, device)
+
+def train_with_finrl(args, market_data, device):
+    """
+    Train using FinRL framework.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    market_data : dict
+        Market data dictionary with different timeframes
+    device : str
+        Device to use (cpu or cuda)
+    
+    Returns:
+    --------
+    episode_rewards : list
+        List of episode rewards
+    episode_balances : list
+        List of episode balances
+    episode_trade_counts : list
+        List of episode trade counts
+    """
+    # Process data for FinRL
+    processed_data = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
+    logger.info(f"Data processed for FinRL: {processed_data.shape}")
+    
+    # Create FinRL environment
+    logger.info("Creating FinRL environment")
+    env_train = create_finrl_env(processed_data, args)
+    
+    # Create directory for saving models
+    save_dir = os.path.join(args.save_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(save_dir, exist_ok=True)
+    logger.info(f"Model checkpoints will be saved to {save_dir}")
+    
+    # Create model using the selected algorithm
+    logger.info(f"Creating FinRL agent with {args.finrl_model.upper()} algorithm")
+    
+    # Parse network architecture
+    try:
+        net_arch = eval(args.net_arch)  # Convert string representation to actual list
+    except:
+        net_arch = [256, 256]  # Default if parsing fails
+        logger.warning(f"Failed to parse net_arch, using default: {net_arch}")
+    
+    # Initialize DRL agent
+    drl_agent = DRLAgent(env=env_train)
+    
+    # Train model with the selected algorithm
+    model_params = {
+        "learning_rate": args.learning_rate,
+        "batch_size": args.batch_size,
+        "gamma": args.gamma,
+        "policy_kwargs": {"net_arch": net_arch},
+        "verbose": 1 if args.verbose else 0,
+        "tensorboard_log": args.tensorboard_log,
+        "device": device
+    }
+    
+    # Choose the appropriate algorithm
+    if args.finrl_model == 'dqn':
+        model, _ = drl_agent.train_DQN(
+            model_name="DQN",
+            model_kwargs=model_params,
+            total_timesteps=args.total_timesteps
+        )
+    elif args.finrl_model == 'ppo':
+        model, _ = drl_agent.train_PPO(
+            model_name="PPO",
+            model_kwargs=model_params,
+            total_timesteps=args.total_timesteps
+        )
+    elif args.finrl_model == 'a2c':
+        model, _ = drl_agent.train_A2C(
+            model_name="A2C",
+            model_kwargs=model_params,
+            total_timesteps=args.total_timesteps
+        )
+    elif args.finrl_model == 'ddpg':
+        model, _ = drl_agent.train_DDPG(
+            model_name="DDPG",
+            model_kwargs=model_params,
+            total_timesteps=args.total_timesteps
+        )
+    elif args.finrl_model == 'td3':
+        model, _ = drl_agent.train_TD3(
+            model_name="TD3",
+            model_kwargs=model_params,
+            total_timesteps=args.total_timesteps
+        )
+    elif args.finrl_model == 'sac':
+        model, _ = drl_agent.train_SAC(
+            model_name="SAC",
+            model_kwargs=model_params,
+            total_timesteps=args.total_timesteps
+        )
+    
+    # Save the final model
+    model_path = os.path.join(save_dir, f"finrl_{args.finrl_model}_final.zip")
+    model.save(model_path)
+    logger.info(f"Model saved to {model_path}")
+    
+    # Run evaluation and calculate performance metrics
+    logger.info("Evaluating model performance...")
+    
+    # Prepare test data
+    test_slice = int(0.15 * len(processed_data))  # Use last 15% for testing
+    test_data = processed_data.iloc[-test_slice:].copy()
+    
+    # Create test environment
+    env_test = create_finrl_env(test_data, args, env_id=1)
+    
+    # Run test
+    df_account_value, df_actions = drl_agent.DRL_prediction(
+        model=model,
+        environment=env_test
+    )
+    
+    # Calculate performance metrics
+    sharpe_ratio = (252**0.5) * df_account_value['daily_return'].mean() / (df_account_value['daily_return'].std() + 1e-9)
+    annual_return = ((df_account_value['daily_return'].mean() + 1) ** 252 - 1) * 100
+    
+    logger.info(f"Sharpe Ratio: {sharpe_ratio:.4f}")
+    logger.info(f"Annual Return: {annual_return:.2f}%")
+    
+    # Create return lists to match the custom implementation
+    episode_rewards = [annual_return]
+    episode_balances = [df_account_value['account_value'].iloc[-1]]
+    episode_trade_counts = [len(df_actions)]
+    
+    # Plot performance
+    plt.figure(figsize=(10, 6))
+    plt.plot(df_account_value['account_value'])
+    plt.title('Account Value During Test')
+    plt.xlabel('Steps')
+    plt.ylabel('Account Value ($)')
+    plt.grid(True)
+    plt.savefig(os.path.join(save_dir, 'account_value.png'))
+    plt.close()
+    
+    # Save results
+    df_account_value.to_csv(os.path.join(save_dir, 'account_value.csv'))
+    df_actions.to_csv(os.path.join(save_dir, 'actions.csv'))
+    
+    logger.info("FinRL training and evaluation completed!")
+    return episode_rewards, episode_balances, episode_trade_counts
+
+def train_with_custom_dqn(args, market_data, data_length, device):
+    """
+    Train using custom DQN implementation.
+    This is the original training code.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    market_data : dict
+        Market data dictionary with different timeframes
+    data_length : int
+        Length of data
+    device : str
+        Device to use (cpu or cuda)
+    
+    Returns:
+    --------
+    episode_rewards : list
+        List of episode rewards
+    episode_balances : list
+        List of episode balances
+    episode_trade_counts : list
+        List of episode trade counts
+    """
     # Create multiple environments for parallel training
     logger.info(f"Creating {args.num_workers} environments")
     envs = []
     for i in range(args.num_workers):
         env = TradingEnvironment(
-            data_path=h5_file_path,
+            data_path=os.path.join(args.data_dir, "train_data.h5"),
             window_size=args.window_size,
             initial_balance=args.initial_balance,
             transaction_fee=args.transaction_fee,
@@ -296,7 +626,7 @@ def train_dqn_agent(args):
     agent = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
-        hidden_dims=[512, 256], # Increase network capacity
+        hidden_dims=[512, 256],  # Increase network capacity
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         epsilon_start=args.epsilon_start,
@@ -623,7 +953,7 @@ def train_dqn_agent(args):
                 try:
                     gpu_mem = torch.cuda.memory_reserved() / torch.cuda.get_device_properties(0).total_memory * 100
                     gpu_util = f", GPU:{gpu_mem:.1f}%"
-                except:
+                except Exception:
                     pass
             
             # Initialize current_batch_size for the progress bar
@@ -724,7 +1054,7 @@ def train_dqn_agent(args):
         avg_return_per_trade = sum(trade_returns) / len(trade_returns)
         winning_rate = good_trades_count / max(1, good_trades_count + bad_trades_count) * 100
         
-        logger.info(f"Trading Statistics Summary:")
+        logger.info("Trading Statistics Summary:")
         logger.info(f"Total Trades: {len(trade_returns)}")
         logger.info(f"Good Trades: {good_trades_count} ({winning_rate:.1f}%)")
         logger.info(f"Bad Trades: {bad_trades_count} ({100-winning_rate:.1f}%)")

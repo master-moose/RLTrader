@@ -1,19 +1,19 @@
 # Base packages
 numpy>=1.20.0
 pandas>=1.3.0
-scipy==1.10.1
-matplotlib>=3.4.0
+scipy>=1.7.3
+matplotlib>=3.5.0
 seaborn>=0.11.0
-scikit-learn>=1.0.0
+scikit-learn>=1.0.2
 pandas-ta==0.3.14b0
-h5py>=3.1.0
+h5py>=3.6.0
 jupyter>=1.0.0
-tqdm>=4.60.0
+tqdm>=4.62.0
 pytest==7.3.1
 joblib==1.2.0
 
 # Deep learning
-torch>=1.8.0
+torch>=1.10.0
 torchvision>=0.15.0
 pytorch-lightning>=1.7.0
 torchmetrics>=0.11.0
@@ -21,12 +21,12 @@ lightning-bolts>=0.6.0
 
 # Time series and financial libraries
 ta>=0.10.0         # Technical indicators
-yfinance>=0.2.10
+yfinance>=0.1.70
 imbalanced-learn>=0.10.0
 
 # For reinforcement learning
-gymnasium>=0.28.0
-stable-baselines3>=2.0.0
+gym>=0.21.0,<0.24.0
+stable-baselines3>=1.6.0
 
 # For logging and experiment tracking
 tensorboard>=2.10.0
@@ -59,4 +59,10 @@ py-cpuinfo>=9.0.0
 ipywidgets>=7.6.0  # Interactive widgets for notebooks
 
 # GPU acceleration (conditional based on platform)
-cupy-cuda12x>=13.0.0; platform_system != "Darwin" 
+cupy-cuda12x>=13.0.0; platform_system != "Darwin"
+
+# FinRL-specific dependencies
+finrl>=0.3.5
+pyfolio>=0.9.2
+gymnasium>=0.26.0
+psutil>=5.9.0 
