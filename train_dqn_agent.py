@@ -21,75 +21,22 @@ from concurrent.futures import ThreadPoolExecutor
 import psutil
 import h5py
 import pandas as pd
+import sys
+import gym
+from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+from finrl.meta.data_processors.processor_cryptocurrencies import (
+    CryptocurrencyTradingEnv,
+)
+from finrl.meta.env_cryptocurrency_trading.env_multiple_crypto import CryptoEnv
+from finrl.agents.stablebaselines3 import DRLAgent
+from finrl.config import INDICATORS
+from stable_baselines3.common.logger import configure
 
-# FinRL imports
-try:
-    # Try the first path (for newer versions)
-    from finrl.applications.cryptocurrency_trading.cryptocurrency_trading import (
-        CryptocurrencyTradingEnv
-    )
-except ImportError:
-    try:
-        # Try the meta structure (for 0.3.5+)
-        from finrl.meta.env_cryptocurrency_trading.env_cryptocurrency import (
-            CryptocurrencyTradingEnv
-        )
-    except ImportError:
-        try:
-            # Try another possible path
-            from finrl.env_cryptocurrency_trading.env_cryptocurrency import (
-                CryptocurrencyTradingEnv
-            )
-        except ImportError:
-            # If all else fails, use stock trading env as fallback
-            from finrl.meta.env_stock_trading.env_stocktrading import (
-                StockTradingEnv as CryptocurrencyTradingEnv
-            )
-
-# Try different possible paths for DRLAgent
-try:
-    # For newer versions
-    from finrl.applications.models import DRLAgent as FinRLAgent
-except ImportError:
-    try:
-        # For 0.3.5+
-        from finrl.meta.data_processors.data_processor import DataProcessor
-        from finrl.meta.data_processors.preprocessor import FeatureEngineer
-        from finrl.drl.stable_baselines3.models import DRLAgent as FinRLAgent
-    except ImportError:
-        try:
-            from finrl.drl.models import DRLAgent as FinRLAgent
-        except ImportError:
-            # Last resort
-            from stable_baselines3.common.base_class import BaseAlgorithm as FinRLAgent
-            print("WARNING: Using BaseAlgorithm from stable-baselines3 as a fallback for FinRLAgent")
-
-# Try importing INDICATORS from different locations
-try:
-    from finrl.config import INDICATORS
-except ImportError:
-    try:
-        from finrl.meta.config import INDICATORS
-    except ImportError:
-        # Define basic indicators if we can't import them
-        INDICATORS = ['macd', 'rsi', 'cci', 'dx']
-        print(f"WARNING: Using default indicators: {INDICATORS}")
-
-# Try importing FeatureEngineer from different locations
-try:
-    from finrl.preprocessing.preprocessors import FeatureEngineer
-except ImportError:
-    try:
-        from finrl.meta.data_processors.preprocessor import FeatureEngineer
-    except ImportError:
-        try:
-            from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-        except ImportError:
-            # We already tried to import above, if we reach here we'll use a stub
-            pass
-
-from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.utils import set_random_seed
+from utils.notifications import send_telegram_notification
+from utils.logs import setup_logging
+from utils.hdf5_utils import load_data_from_hdf5
+from utils.time_measurement import timeit
+from utils.device_info import get_device_info
 
 # Original imports
 from crypto_trading_model.dqn_agent import DQNAgent
@@ -186,8 +133,13 @@ def parse_args():
     # FinRL specific options
     parser.add_argument('--use_finrl', action='store_true',
                         help='Use FinRL framework for training')
-    parser.add_argument('--finrl_model', type=str, choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
-                        default='dqn', help='FinRL algorithm to use')
+    parser.add_argument(
+        '--finrl_model', 
+        type=str, 
+        choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
+        default='dqn', 
+        help='FinRL algorithm to use'
+    )
     parser.add_argument('--net_arch', type=str, default='[256,256]',
                         help='Network architecture for FinRL models')
     parser.add_argument('--tensorboard_log', type=str, default='./tensorboard_logs',
@@ -333,38 +285,52 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
     if 'tic' not in df.columns:
         df['tic'] = 'CRYPTO'
     
-    # Reset the index to get the index as a column if it's not already a column
-    df.reset_index(inplace=True)
+    # Check if we need to reset the index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        # Reset the index to get the index as a column if it's not already a column
+        df = df.reset_index()
     
-    # Create a date column from timestamp or index, or create a synthetic one
-    if 'timestamp' in df.columns:
-        df['date'] = pd.to_datetime(df['timestamp'])
-    elif 'index' in df.columns and pd.api.types.is_datetime64_any_dtype(df['index']):
-        df['date'] = pd.to_datetime(df['index'])
-    else:
-        # Create synthetic dates
-        logger.info("Creating synthetic dates for the data")
-        df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
+    # Make sure we have a date column
+    if 'date' not in df.columns:
+        # Create a date column from timestamp or index, or create a synthetic one
+        if 'timestamp' in df.columns:
+            df['date'] = pd.to_datetime(df['timestamp'])
+        elif 'index' in df.columns and pd.api.types.is_datetime64_any_dtype(df['index']):
+            df['date'] = pd.to_datetime(df['index'])
+        else:
+            # Create synthetic dates
+            logger.info("Creating synthetic dates for the data")
+            df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
     
     # Ensure date is a datetime type
     df['date'] = pd.to_datetime(df['date'])
     
     # Manually add some technical indicators to avoid FinRL preprocessing errors
     logger.info("Adding basic technical indicators manually")
-    df['macd'] = df['close'].ewm(span=12).mean() - df['close'].ewm(span=26).mean()
-    df['rsi'] = 100 - (100 / (1 + (df['close'].diff().clip(lower=0).rolling(window=14).sum() / 
-                                  abs(df['close'].diff().clip(upper=0)).rolling(window=14).sum())))
-    df['cci'] = (df['close'] - df['close'].rolling(window=20).mean()) / (0.015 * df['close'].rolling(window=20).std())
-    df['dx'] = abs(df['close'].diff()) / df['close'] * 100
+    # Calculate technical indicators on a safe copy to avoid SettingWithCopyWarning
+    df_safe = df.copy()
+    df_safe['macd'] = df_safe['close'].ewm(span=12).mean() - df_safe['close'].ewm(span=26).mean()
+    df_safe['rsi'] = 100 - (100 / (1 + (
+        df_safe['close'].diff().clip(lower=0).rolling(window=14).sum() / 
+        abs(df_safe['close'].diff().clip(upper=0)).rolling(window=14).sum()
+    )))
+    df_safe['cci'] = (
+        df_safe['close'] - df_safe['close'].rolling(window=20).mean()
+    ) / (0.015 * df_safe['close'].rolling(window=20).std())
+    df_safe['dx'] = abs(df_safe['close'].diff()) / df_safe['close'] * 100
     
-    # Set the index back to date for compatibility with FinRL
-    df.set_index('date', inplace=True)
+    # Copy calculated indicators back to original dataframe
+    for col in ['macd', 'rsi', 'cci', 'dx']:
+        df[col] = df_safe[col]
     
-    # Add a date column even with date index (FinRL expects both)
-    df['date'] = df.index
+    # Set the index to date for FinRL compatibility
+    # If the date column already exists as index, this will be a no-op
+    if df.index.name != 'date':
+        df = df.set_index('date')
     
-    # Calculate additional technical indicators using FinRL
+    # Try to use FinRL's feature engineering
     try:
+        # Create FeatureEngineer
         fe = FeatureEngineer(
             use_technical_indicator=True,
             tech_indicator_list=INDICATORS,
@@ -375,10 +341,13 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
         
         try:
             logger.info("Attempting to preprocess data with FinRL's FeatureEngineer")
-            processed = fe.preprocess_data(df.reset_index())
+            # Reset index but drop the index column to avoid duplicate 'date'
+            # Then FinRL will process the date column that already exists
+            temp_df = df.reset_index(drop=True)
+            processed = fe.preprocess_data(temp_df)
             logger.info(f"Processed data with shape: {processed.shape}")
             
-            # Ensure we have a date column even after preprocessing
+            # Ensure we have a date column
             if 'date' not in processed.columns:
                 logger.warning("FinRL preprocessing removed date column, adding it back")
                 processed['date'] = df.index.values
@@ -389,13 +358,36 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
             logger.error(traceback.format_exc())
             
             # Return our manually preprocessed dataframe
-            logger.info("Falling back to manually preprocessed data")
-            return df.reset_index()
+            # Reset index with drop=True to avoid duplicate 'date' column
+            df_result = df.copy()
+            # Make sure date column exists after reset
+            df_result = df_result.reset_index()
+            # Rename duplicated date column if needed
+            if 'date' in df_result.columns and df_result.index.name == 'date':
+                df_result = df_result.rename_axis(None)
+            return df_result
     except Exception as e:
         logger.error(f"Error setting up feature engineering: {e}")
         # Return dataframe with added date and technical indicators
         logger.info("Using basic dataframe with manual indicators")
-        return df.reset_index()
+        # Reset the index and ensure we return a dataframe with a date column
+        try:
+            # Try first with dropping the index to avoid duplicates
+            result_df = df.reset_index(drop=False)
+            # If date column already exists as regular column (not just index)
+            if 'date' in result_df.columns and result_df.index.name == 'date':
+                # Rename the index to avoid conflicts on next reset
+                result_df = result_df.rename_axis(None)
+            return result_df
+        except ValueError:
+            # If that fails, try with a different approach
+            # Copy to avoid modifying the original during reset
+            result_df = df.copy()
+            # If we have a date index and a date column, rename the column
+            if result_df.index.name == 'date' and 'date' in result_df.columns:
+                result_df = result_df.rename(columns={'date': 'date_col'})
+            # Then reset index safely
+            return result_df.reset_index()
 
 def create_finrl_env(processed_data, args, env_id=0):
     """
