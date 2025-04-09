@@ -175,6 +175,9 @@ class TradingEnvironment:
         self.position_size = 0.0  # Store quantity of asset held or sold short
         self.position_history = [0] * self.lookback_window
         
+        # Initialize previous balance for reward calculation
+        self.previous_balance = self.initial_balance
+        
         # Reset metrics
         self.total_trades = 0
         self.total_profit = 0.0
@@ -506,21 +509,47 @@ class TradingEnvironment:
         
         # Combine all reward components
         reward = (
-            portfolio_change * 5.0 +       # Main component with increased weight (from 3.0)
-            trade_penalty +
-            cooldown_penalty +
+            portfolio_change * 10.0 +      # Doubled weight from 5.0 to emphasize portfolio growth
+            trade_penalty * 0.5 +          # Reduced impact of trade penalty by 50%
+            cooldown_penalty * 0.5 +       # Reduced impact of cooldown penalty by 50%
             hold_reward +
             trend_reward +
             position_reward +
-            holding_loss_penalty +
-            profit_reward +
-            balance_reward +
-            low_balance_penalty +
-            stop_loss_penalty              # New component
+            holding_loss_penalty * 0.5 +   # Reduced impact of loss penalty by 50%
+            profit_reward * 2.0 +          # Doubled profit reward to encourage profitable trades
+            balance_reward * 2.0 +         # Doubled balance reward to emphasize account growth
+            low_balance_penalty * 0.5 +    # Reduced impact of balance penalty by 50%
+            stop_loss_penalty * 0.5        # Reduced impact of stop loss penalty by 50%
         ) * self.reward_scaling
         
+        # Add a direct reward based on balance change to ensure positive rewards for increasing balance
+        balance_change_reward = 0
+        if hasattr(self, 'previous_balance'):
+            balance_change = (self.balance - self.previous_balance) / self.initial_balance
+            balance_change_reward = max(0, balance_change * 15.0) * self.reward_scaling
+            # Only add positive balance changes to avoid double-penalizing
+            reward += balance_change_reward
+        
+        # Store current balance for next step comparison
+        self.previous_balance = self.balance
+        
         # Apply reward clipping to handle extreme values - less aggressive clipping
-        reward = np.clip(reward, -0.5, 0.5)  # Changed from (-1.0, 1.0) to be less extreme
+        reward = np.clip(reward, -0.25, 0.5)  # Changed from (-0.5, 0.5) to be less negative
+        
+        # Add debug logging for reward components when in verbose mode
+        if self.verbose and (trade_executed or self.current_step % 100 == 0):
+            logger.info(f"Reward breakdown - Total: {reward:.4f} = Portfolio: {portfolio_change * 10.0 * self.reward_scaling:.4f} + "
+                      f"Trade: {trade_penalty * 0.5 * self.reward_scaling:.4f} + "
+                      f"Cooldown: {cooldown_penalty * 0.5 * self.reward_scaling:.4f} + "
+                      f"Hold: {hold_reward * self.reward_scaling:.4f} + "
+                      f"Trend: {trend_reward * self.reward_scaling:.4f} + "
+                      f"Position: {position_reward * self.reward_scaling:.4f} + "
+                      f"Loss: {holding_loss_penalty * 0.5 * self.reward_scaling:.4f} + "
+                      f"Profit: {profit_reward * 2.0 * self.reward_scaling:.4f} + "
+                      f"Balance: {balance_reward * 2.0 * self.reward_scaling:.4f} + "
+                      f"LowBal: {low_balance_penalty * 0.5 * self.reward_scaling:.4f} + "
+                      f"StopLoss: {stop_loss_penalty * 0.5 * self.reward_scaling:.4f} + "
+                      f"BalChg: {balance_change_reward:.4f}")
         
         # Track returns for visualization
         self.returns.append(reward)
