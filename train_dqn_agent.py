@@ -30,6 +30,10 @@ from crypto_trading_model.utils import set_seeds
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Define trade evaluation constants
+GOOD_TRADE_THRESHOLD = 0.001  # 0.1% profit threshold for a good trade
+BAD_TRADE_THRESHOLD = -0.001  # -0.1% loss threshold for a bad trade
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Train a DQN agent for cryptocurrency trading')
@@ -316,6 +320,11 @@ def train_dqn_agent(args):
     episode_balances = []
     episode_trade_counts = []
     
+    # Add trade quality tracking
+    good_trades_count = 0
+    bad_trades_count = 0
+    trade_returns = []  # Track returns of each trade for overfitting detection
+    
     # Save directory
     save_dir = os.path.join(args.save_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
     os.makedirs(save_dir, exist_ok=True)
@@ -421,6 +430,13 @@ def train_dqn_agent(args):
         steps_per_env = [0] * args.num_workers
         active_envs = args.num_workers
         
+        # Track trade quality for this episode
+        episode_good_trades = 0
+        episode_bad_trades = 0
+        episode_neutral_trades = 0
+        last_trade_prices = [None] * args.num_workers
+        last_positions = [0] * args.num_workers
+        
         # Episode loop
         progress_bar = tqdm(total=args.episode_length, 
                            desc=f"Episode {episode}/{args.episodes}", 
@@ -455,6 +471,53 @@ def train_dqn_agent(args):
                     balances.append(infos[i].get('balance', 0))
                     trade_counts.append(infos[i].get('total_trades', 0))
                     
+                    # Track trade quality
+                    current_position = infos[i].get('position', 0)
+                    current_price = infos[i].get('price', 0)
+                    
+                    # Check if a trade was made
+                    if current_position != last_positions[i]:
+                        # A position change occurred (trade was made)
+                        if last_trade_prices[i] is not None and last_positions[i] != 0:
+                            # Calculate trade return only when closing a position
+                            if current_position == 0:
+                                # Calculate return based on position direction
+                                if last_positions[i] > 0:  # Was long, now closed
+                                    trade_return = (current_price / last_trade_prices[i]) - 1 - args.transaction_fee
+                                else:  # Was short, now closed
+                                    trade_return = (last_trade_prices[i] / current_price) - 1 - args.transaction_fee
+                                
+                                # Classify the trade
+                                if trade_return > GOOD_TRADE_THRESHOLD:
+                                    episode_good_trades += 1
+                                    good_trades_count += 1
+                                    if args.verbose:
+                                        logger.info(f"Environment {i} - GOOD TRADE: Return={trade_return:.4f}, " 
+                                                   f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
+                                                   f"Position={last_positions[i]}")
+                                elif trade_return < BAD_TRADE_THRESHOLD:
+                                    episode_bad_trades += 1
+                                    bad_trades_count += 1
+                                    if args.verbose:
+                                        logger.info(f"Environment {i} - BAD TRADE: Return={trade_return:.4f}, "
+                                                   f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
+                                                   f"Position={last_positions[i]}")
+                                else:
+                                    episode_neutral_trades += 1
+                                    if args.verbose:
+                                        logger.info(f"Environment {i} - NEUTRAL TRADE: Return={trade_return:.4f}, "
+                                                   f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
+                                                   f"Position={last_positions[i]}")
+                                
+                                trade_returns.append(trade_return)
+                                
+                        # Update last trade price when opening a new position
+                        if current_position != 0:
+                            last_trade_prices[i] = current_price
+                    
+                    # Update last position
+                    last_positions[i] = current_position
+                    
                     episode_rewards_per_env[i] += rewards[i]
                     steps_per_env[i] += 1
                     
@@ -481,7 +544,8 @@ def train_dqn_agent(args):
                            f"Balance={infos[i].get('balance', 0):.2f}, "
                            f"Position={infos[i].get('position', 0)}, "
                            f"Trades={infos[i].get('total_trades', 0)}, "
-                           f"Price={infos[i].get('price', 0):.2f}")
+                           f"Price={infos[i].get('price', 0):.2f}, "
+                           f"Good/Bad/Neutral={episode_good_trades}/{episode_bad_trades}/{episode_neutral_trades}")
             
             # Update states and dones
             states = next_states
@@ -588,6 +652,29 @@ def train_dqn_agent(args):
         episode_profit = sum(env.balance - args.initial_balance for env in envs) / args.num_workers
         episode_trade_count = sum(env.info.get('total_trades', 0) if hasattr(env, 'info') else 0 for env in envs) / args.num_workers
         
+        # Calculate trade quality metrics
+        total_trades = episode_good_trades + episode_bad_trades + episode_neutral_trades
+        good_trade_pct = (episode_good_trades / max(1, total_trades)) * 100
+        bad_trade_pct = (episode_bad_trades / max(1, total_trades)) * 100
+        
+        # Detect overfitting by analyzing trade returns distribution
+        if len(trade_returns) > 20:  # Need a minimum number of trades for analysis
+            recent_returns = trade_returns[-20:]  # Look at recent trades
+            avg_return = sum(recent_returns) / len(recent_returns)
+            std_return = np.std(recent_returns) if len(recent_returns) > 1 else 0
+            
+            # Calculate Sharpe-like ratio (return / volatility)
+            sharpe_ratio = avg_return / (std_return + 1e-6)  # Add small constant to avoid division by zero
+            
+            # Check for overfitting signals
+            if avg_return < -0.005 and sharpe_ratio < -0.5:
+                logger.warning(f"Potential overfitting detected at episode {episode}: "
+                             f"Average return: {avg_return:.4f}, StdDev: {std_return:.4f}, "
+                             f"Sharpe: {sharpe_ratio:.2f}")
+                
+                if args.verbose:
+                    logger.info(f"Recent trade returns: {recent_returns}")
+        
         # Store episode metrics
         episode_rewards.append(episode_reward)
         episode_balances.append(episode_profit)
@@ -625,7 +712,9 @@ def train_dqn_agent(args):
         # Log episode results
         logger.info(f"Episode {episode}/{args.episodes} - "
                    f"Reward: {episode_reward:.2f}, Profit: {episode_profit:.2f}, "
-                   f"Trades: {episode_trade_count:.2f}, Epsilon: {agent.epsilon:.4f}, "
+                   f"Trades: {episode_trade_count:.2f}, Good/Bad: {episode_good_trades}/{episode_bad_trades} "
+                   f"({good_trade_pct:.1f}%/{bad_trade_pct:.1f}%), "
+                   f"Epsilon: {agent.epsilon:.4f}, "
                    f"Memory: {len(agent.memory)}, Updates: {total_updates}")
         
         # Evaluate model every few episodes
@@ -633,6 +722,28 @@ def train_dqn_agent(args):
             # TODO: Implement evaluation
             pass
     
+    # Final trading statistics
+    if len(trade_returns) > 0:
+        avg_return_per_trade = sum(trade_returns) / len(trade_returns)
+        winning_rate = good_trades_count / max(1, good_trades_count + bad_trades_count) * 100
+        
+        logger.info(f"Trading Statistics Summary:")
+        logger.info(f"Total Trades: {len(trade_returns)}")
+        logger.info(f"Good Trades: {good_trades_count} ({winning_rate:.1f}%)")
+        logger.info(f"Bad Trades: {bad_trades_count} ({100-winning_rate:.1f}%)")
+        logger.info(f"Average Return per Trade: {avg_return_per_trade:.4f}")
+        
+        if args.verbose:
+            # Calculate additional statistics
+            max_return = max(trade_returns) if trade_returns else 0
+            min_return = min(trade_returns) if trade_returns else 0
+            std_return = np.std(trade_returns) if len(trade_returns) > 1 else 0
+            
+            logger.info(f"Best Trade: {max_return:.4f}")
+            logger.info(f"Worst Trade: {min_return:.4f}")
+            logger.info(f"Return StdDev: {std_return:.4f}")
+            logger.info(f"Sharpe-like Ratio: {(avg_return_per_trade / (std_return + 1e-6)):.2f}")
+            
     logger.info("Training completed!")
     return episode_rewards, episode_balances, episode_trade_counts
 

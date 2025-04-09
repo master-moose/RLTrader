@@ -22,7 +22,7 @@
     },
     "model": {
         "type": "multi_timeframe",
-        "hidden_dims": 256,
+        "hidden_dims": 512,
         "num_layers": 3,
         "dropout": 0.3,
         "bidirectional": true,
@@ -37,8 +37,8 @@
     "training": {
         "epochs": 100,
         "batch_size": 1024,
-        "learning_rate": 0.0001,
-        "weight_decay": 1e-5,
+        "learning_rate": 1e-6,
+        "weight_decay": 1e-7,
         "patience": 15,
         "scheduler_factor": 0.5,
         "scheduler_patience": 5,
