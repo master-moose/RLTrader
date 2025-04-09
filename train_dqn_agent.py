@@ -260,7 +260,7 @@ def load_lstm_model(model_path, device):
         logger.error(traceback.format_exc())
         raise
 
-def prepare_crypto_data_for_finrl(market_data, primary_timeframe='1h'):
+def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
     """
     Convert crypto data to format that FinRL can use.
     
@@ -268,20 +268,50 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe='1h'):
     -----------
     market_data : dict
         Dictionary containing market data for different timeframes
-    primary_timeframe : str
-        Primary timeframe to use
+    primary_timeframe : str, optional
+        Primary timeframe to use, defaults to '15m' if available, 
+        otherwise selects the shortest available timeframe
         
     Returns:
     --------
     df : pd.DataFrame
         Processed data in FinRL format
     """
+    # Default to 15m if available, otherwise use the first available timeframe
+    available_timeframes = list(market_data.keys())
+    logger.info(f"Available timeframes: {available_timeframes}")
+    
+    if primary_timeframe is None:
+        # Prefer 15m as base timeframe if available
+        if '15m' in available_timeframes:
+            primary_timeframe = '15m'
+            logger.info(f"Using '15m' as the primary timeframe")
+        else:
+            # Sort timeframes and use the shortest one as base
+            try:
+                # Try to sort by timeframe duration
+                timeframe_minutes = {}
+                for tf in available_timeframes:
+                    if tf.endswith('m'):
+                        timeframe_minutes[tf] = int(tf[:-1])
+                    elif tf.endswith('h'):
+                        timeframe_minutes[tf] = int(tf[:-1]) * 60
+                    elif tf.endswith('d'):
+                        timeframe_minutes[tf] = int(tf[:-1]) * 60 * 24
+                
+                # Sort by duration and get the shortest timeframe
+                primary_timeframe = sorted(timeframe_minutes.items(), key=lambda x: x[1])[0][0]
+            except:
+                # If sorting fails, just use the first timeframe
+                primary_timeframe = available_timeframes[0]
+            
+            logger.info(f"Using '{primary_timeframe}' as the primary timeframe")
+    
     # Check if the requested timeframe exists, otherwise use a fallback
     if primary_timeframe not in market_data:
-        logger.warning(f"Requested timeframe '{primary_timeframe}' not found in data. "
-                      f"Available timeframes: {list(market_data.keys())}")
+        logger.warning(f"Requested timeframe '{primary_timeframe}' not found in data.")
         # Use the first available timeframe as fallback
-        primary_timeframe = list(market_data.keys())[0]
+        primary_timeframe = available_timeframes[0]
         logger.info(f"Using '{primary_timeframe}' as the fallback timeframe")
     
     # Get the primary timeframe data
@@ -501,134 +531,99 @@ def train_dqn_agent(args):
 
 def train_with_finrl(args, market_data, device):
     """
-    Train using FinRL framework.
+    Train a reinforcement learning agent for cryptocurrency trading using FinRL.
     
     Parameters:
     -----------
     args : argparse.Namespace
         Command line arguments
     market_data : dict
-        Market data dictionary with different timeframes
+        Dictionary containing market data for different timeframes
     device : str
-        Device to use (cpu or cuda)
-    
+        Device to use for training ('cpu' or 'cuda')
+        
     Returns:
     --------
-    episode_rewards : list
-        List of episode rewards
-    episode_balances : list
-        List of episode balances
-    episode_trade_counts : list
-        List of episode trade counts
+    agent : FinRLAgent
+        Trained FinRL agent
     """
+    logger.info("Using FinRL framework for training")
+    
     # Process data for FinRL
+    # For FinRL, we primarily use the base timeframe (15m if available)
+    # But we'll also incorporate features from higher timeframes later
     processed_data = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
-    logger.info(f"Data processed for FinRL: {processed_data.shape}")
     
-    # Create FinRL environment
-    logger.info("Creating FinRL environment")
-    env_train = create_finrl_env(processed_data, args)
+    # Create environment
+    env_train = create_finrl_env(processed_data, args, env_id=0)
     
-    # Create directory for saving models
-    save_dir = os.path.join(args.save_dir, datetime.now().strftime("%Y%m%d-%H%M%S"))
-    os.makedirs(save_dir, exist_ok=True)
-    logger.info(f"Model checkpoints will be saved to {save_dir}")
+    # Setup agent parameters
+    if args.finrl_model in ['sac', 'td3', 'ddpg']:
+        logger.info(f"Using continuous action space for {args.finrl_model}")
+        action_noise = True
+    else:
+        logger.info(f"Using discrete action space for {args.finrl_model}")
+        action_noise = False
     
-    # Create model using the selected algorithm
-    logger.info(f"Creating FinRL agent with {args.finrl_model.upper()} algorithm")
-    
-    # Parse network architecture
+    # Parse net_arch from string
     try:
-        net_arch = eval(args.net_arch)  # Convert string representation to actual list
+        net_arch = eval(args.net_arch)  # Convert string to list
     except:
-        net_arch = [256, 256]  # Default if parsing fails
-        logger.warning(f"Failed to parse net_arch, using default: {net_arch}")
+        logger.warning(f"Could not parse net_arch: {args.net_arch}, using default [256, 256]")
+        net_arch = [256, 256]
     
-    # Initialize DRL agent
-    drl_agent = FinRLAgent(env=env_train)
-    
-    # Train model with the selected algorithm
+    # Create model parameters
     model_params = {
-        "learning_rate": args.learning_rate,
-        "batch_size": args.batch_size,
-        "gamma": args.gamma,
-        "policy_kwargs": {"net_arch": net_arch},
-        "verbose": 1 if args.verbose else 0,
-        "tensorboard_log": args.tensorboard_log,
-        "device": device
+        'learning_rate': args.learning_rate,
+        'verbose': 1 if args.verbose else 0,
+        'policy': 'MlpPolicy',
+        'device': device
     }
     
-    # Choose the appropriate algorithm
-    if args.finrl_model == 'dqn':
-        model = drl_agent.get_model("dqn", model_kwargs=model_params)
-    elif args.finrl_model == 'ppo':
-        model = drl_agent.get_model("ppo", model_kwargs=model_params)
-    elif args.finrl_model == 'a2c':
-        model = drl_agent.get_model("a2c", model_kwargs=model_params)
-    elif args.finrl_model == 'ddpg':
-        model = drl_agent.get_model("ddpg", model_kwargs=model_params)
-    elif args.finrl_model == 'td3':
-        model = drl_agent.get_model("td3", model_kwargs=model_params)
-    elif args.finrl_model == 'sac':
-        model = drl_agent.get_model("sac", model_kwargs=model_params)
-    
-    # Train the model
-    logger.info(f"Training {args.finrl_model.upper()} model for {args.total_timesteps} timesteps")
-    trained_model = drl_agent.train_model(
-        model=model,
-        tb_log_name=args.finrl_model,
-        total_timesteps=args.total_timesteps
-    )
-    
-    # Save the final model
-    model_path = os.path.join(save_dir, f"finrl_{args.finrl_model}_final.zip")
-    trained_model.save(model_path)
-    logger.info(f"Model saved to {model_path}")
-    
-    # Run evaluation and calculate performance metrics
-    logger.info("Evaluating model performance...")
-    
-    # Prepare test data
-    test_slice = int(0.15 * len(processed_data))  # Use last 15% for testing
-    test_data = processed_data.iloc[-test_slice:].copy()
-    
-    # Create test environment
-    env_test = create_finrl_env(test_data, args, env_id=1)
-    
-    # Run test
-    df_account_value, df_actions = drl_agent.predict(
-        model=trained_model,
-        environment=env_test
-    )
-    
-    # Calculate performance metrics
-    sharpe_ratio = (252**0.5) * df_account_value['daily_return'].mean() / (df_account_value['daily_return'].std() + 1e-9)
-    annual_return = ((df_account_value['daily_return'].mean() + 1) ** 252 - 1) * 100
-    
-    logger.info(f"Sharpe Ratio: {sharpe_ratio:.4f}")
-    logger.info(f"Annual Return: {annual_return:.2f}%")
-    
-    # Create return lists to match the custom implementation
-    episode_rewards = [annual_return]
-    episode_balances = [df_account_value['account_value'].iloc[-1]]
-    episode_trade_counts = [len(df_actions)]
-    
-    # Plot performance
-    plt.figure(figsize=(10, 6))
-    plt.plot(df_account_value['account_value'])
-    plt.title('Account Value During Test')
-    plt.xlabel('Steps')
-    plt.ylabel('Account Value ($)')
-    plt.grid(True)
-    plt.savefig(os.path.join(save_dir, 'account_value.png'))
-    plt.close()
-    
-    # Save results
-    df_account_value.to_csv(os.path.join(save_dir, 'account_value.csv'))
-    df_actions.to_csv(os.path.join(save_dir, 'actions.csv'))
-    
-    logger.info("FinRL training and evaluation completed!")
-    return episode_rewards, episode_balances, episode_trade_counts
+    # Add specific parameters based on the model
+    if args.finrl_model in ['sac', 'td3', 'ddpg']:
+        # Continuous action space models might need action noise
+        if action_noise:
+            model_params['action_noise'] = 'normal'
+            
+    # Set network architecture if provided
+    if net_arch:
+        # For SAC and other continuous models, we might need to specify more details
+        if args.finrl_model == 'sac':
+            model_params['policy_kwargs'] = {
+                'net_arch': {
+                    'pi': net_arch,  # Policy network
+                    'qf': net_arch   # Q-function network
+                }
+            }
+        else:
+            # For other models, simpler net_arch specification
+            model_params['policy_kwargs'] = {'net_arch': net_arch}
+
+    # Create and train the model
+    try:
+        logger.info(f"Creating {args.finrl_model.upper()} model with FinRL")
+        agent = FinRLAgent(env=env_train)
+        
+        # Get the model based on the selected algorithm
+        model = agent.get_model(args.finrl_model, model_kwargs=model_params)
+        
+        # Train the model
+        logger.info(f"Training {args.finrl_model.upper()} model for {args.total_timesteps} timesteps...")
+        trained_model = agent.train_model(model=model, 
+                                         tb_log_name=f"{args.finrl_model}",
+                                         total_timesteps=args.total_timesteps)
+        
+        # Save the trained model
+        model_save_path = os.path.join(args.save_dir, f"{args.finrl_model}_model")
+        trained_model.save(model_save_path)
+        logger.info(f"Model saved to {model_save_path}")
+        
+        return trained_model
+    except Exception as e:
+        logger.error(f"Error during FinRL training: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
 
 def train_with_custom_dqn(args, market_data, data_length, device):
     """
