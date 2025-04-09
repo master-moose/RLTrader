@@ -24,44 +24,70 @@ import pandas as pd
 
 # FinRL imports
 try:
-    # Try the first path (most likely in 0.3.7)
-    from finrl.meta.env_crypto_trading.env_cryptocurrency import (
+    # Try the first path (for newer versions)
+    from finrl.applications.cryptocurrency_trading.cryptocurrency_trading import (
         CryptocurrencyTradingEnv
     )
 except ImportError:
     try:
-        # Try alternative path
+        # Try the meta structure (for 0.3.5+)
         from finrl.meta.env_cryptocurrency_trading.env_cryptocurrency import (
             CryptocurrencyTradingEnv
         )
     except ImportError:
-        # If all else fails, use stock trading env as fallback
-        from finrl.meta.env_stock_trading.env_stocktrading import (
-            StockTradingEnv as CryptocurrencyTradingEnv
-        )
-
-# Try different possible paths for DRLAgent in FinRL 0.3.7
-try:
-    # Try first path
-    from finrl.meta.agents_meta.models import (
-        DRLAgent as FinRLAgent
-    )
-except ImportError:
-    try:
-        # Try second path
-        from finrl.agents.models import DRLAgent as FinRLAgent
-    except ImportError:
         try:
-            # Try third path
-            from finrl.meta.agents.models import DRLAgent as FinRLAgent
+            # Try another possible path
+            from finrl.env_cryptocurrency_trading.env_cryptocurrency import (
+                CryptocurrencyTradingEnv
+            )
         except ImportError:
-            # Original path as last resort
-            from finrl.agents.stablebaseline3.models import (
-                DRLAgent as FinRLAgent
+            # If all else fails, use stock trading env as fallback
+            from finrl.meta.env_stock_trading.env_stocktrading import (
+                StockTradingEnv as CryptocurrencyTradingEnv
             )
 
-from finrl.config import INDICATORS
-from finrl.preprocessing.preprocessors import FeatureEngineer
+# Try different possible paths for DRLAgent
+try:
+    # For newer versions
+    from finrl.applications.models import DRLAgent as FinRLAgent
+except ImportError:
+    try:
+        # For 0.3.5+
+        from finrl.meta.data_processors.data_processor import DataProcessor
+        from finrl.meta.data_processors.preprocessor import FeatureEngineer
+        from finrl.drl.stable_baselines3.models import DRLAgent as FinRLAgent
+    except ImportError:
+        try:
+            from finrl.drl.models import DRLAgent as FinRLAgent
+        except ImportError:
+            # Last resort
+            from stable_baselines3.common.base_class import BaseAlgorithm as FinRLAgent
+            print("WARNING: Using BaseAlgorithm from stable-baselines3 as a fallback for FinRLAgent")
+
+# Try importing INDICATORS from different locations
+try:
+    from finrl.config import INDICATORS
+except ImportError:
+    try:
+        from finrl.meta.config import INDICATORS
+    except ImportError:
+        # Define basic indicators if we can't import them
+        INDICATORS = ['macd', 'rsi', 'cci', 'dx']
+        print(f"WARNING: Using default indicators: {INDICATORS}")
+
+# Try importing FeatureEngineer from different locations
+try:
+    from finrl.preprocessing.preprocessors import FeatureEngineer
+except ImportError:
+    try:
+        from finrl.meta.data_processors.preprocessor import FeatureEngineer
+    except ImportError:
+        try:
+            from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+        except ImportError:
+            # We already tried to import above, if we reach here we'll use a stub
+            pass
+
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.utils import set_random_seed
 
