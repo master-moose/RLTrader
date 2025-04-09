@@ -276,6 +276,14 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe='1h'):
     df : pd.DataFrame
         Processed data in FinRL format
     """
+    # Check if the requested timeframe exists, otherwise use a fallback
+    if primary_timeframe not in market_data:
+        logger.warning(f"Requested timeframe '{primary_timeframe}' not found in data. "
+                      f"Available timeframes: {list(market_data.keys())}")
+        # Use the first available timeframe as fallback
+        primary_timeframe = list(market_data.keys())[0]
+        logger.info(f"Using '{primary_timeframe}' as the fallback timeframe")
+    
     # Get the primary timeframe data
     df = market_data[primary_timeframe].copy()
     
