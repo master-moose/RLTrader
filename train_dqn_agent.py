@@ -491,23 +491,20 @@ def train_dqn_agent(args):
                                 if trade_return > GOOD_TRADE_THRESHOLD:
                                     episode_good_trades += 1
                                     good_trades_count += 1
-                                    if args.verbose:
-                                        logger.info(f"Environment {i} - GOOD TRADE: Return={trade_return:.4f}, " 
-                                                   f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
-                                                   f"Position={last_positions[i]}")
+                                    logger.info(f"Environment {i} - GOOD TRADE: Return={trade_return:.4f}, "
+                                                f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
+                                                f"Position={last_positions[i]}")
                                 elif trade_return < BAD_TRADE_THRESHOLD:
                                     episode_bad_trades += 1
                                     bad_trades_count += 1
-                                    if args.verbose:
-                                        logger.info(f"Environment {i} - BAD TRADE: Return={trade_return:.4f}, "
-                                                   f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
-                                                   f"Position={last_positions[i]}")
+                                    logger.info(f"Environment {i} - BAD TRADE: Return={trade_return:.4f}, "
+                                                f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
+                                                f"Position={last_positions[i]}")
                                 else:
                                     episode_neutral_trades += 1
-                                    if args.verbose:
-                                        logger.info(f"Environment {i} - NEUTRAL TRADE: Return={trade_return:.4f}, "
-                                                   f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
-                                                   f"Position={last_positions[i]}")
+                                    logger.info(f"Environment {i} - NEUTRAL TRADE: Return={trade_return:.4f}, "
+                                                f"Entry={last_trade_prices[i]:.2f}, Exit={current_price:.2f}, "
+                                                f"Position={last_positions[i]}")
                                 
                                 trade_returns.append(trade_return)
                                 
