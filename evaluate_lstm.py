@@ -9,20 +9,27 @@ import os
 import json
 import logging
 import argparse
+import sys  # Add sys import for sys.platform check
 import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score
+from sklearn.metrics import (
+    classification_report, confusion_matrix, accuracy_score, f1_score
+)
 from torch.utils.data import DataLoader
 
 # Import from local modules
 from crypto_trading_model.lstm_lightning import train_lightning_model, LightningTimeSeriesModel
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
 
 def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_path=None):
     """
@@ -39,7 +46,8 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
     num_workers : int, optional
         Number of worker processes for data loading
     model_path : str, optional
-        Path to the specific model file. If None, looks for 'final_model.pt' in model_dir
+        Path to the specific model file. If None, looks for 'final_model.pt' 
+        in model_dir
         
     Returns:
     --------
@@ -68,24 +76,27 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         logger.error(f"Test data file not found at {test_path}")
         return None
     
-    # Load configuration
+    # Load configuration from the model directory
     with open(config_path, 'r') as f:
         config = json.load(f)
     
-    # Update configuration with test data path and batch size
+    # Make sure the configuration has all required keys
     if 'data' not in config:
         config['data'] = {}
     
+    # Update configuration with test data path and batch size
     # Normalize paths for cross-platform compatibility
     test_path_normalized = os.path.normpath(test_path).replace('\\', '/')
     config['data']['test_data_path'] = test_path_normalized
     
     # Also normalize the train and val paths if they exist
     if 'train_data_path' in config['data']:
-        config['data']['train_data_path'] = os.path.normpath(config['data']['train_data_path']).replace('\\', '/')
+        train_path = config['data']['train_data_path']
+        config['data']['train_data_path'] = os.path.normpath(train_path).replace('\\', '/')
     
     if 'val_data_path' in config['data']:
-        config['data']['val_data_path'] = os.path.normpath(config['data']['val_data_path']).replace('\\', '/')
+        val_path = config['data']['val_data_path']
+        config['data']['val_data_path'] = os.path.normpath(val_path).replace('\\', '/')
     
     if num_workers is not None:
         config['data']['num_workers'] = num_workers
@@ -93,6 +104,22 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         config['training'] = {}
     config['training']['batch_size'] = batch_size
     
+    # Ensure we have model feature dimensions information
+    if 'model' not in config:
+        logger.error("No model configuration found in config file")
+        return None
+    
+    # Add timeframes from data if not present in config
+    if 'data' in config and 'timeframes' not in config['data']:
+        import h5py
+        with h5py.File(test_path, 'r') as f:
+            timeframes = [
+                tf for tf in f.keys() 
+                if isinstance(f[tf], h5py.Group) and 'table' in f[tf]
+            ]
+            config['data']['timeframes'] = timeframes
+            logger.info(f"Detected timeframes: {timeframes}")
+
     # Save updated configuration
     temp_config_path = os.path.join(model_dir, 'eval_config.json')
     with open(temp_config_path, 'w') as f:
@@ -135,13 +162,25 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                             clean_state_dict[key] = value
                     
                     # Load the state dict
-                    model.model.load_state_dict(clean_state_dict)
+                    model.model.load_state_dict(clean_state_dict, strict=False)
                 else:
                     # Try direct loading
-                    model.load_state_dict(checkpoint)
+                    model.load_state_dict(checkpoint, strict=False)
             else:
                 # Regular state dict file
-                model.model.load_state_dict(torch.load(model_path))
+                try:
+                    # Attempt to load the state dict directly
+                    model.model.load_state_dict(torch.load(model_path))
+                except Exception as direct_load_error:
+                    logger.warning(f"Direct loading failed: {str(direct_load_error)}")
+                    logger.info("Attempting to load with strict=False...")
+                    
+                    # Try loading with strict=False to allow for parameter mismatches
+                    model.model.load_state_dict(torch.load(model_path), strict=False)
+                    logger.warning(
+                        "Model loaded with strict=False - some parameters may "
+                        "be missing or unused"
+                    )
             
             model.eval()  # Set to evaluation mode
             logger.info("Model loaded successfully")
@@ -189,14 +228,26 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                     if 'price_direction' in table_data.dtype.names:
                         raw_labels = table_data['price_direction']
                         num_classes = config['model']['num_classes']
-                        valid_labels = np.clip(raw_labels, 0, num_classes - 1)
-                        test_labels = torch.tensor(valid_labels, dtype=torch.long)
+                        valid_labels = np.clip(
+                            raw_labels, 0, num_classes - 1
+                        )
+                        test_labels = torch.tensor(
+                            valid_labels, dtype=torch.long
+                        )
                     else:
-                        logger.warning(f"No price_direction field found in {primary_tf}")
-                        test_labels = torch.zeros(len(next(iter(test_data.values()))), dtype=torch.long)
+                        logger.warning(
+                            f"No price_direction field found in {primary_tf}"
+                        )
+                        test_labels = torch.zeros(
+                            len(next(iter(test_data.values()))), 
+                            dtype=torch.long
+                        )
                 except Exception as e:
                     logger.error(f"Error loading labels: {str(e)}")
-                    test_labels = torch.zeros(len(next(iter(test_data.values()))), dtype=torch.long)
+                    test_labels = torch.zeros(
+                        len(next(iter(test_data.values()))), 
+                        dtype=torch.long
+                    )
         
         # Create our own TimeSeriesDataset class for evaluation
         class TimeSeriesDataset(torch.utils.data.Dataset):
@@ -204,10 +255,16 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                 # Deep copy the data to avoid pickling issues with references
                 self.data = {}
                 for key, tensor in data.items():
-                    self.data[key] = tensor.clone() if isinstance(tensor, torch.Tensor) else torch.tensor(tensor, dtype=torch.float32)
+                    self.data[key] = (
+                        tensor.clone() if isinstance(tensor, torch.Tensor) 
+                        else torch.tensor(tensor, dtype=torch.float32)
+                    )
                 
                 # Make sure labels are properly copied
-                self.labels = labels.clone() if isinstance(labels, torch.Tensor) else torch.tensor(labels, dtype=torch.long)
+                self.labels = (
+                    labels.clone() if isinstance(labels, torch.Tensor) 
+                    else torch.tensor(labels, dtype=torch.long)
+                )
                 
                 # Group features by timeframe
                 self.timeframes = {}
@@ -234,7 +291,9 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                             base_tf = tf
                             base_length = tf_length
                 
-                logger.info(f"Base timeframe is {base_tf} with {base_length} samples")
+                logger.info(
+                    f"Base timeframe is {base_tf} with {base_length} samples"
+                )
                 for tf, length in timeframe_lengths.items():
                     logger.info(f"Timeframe {tf} has {length} samples")
                 
@@ -243,14 +302,20 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                 
                 # Ensure labels match the base timeframe length
                 if len(self.labels) != base_length:
-                    logger.warning(f"Labels length ({len(self.labels)}) doesn't match base timeframe length ({base_length}), adjusting...")
+                    logger.warning(
+                        f"Labels length ({len(self.labels)}) doesn't match "
+                        f"base timeframe length ({base_length}), adjusting..."
+                    )
                     
                     # If labels are longer, truncate
                     if len(self.labels) > base_length:
                         self.labels = self.labels[:base_length]
                     # If labels are shorter, pad with zeros (this should be rare)
                     elif len(self.labels) < base_length:
-                        padding = torch.zeros(base_length - len(self.labels), dtype=torch.long)
+                        padding = torch.zeros(
+                            base_length - len(self.labels), 
+                            dtype=torch.long
+                        )
                         self.labels = torch.cat([self.labels, padding])
                     
                     self.data_length = base_length
@@ -266,21 +331,32 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                                 feature_key = f"{tf}_{feature}"
                                 source_tensor = self.data[feature_key]
                                 
-                                # If source is shorter than target (lower frequency data)
+                                # If source is shorter than target (lower frequency)
                                 if len(source_tensor) < base_length:
-                                    logger.info(f"Upsampling {feature_key} from {len(source_tensor)} to {base_length} samples")
+                                    logger.info(
+                                        f"Upsampling {feature_key} from "
+                                        f"{len(source_tensor)} to {base_length} samples"
+                                    )
                                     
                                     # Create indices for nearest-neighbor upsampling
-                                    # This effectively repeats each value the appropriate number of times
-                                    indices = torch.linspace(0, len(source_tensor) - 1, base_length).long()
+                                    # This repeats each value the appropriate number of times
+                                    indices = torch.linspace(
+                                        0, len(source_tensor) - 1, base_length
+                                    ).long()
                                     upsampled = source_tensor[indices]
                                     self.data[feature_key] = upsampled
                                 # If source is longer than target (this should be rare)
                                 elif len(source_tensor) > base_length:
-                                    logger.warning(f"Feature {feature_key} has length {len(source_tensor)}, truncating to {base_length}.")
+                                    logger.warning(
+                                        f"Feature {feature_key} has length "
+                                        f"{len(source_tensor)}, truncating to {base_length}."
+                                    )
                                     self.data[feature_key] = source_tensor[:base_length]
                 
-                logger.info(f"Dataset organized with timeframes: {list(self.timeframes.keys())} and {self.data_length} samples")
+                logger.info(
+                    f"Dataset organized with timeframes: {list(self.timeframes.keys())} "
+                    f"and {self.data_length} samples"
+                )
             
             def __len__(self):
                 return self.data_length
@@ -288,7 +364,10 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
             def __getitem__(self, idx):
                 # Ensure index is in bounds
                 if idx >= self.data_length:
-                    raise IndexError(f"Index {idx} is out of bounds for dataset with length {self.data_length}")
+                    raise IndexError(
+                        f"Index {idx} is out of bounds for dataset "
+                        f"with length {self.data_length}"
+                    )
                 
                 # Organize data by timeframe for model consumption
                 sample = {}
@@ -310,12 +389,14 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
                         # input_size = number of features
                         # The features tensor is currently shape (num_features,)
                         # We need to reshape to (1, num_features) for the LSTM
-                        sample[tf] = features.unsqueeze(0)  # Add sequence dimension -> (1, num_features)
+                        sample[tf] = features.unsqueeze(0)  # Add sequence dimension
                     except IndexError as e:
                         logger.error(f"Index error for {tf} at idx={idx}: {str(e)}")
                         raise
                     except Exception as e:
-                        logger.error(f"Error processing timeframe {tf} at idx={idx}: {str(e)}")
+                        logger.error(
+                            f"Error processing timeframe {tf} at idx={idx}: {str(e)}"
+                        )
                         # Provide an empty tensor as fallback
                         sample[tf] = torch.zeros((1, 1), dtype=torch.float32)
                 
@@ -352,8 +433,10 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         with torch.no_grad():
             for batch in test_dataloader:
                 # Move tensors to the device
-                sample = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                        for k, v in batch.items() if k != 'label'}
+                sample = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                    for k, v in batch.items() if k != 'label'
+                }
                 
                 if 'label' in batch:
                     labels = batch['label'].to(device)
@@ -374,7 +457,9 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         
         accuracy = accuracy_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred, average='macro')
-        report = classification_report(y_true, y_pred, target_names=['Sell', 'Hold', 'Buy'])
+        report = classification_report(
+            y_true, y_pred, target_names=['Sell', 'Hold', 'Buy']
+        )
         cm = confusion_matrix(y_true, y_pred)
         
         # Log results
@@ -384,9 +469,11 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         
         # Plot confusion matrix
         plt.figure(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                   xticklabels=['Sell', 'Hold', 'Buy'],
-                   yticklabels=['Sell', 'Hold', 'Buy'])
+        sns.heatmap(
+            cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['Sell', 'Hold', 'Buy'],
+            yticklabels=['Sell', 'Hold', 'Buy']
+        )
         plt.xlabel('Predicted')
         plt.ylabel('True')
         plt.title('Confusion Matrix')
@@ -420,21 +507,50 @@ def evaluate_model(model_dir, data_dir, batch_size=256, num_workers=None, model_
         if os.path.exists(temp_config_path):
             os.remove(temp_config_path)
 
+
 def main():
     """Main entry point for model evaluation."""
-    parser = argparse.ArgumentParser(description="Evaluate the trained LSTM model on test data")
-    parser.add_argument("--model_dir", type=str, default="models/lstm_improved",
-                      help="Directory containing the trained model and configuration")
-    parser.add_argument("--model_path", type=str, default=None,
-                      help="Path to specific model file (default: looks for final_model.pt in model_dir)")
-    parser.add_argument("--data_dir", type=str, default="data/synthetic",
-                      help="Directory containing the data files")
-    parser.add_argument("--batch_size", type=int, default=256,
-                      help="Batch size for evaluation")
-    parser.add_argument("--num_workers", type=int, default=None,
-                      help="Number of worker processes for data loading (default: auto-detect)")
+    parser = argparse.ArgumentParser(
+        description="Evaluate the trained LSTM model on test data"
+    )
+    parser.add_argument(
+        "--model_dir", type=str, default="models/lstm_improved",
+        help="Directory containing the trained model and configuration"
+    )
+    parser.add_argument(
+        "--model_path", type=str, default=None,
+        help="Path to specific model file (default: looks for final_model.pt in model_dir)"
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default="data/synthetic",
+        help="Directory containing the data files"
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=256,
+        help="Batch size for evaluation"
+    )
+    parser.add_argument(
+        "--num_workers", type=int, default=None,
+        help="Number of worker processes for data loading (default: auto-detect)"
+    )
+    parser.add_argument(
+        "--use_checkpoint", action="store_true", 
+        help="Use the checkpoint from the models/checkpoints directory if available"
+    )
     
     args = parser.parse_args()
+    
+    # Look for checkpoint file if requested
+    if args.use_checkpoint and args.model_path is None:
+        checkpoint_dir = "models/checkpoints"
+        if os.path.exists(checkpoint_dir):
+            ckpt_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.ckpt')]
+            if ckpt_files:
+                # Sort by val_loss if possible, otherwise by modification time
+                ckpt_files.sort()
+                selected_ckpt = os.path.join(checkpoint_dir, ckpt_files[0])
+                logger.info(f"Using checkpoint file: {selected_ckpt}")
+                args.model_path = selected_ckpt
     
     # Evaluate the model
     results = evaluate_model(
@@ -449,6 +565,7 @@ def main():
         logger.info("Model evaluation complete.")
     else:
         logger.error("Model evaluation failed.")
+
 
 if __name__ == "__main__":
     import sys
