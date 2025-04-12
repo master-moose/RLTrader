@@ -2608,5 +2608,287 @@ def add_technical_indicators_for_testing(df):
     
     return result_df
 
+class FinRLStockTradingEnv(gym.Env):
+    """
+    Custom environment for FinRL that handles multi-index DataFrames correctly.
+    This environment adapts to the exact API expected by StockTradingEnv while
+    properly handling the DataFrame formatting.
+    """
+    def __init__(
+        self, df, state_space=16, stock_dim=3, initial_amount=1000000,
+        buy_cost_pct=0.001, sell_cost_pct=0.001, reward_scaling=1e-4,
+        hmax=100, num_stock_shares=None, tech_indicator_list=None,
+        action_space=None, turbulence_threshold=None, day=0
+    ):
+        self.df = df.copy()
+        self.stock_dim = stock_dim
+        self.initial_amount = initial_amount
+        self.buy_cost_pct = buy_cost_pct
+        self.sell_cost_pct = sell_cost_pct
+        self.reward_scaling = reward_scaling
+        self.hmax = hmax
+        self.num_stock_shares = num_stock_shares if num_stock_shares is not None else [0] * stock_dim
+        self.tech_indicator_list = tech_indicator_list if tech_indicator_list is not None else []
+        self.action_space = action_space if action_space is not None else stock_dim
+        self.turbulence_threshold = turbulence_threshold
+        
+        # Convert MultiIndex to regular index with date as a column
+        if isinstance(self.df.index, pd.MultiIndex):
+            # Reset the index to get date and tic as columns
+            self.df_flattened = self.df.reset_index()
+            # Get the unique sorted dates
+            self.unique_dates = sorted(self.df_flattened['date'].unique())
+            # Initialize current date index
+            self.current_date_idx = 0
+        else:
+            # If not multi-index, assume date is the index
+            self.unique_dates = sorted(self.df.index.unique())
+            self.current_date_idx = 0
+            
+        # Get first date
+        self.day = self.unique_dates[self.current_date_idx]
+        
+        # Initialize state
+        self.state = self._get_state()
+        
+        # Set action and observation spaces
+        self.action_space = gym.spaces.Box(
+            low=-1, high=1, shape=(self.action_space,), dtype=np.float32
+        )
+        
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(state_space,), dtype=np.float32
+        )
+        
+        # Initialize
+        self.terminal = False
+        self.portfolio_value = self.initial_amount
+        self.asset_memory = [self.initial_amount]
+        self.day_memory = [self.day]
+        
+    def _get_state(self):
+        """
+        Get the current state of the environment.
+        This extracts relevant data for the current date.
+        """
+        if isinstance(self.df.index, pd.MultiIndex):
+            # For multi-index DataFrame, get data for the current date
+            current_date = self.unique_dates[self.current_date_idx]
+            self.data = self.df.loc[current_date].copy()
+        else:
+            # For regular index
+            current_date = self.unique_dates[self.current_date_idx]
+            self.data = self.df.loc[self.df.index == current_date].copy()
+            
+        # Create state representation
+        # This is a simplified version - customize based on your needs
+        state = np.array([
+            self.portfolio_value,  # Current portfolio value
+            *self.num_stock_shares,  # Current stock shares
+            *self.data['close'].values.tolist(),  # Current close prices
+        ])
+        
+        # Append technical indicators if specified
+        for indicator in self.tech_indicator_list:
+            if indicator in self.data.columns:
+                values = self.data[indicator].values
+                if len(values) > 0:
+                    state = np.append(state, values)
+        
+        return state
+        
+    def reset(self):
+        """
+        Reset the environment to initial state.
+        """
+        self.terminal = False
+        self.portfolio_value = self.initial_amount
+        self.num_stock_shares = [0] * self.stock_dim
+        self.asset_memory = [self.initial_amount]
+        
+        # Reset to first day
+        self.current_date_idx = 0
+        self.day = self.unique_dates[self.current_date_idx]
+        self.day_memory = [self.day]
+        
+        # Get state
+        self.state = self._get_state()
+        
+        return self.state
+        
+    def step(self, actions):
+        """
+        Execute actions in the environment.
+        
+        Args:
+            actions: Array of actions for each stock
+            
+        Returns:
+            next_state, reward, done, info
+        """
+        self.terminal = False
+        
+        # Get current data
+        if self.current_date_idx >= len(self.unique_dates) - 1:
+            # If we've reached the end of the data, terminate
+            self.terminal = True
+            return self.state, 0, self.terminal, {'portfolio_value': self.portfolio_value}
+            
+        # Get current prices
+        if isinstance(self.df.index, pd.MultiIndex):
+            current_date = self.unique_dates[self.current_date_idx]
+            current_data = self.df.loc[current_date]
+            close_prices = current_data['close'].values
+        else:
+            current_date = self.unique_dates[self.current_date_idx]
+            current_data = self.df.loc[self.df.index == current_date]
+            close_prices = current_data['close'].values
+            
+        # Calculate portfolio value before action
+        portfolio_value_before = self.portfolio_value + sum(shares * price for shares, price in zip(self.num_stock_shares, close_prices))
+        
+        # Execute trades based on actions
+        # Normalize actions to [-1, 1] range if not already
+        actions = np.clip(actions, -1, 1)
+        
+        # Simple trading logic:
+        # For each stock, action > 0 means buy, action < 0 means sell
+        for i, action in enumerate(actions):
+            if action > 0:  # Buy
+                # Calculate max shares we can buy
+                max_shares = min(self.hmax, int(self.portfolio_value / (close_prices[i] * (1 + self.buy_cost_pct))))
+                shares_to_buy = int(max_shares * action)  # Scale by action
+                
+                # Calculate cost including fees
+                cost = shares_to_buy * close_prices[i] * (1 + self.buy_cost_pct)
+                
+                # Update portfolio
+                self.num_stock_shares[i] += shares_to_buy
+                self.portfolio_value -= cost
+                
+            elif action < 0:  # Sell
+                # Calculate shares to sell
+                shares_to_sell = int(self.num_stock_shares[i] * abs(action))
+                
+                # Calculate revenue including fees
+                revenue = shares_to_sell * close_prices[i] * (1 - self.sell_cost_pct)
+                
+                # Update portfolio
+                self.num_stock_shares[i] -= shares_to_sell
+                self.portfolio_value += revenue
+        
+        # Move to next day
+        self.current_date_idx += 1
+        if self.current_date_idx < len(self.unique_dates):
+            self.day = self.unique_dates[self.current_date_idx]
+            self.day_memory.append(self.day)
+        else:
+            self.terminal = True
+            
+        # Get new state
+        self.state = self._get_state()
+        
+        # Calculate new portfolio value
+        new_portfolio_value = self.portfolio_value + sum(shares * price for shares, price in zip(self.num_stock_shares, close_prices))
+        self.asset_memory.append(new_portfolio_value)
+        
+        # Calculate reward
+        reward = (new_portfolio_value - portfolio_value_before) * self.reward_scaling
+        
+        # Information dictionary
+        info = {
+            'portfolio_value': new_portfolio_value,
+            'date': self.day,
+            'reward': reward,
+            'terminal': self.terminal
+        }
+        
+        return self.state, reward, self.terminal, info
+        
+    def render(self, mode='human'):
+        """Render the environment."""
+        if mode == 'human':
+            print(f"Date: {self.day}")
+            print(f"Portfolio Value: {self.portfolio_value}")
+            print(f"Stocks Held: {self.num_stock_shares}")
+        return self.state
+        
+    def seed(self, seed=None):
+        """Set random seed."""
+        np.random.seed(seed)
+        return [seed]
+
+def create_finrl_env(
+    start_date, end_date, symbols, data_source="binance", initial_balance=1000000.0,
+    lookback=5, state_space=16, include_cash=False, initial_stocks=None, window_size=None,
+    df=None  # New parameter to allow passing a pre-created DataFrame
+):
+    """
+    Create a FinRL environment for trading with StockTradingEnv.
+    
+    Args:
+        start_date: Start date for data
+        end_date: End date for data
+        symbols: List of symbols to trade
+        data_source: Source of data (e.g., 'binance', 'yahoo')
+        initial_balance: Initial balance for trading
+        lookback: Number of days to look back for state
+        state_space: Dimension of state space
+        include_cash: Whether to include cash in state
+        initial_stocks: Initial stocks count, default 0
+        window_size: Window size for data processing
+        df: Pre-created DataFrame (optional)
+        
+    Returns:
+        StockTradingEnv instance
+    """
+    # Log the environment creation
+    logger.info(f"Creating FinRL environment with state_space={state_space}, lookback={lookback}")
+    logger.info(f"Date range: {start_date} to {end_date}")
+    logger.info(f"Symbols: {symbols}")
+    
+    # Define standard technical indicators 
+    tech_indicators = [
+        'macd', 'rsi_14', 'cci_30', 'dx_30', 
+        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
+        'close_5_ema', 'close_10_ema', 'close_20_ema', 'close_60_ema', 'close_120_ema',
+        'volatility_30', 'volume_change', 'volume_norm'
+    ]
+    
+    # Prepare environment parameters
+    stock_dimension = len(symbols)
+    
+    # Default values for stocks
+    if initial_stocks is None:
+        initial_stocks = [0] * stock_dimension
+    
+    # Set up environment parameters
+    env_params = {
+        'df': df,
+        'state_space': state_space,
+        'initial_amount': initial_balance,
+        'buy_cost_pct': 0.001,  # Transaction cost for buying
+        'sell_cost_pct': 0.001,  # Transaction cost for selling
+        'reward_scaling': 0.0001,  # Scaling factor for reward
+        'hmax': 100,  # Maximum number of shares to trade
+        'stock_dim': stock_dimension,
+        'num_stock_shares': initial_stocks,
+        'action_space': stock_dimension,  # If include_cash is True, action_space will be stock_dimension+1
+        'tech_indicator_list': tech_indicators,
+    }
+    
+    # Log the environment parameters
+    logger.info(f"Creating environment with params: {env_params}")
+    
+    try:
+        # Create our custom environment to handle multi-index correctly
+        env = FinRLStockTradingEnv(**env_params)
+        return env
+    except Exception as e:
+        # Log the detailed error information
+        logger.error(f"Error creating environment: {e}")
+        logger.error(traceback.format_exc())
+        raise
+
 if __name__ == "__main__":
     main() 
