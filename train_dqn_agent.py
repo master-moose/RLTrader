@@ -290,7 +290,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         Args:
             env: Environment to wrap
-            state_space: Expected state space dimension
+            state_space: Dimension of the state space
         """
         # Check if env is a gym environment rather than a gymnasium environment
         if hasattr(env, 'observation_space') and not isinstance(env.observation_space, gymnasium.spaces.Space):
@@ -310,9 +310,9 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 act_space = convert_gym_space(env.action_space)
             else:
                 # Default action space if not available
-                act_space = gymnasium.spaces.Discrete(3)  # Sell, Hold, Buy
-            
-            # We are wrapping the underlying gym env manually
+                act_space = gymnasium.spaces.Discrete(3)
+                
+            # Store the unwrapped environment
             self.env = env
             self.observation_space = obs_space
             self.action_space = act_space
@@ -325,7 +325,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # If already a gymnasium environment, just wrap it directly
             super().__init__(env)
             
-            # Ensure observation space is properly defined
+            # Force set observation space to Box with state_space dimension
             self.observation_space = gymnasium.spaces.Box(
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
@@ -333,8 +333,10 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # Store the actual observation dimension for comparison
         self.actual_state_space = None
-        # Track step count for logging
-        self.step_counter = 0
+        
+        # Add _cached_spec attribute for compatibility with Monitor
+        self._cached_spec = None
+        self.spec = None
     
     def reset(self, **kwargs):
         """Reset the environment, with compatibility for both gym and gymnasium APIs."""
@@ -1830,7 +1832,7 @@ def ensure_technical_indicators(df, indicators):
     # Forward fill any NaN values
     for indicator in indicators:
         if indicator in df_result.columns and df_result[indicator].isnull().any():
-            df_result[indicator] = df_result[indicator].fillna(method='ffill').fillna(0)
+            df_result[indicator] = df_result[indicator].ffill().fillna(0)
     
     return df_result
 
