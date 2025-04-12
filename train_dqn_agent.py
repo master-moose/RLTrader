@@ -350,8 +350,10 @@ def create_finrl_env(df, args):
                           'sma_7', 'sma_25', 'ema_9', 'ema_21',
                           'stoch_k', 'stoch_d']
     
-    # Calculate state space dimension
-    state_space = len(tech_indicator_list) + 2  # technical indicators + shares + balance
+    # Calculate state space dimension - need to account for all elements in the state space
+    # Each stock has: 1 share value + len(tech_indicator_list) technical indicators
+    # Plus we have 1 for balance, and num_stocks position values
+    state_space = 1 + num_stocks + len(tech_indicator_list)
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
@@ -413,8 +415,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                           'sma_7', 'sma_25', 'ema_9', 'ema_21',
                           'stoch_k', 'stoch_d']
     
-    # Calculate state space dimension
-    state_space = len(tech_indicator_list) + 2  # technical indicators + shares + balance
+    # Calculate state space dimension - need to account for all elements in the state space
+    # Each stock has: 1 share value + len(tech_indicator_list) technical indicators
+    # Plus we have 1 for balance, and num_stocks position values
+    state_space = 1 + num_stocks + len(tech_indicator_list)
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
@@ -432,25 +436,29 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 f"transaction_cost_pct={transaction_cost_pct}, "
                 f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
     
-    # Create a list to hold our environments
+    # Create a list to hold our environment creation functions
     env_list = []
     
     for i in range(num_workers):
-        env = StockTradingEnv(
-            df=df,
-            stock_dim=stock_dim,
-            hmax=hmax,
-            num_stock_shares=num_stock_shares.copy(),  # Use a copy to avoid sharing state
-            state_space=state_space,
-            action_space=action_space,
-            tech_indicator_list=tech_indicator_list,
-            initial_amount=initial_amount,
-            buy_cost_pct=transaction_cost_pct,
-            sell_cost_pct=transaction_cost_pct,
-            reward_scaling=reward_scaling,
-            print_verbosity=1 if i == 0 else 0  # Only print verbose output for the first env
-        )
-        env_list.append(lambda: env)  # Add environment creator function to the list
+        # Define a function that creates a new environment instance each time it's called
+        def make_env(idx=i):
+            return StockTradingEnv(
+                df=df,
+                stock_dim=stock_dim,
+                hmax=hmax,
+                num_stock_shares=num_stock_shares.copy(),  # Use a copy to avoid sharing state
+                state_space=state_space,
+                action_space=action_space,
+                tech_indicator_list=tech_indicator_list,
+                initial_amount=initial_amount,
+                buy_cost_pct=transaction_cost_pct,
+                sell_cost_pct=transaction_cost_pct,
+                reward_scaling=reward_scaling,
+                print_verbosity=1 if idx == 0 else 0  # Only print verbose output for the first env
+            )
+        
+        # Add the environment creation function to the list
+        env_list.append(make_env)
     
     # Vectorize the environments
     vec_env = DummyVecEnv(env_list)
