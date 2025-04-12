@@ -328,21 +328,35 @@ def load_lstm_model(model_path, device):
         logger.error(traceback.format_exc())
         raise
 
-def create_finrl_env(df, config):
-    """Create a FinRL environment for cryptocurrency trading."""
+def create_finrl_env(df, args):
+    """
+    Create a FinRL environment for cryptocurrency trading.
+    
+    Args:
+        df: Processed dataframe in FinRL format
+        args: Command line arguments
+        
+    Returns:
+        FinRL environment
+    """
+    # Get number of unique tickers
     num_stocks = len(df['tic'].unique())
+    
+    # Initialize stock shares
     num_stock_shares = [0] * num_stocks
     
+    # Create environment configuration
     env_config = {
-        'df': None,  # Will be set after preprocessing
+        'df': df,
         'num_stock_shares': num_stock_shares,
-        'transaction_cost_pct': config.get('transaction_cost_pct', 0.001),
+        'transaction_cost_pct': getattr(args, 'transaction_cost_pct', 0.001),
         'state_space': len(INDICATORS) + 2,  # +2 for price and shares held
         'action_space': 3,  # buy, hold, sell
         'tech_indicator_list': INDICATORS,
         'print_verbosity': 1
     }
     
+    # Create environment
     env = CryptocurrencyTradingEnv(**env_config)
     return env
 
