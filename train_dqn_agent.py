@@ -41,6 +41,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 import matplotlib.pyplot as plt  # Add matplotlib
 import psutil  # Add psutil
 import inspect
+from stable_baselines3 import SAC, TD3, DDPG, PPO
 
 # Add project root to path
 project_root = str(Path(__file__).parent)
@@ -389,171 +390,103 @@ def create_finrl_env(
     df=None  # New parameter to allow passing a pre-created DataFrame
 ):
     """
-    Create a FinRL-compatible environment for cryptocurrency trading.
+    Create a FinRL environment for trading with StockTradingEnv.
     
     Args:
-        start_date: The start date for the environment
-        end_date: The end date for the environment
-        symbols: The list of cryptocurrency symbols to trade
-        data_source: The data source to use (default: "binance")
-        initial_balance: The initial balance for the environment
-        lookback: The number of time steps to look back for features
-        state_space: Initial expected dimension of state space (will be updated based on actual observation)
-        include_cash: Whether to include cash in the state
-        initial_stocks: The initial stocks for the environment
-        window_size: The window size for the environment
-        df: Optional pre-created DataFrame to use instead of downloading data
-    
+        start_date: Start date for data
+        end_date: End date for data
+        symbols: List of symbols to trade
+        data_source: Source of data (e.g., 'binance', 'yahoo')
+        initial_balance: Initial balance for trading
+        lookback: Number of days to look back for state
+        state_space: Dimension of state space
+        include_cash: Whether to include cash in state
+        initial_stocks: Initial stocks count, default 0
+        window_size: Window size for data processing
+        df: Pre-created DataFrame (optional)
+        
     Returns:
-        A StockTradingEnvWrapper instance that is compatible with stable-baselines3
+        StockTradingEnv instance
     """
-    # Try different import paths for StockTradingEnv, falling back as needed
-    logger.info("Attempting to import StockTradingEnv for cryptocurrency trading")
-    
-    StockTradingEnvClass = None
-    
-    # Try multiple import paths in order of preference
-    try:
-        # Try the cryptocurrency-specific environment first
-        from finrl.meta.env_cryptocurrency_trading.env_crypto import CryptocurrencyTradingEnv
-        logger.info("Successfully imported CryptocurrencyTradingEnv")
-        StockTradingEnvClass = CryptocurrencyTradingEnv
-    except ImportError:
-        logger.warning("Could not import CryptocurrencyTradingEnv, trying alternative paths")
-        try:
-            # Try the standard stock trading environment as fallback
-            from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
-            logger.info("Using standard StockTradingEnv as fallback")
-            StockTradingEnvClass = StockTradingEnv
-        except ImportError:
-            try:
-                # Try newer import path (FinRL has changed paths multiple times)
-                from finrl.applications.env.crypto import CryptocurrencyTradingEnv
-                logger.info("Successfully imported CryptocurrencyTradingEnv from applications.env")
-                StockTradingEnvClass = CryptocurrencyTradingEnv
-            except ImportError:
-                try:
-                    # Try newer import path for stock trading environment
-                    from finrl.applications.env.stock import StockTradingEnv
-                    logger.info("Using StockTradingEnv from applications.env as fallback")
-                    StockTradingEnvClass = StockTradingEnv
-                except ImportError:
-                    # Final fallback - use our base class
-                    logger.warning("Could not import any trading environment from FinRL, using base implementation")
-                    StockTradingEnvClass = BaseStockTradingEnv
-    
-    if StockTradingEnvClass is None:
-        raise ImportError("Failed to import any suitable trading environment")
-    
+    # Log the environment creation
     logger.info(f"Creating FinRL environment with state_space={state_space}, lookback={lookback}")
     logger.info(f"Date range: {start_date} to {end_date}")
     logger.info(f"Symbols: {symbols}")
     
-    # If df is None and we're using a FinRL env that requires data, generate synthetic data
-    if df is None:
-        # Check if we need a DataFrame (most FinRL envs do)
-        if 'df' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-            logger.info("No DataFrame provided, generating synthetic data...")
-            df = create_synthetic_data(symbols, start_date, end_date)
-            logger.info(f"Created synthetic dataframe with shape: {df.shape}")
-            
-            # Format the dataframe if needed based on the environment's expected format
-            # For stock trading env, we need a multi-index with date and tic
-            if StockTradingEnvClass.__name__ == 'StockTradingEnv':
-                # Make sure dataframe has the right format with date as index
-                if 'date' in df.columns and not isinstance(df.index, pd.DatetimeIndex):
-                    df = df.set_index('date')
-                # Add a 'day' column which is used by StockTradingEnv
-                if 'day' not in df.columns:
-                    df['day'] = df.index.strftime('%Y-%m-%d')
-                # Remove any duplicate index values
-                df = df.loc[~df.index.duplicated(keep='first')]
-                logger.info(f"Formatted dataframe for StockTradingEnv: {df.shape}")
+    # Import appropriate environment class
+    try:
+        logger.info("Attempting to import StockTradingEnv for cryptocurrency trading")
+        # Try to import CryptocurrencyTradingEnv
+        from finrl.meta.env_crypto_trading.env_cryptocurrencytrading import CryptocurrencyTradingEnv as StockTradingEnvClass
+        logger.info("Using StockTradingEnv as CryptocurrencyTradingEnv")
+    except (ImportError, ModuleNotFoundError):
+        logger.warning("Could not import CryptocurrencyTradingEnv, trying alternative paths")
+        try:
+            # Try to import StockTradingEnv directly
+            from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv as StockTradingEnvClass
+            logger.info("Using standard StockTradingEnv as fallback")
+        except (ImportError, ModuleNotFoundError):
+            try:
+                # Try the old import path
+                from finrl.env.env_stocktrading import StockTradingEnv as StockTradingEnvClass
+                logger.info("Using legacy StockTradingEnv import path")
+            except (ImportError, ModuleNotFoundError):
+                try:
+                    # Last resort - try to import directly from known path
+                    import sys
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location(
+                        "StockTradingEnv", 
+                        "/venv/main/lib/python3.10/site-packages/finrl/meta/env_stock_trading/env_stocktrading.py"
+                    )
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[spec.name] = module
+                    spec.loader.exec_module(module)
+                    StockTradingEnvClass = module.StockTradingEnv
+                    logger.info("Using absolute path import for StockTradingEnv")
+                except Exception as e:
+                    logger.error(f"Failed to import any StockTradingEnv class: {e}")
+                    raise ImportError("Could not import any version of StockTradingEnv")
+
+    # Prepare environment parameters
+    stock_dimension = len(symbols)
     
-    # Define standard technical indicators that most FinRL environments expect
-    tech_indicator_list = [
-        'macd', 'rsi_14', 'cci_30', 'dx_30',
-        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma',
-        'close_120_sma', 'close_5_ema', 'close_10_ema', 'close_20_ema',
-        'close_60_ema', 'close_120_ema',
+    # Default values
+    if initial_stocks is None:
+        initial_stocks = [0] * stock_dimension
+    
+    # Define the list of technical indicators
+    tech_indicators = [
+        'macd', 'rsi_14', 'cci_30', 'dx_30', 
+        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
+        'close_5_ema', 'close_10_ema', 'close_20_ema', 'close_60_ema', 'close_120_ema',
         'volatility_30', 'volume_change', 'volume_norm'
     ]
     
-    # Stock dimension is the number of symbols
-    stock_dim = len(symbols)
-    
-    # Initialize stock shares to 0
-    num_stock_shares = [0] * stock_dim
-    
-    # Set action space - discretized actions for Buy, Hold, Sell
-    # 3 = Buy, Hold, Sell; 4 = Buy a lot, Buy some, Hold, Sell
-    action_dim = 3  # Default - adjust if needed
-    
-    # Create a dictionary of all parameters for the environment
+    # Set up the parameters dictionary for StockTradingEnv
     env_params = {
-        'df': df,  # Now using the actual DataFrame
+        'df': df,
         'state_space': state_space,
         'initial_amount': initial_balance,
-        'buy_cost_pct': 0.001,
-        'sell_cost_pct': 0.001,
-        'reward_scaling': 1e-4,
+        'buy_cost_pct': 0.001,  # Transaction cost for buying
+        'sell_cost_pct': 0.001,  # Transaction cost for selling
+        'reward_scaling': 0.0001,  # Scaling factor for reward
         'hmax': 100,  # Maximum number of shares to trade
-        'stock_dim': stock_dim,
-        'num_stock_shares': num_stock_shares,
-        'action_space': action_dim,
-        'tech_indicator_list': tech_indicator_list,
+        'stock_dim': stock_dimension,
+        'num_stock_shares': initial_stocks,
+        'action_space': stock_dimension,  # If include_cash is True, action_space will be stock_dimension+1
+        'tech_indicator_list': tech_indicators,
     }
     
-    # Add parameters that are specific to cryptocurrency environments
-    if 'symbols' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['symbols'] = symbols
-    if 'data_source' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['data_source'] = data_source
-    if 'start_date' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['start_date'] = start_date
-    if 'end_date' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['end_date'] = end_date
-    if 'lookback' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['lookback'] = lookback
-    if 'include_cash' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['include_cash'] = include_cash
-    if 'initial_stocks' in inspect.signature(StockTradingEnvClass.__init__).parameters:
-        env_params['initial_stocks'] = initial_stocks if initial_stocks else num_stock_shares
+    # Log the environment parameters
+    logger.info(f"Creating environment with params: {env_params}")
     
-    # Create environment with appropriate parameters
     try:
-        # Log what we're doing
-        logger.info(f"Creating environment with params: {env_params}")
-        
         # Create the environment
         env = StockTradingEnvClass(**env_params)
-        
-        # Ensure we get the correct state dimension by doing a test reset
-        # We'll then create a proper wrapper with the correct dimension
-        try:
-            test_obs = env.reset()
-            if isinstance(test_obs, np.ndarray):
-                actual_dim = len(test_obs)
-                logger.info(f"Detected actual observation dimension: {actual_dim}, observation shape: {test_obs.shape}")
-                if actual_dim != state_space:
-                    logger.info(f"Updating state_space from {state_space} to {actual_dim}")
-                    state_space = actual_dim
-            
-            # We need to reset the env again
-            env.reset()
-        except Exception as e:
-            logger.error(f"Error during test reset: {e}")
-            logger.error(traceback.format_exc())
-        
-        # Then wrap it for gymnasium compatibility
-        wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
-        
-        logger.info(f"Environment created with observation space: {wrapped_env.observation_space}")
-        logger.info(f"Action space: {wrapped_env.action_space}")
-        
-        return wrapped_env
-    
+        return env
     except Exception as e:
+        # Log the detailed error information
         logger.error(f"Error creating environment: {e}")
         logger.error(traceback.format_exc())
         raise
@@ -1212,310 +1145,248 @@ class CustomDRLAgent(OriginalDRLAgent):
         return model
 
 
-def train_with_finrl(args):
-    """Train a model using FinRL's DRL library"""
-    logger.info("Training with FinRL")
+def train_with_finrl(
+    args, logger, start_date, end_date, tickers, 
+    data_source="binance", num_workers=1, use_lstm_predictions=False,
+    lstm_model=None, lstm_processor=None
+):
+    """
+    Train a FinRL agent with the specified parameters.
     
-    # Use consistent paths
-    model_dir = os.path.join("models", "finrl", args.finrl_model)
-    os.makedirs(model_dir, exist_ok=True)
-    
-    # Set up start and end dates from args or defaults
-    start_date = getattr(args, 'start_date', '2018-01-01')
-    end_date = getattr(args, 'end_date', '2021-12-31')
-    
-    # Get cryptocurrency symbols from args or default
-    symbols = getattr(args, 'tickers', ["BTC", "ETH", "LTC"]) 
-    if not isinstance(symbols, list):
-        # Split comma-separated string into a list
-        symbols = [s.strip() for s in symbols.split(',')]
-    
-    # Update user with settings
-    logger.info(f"Training {args.finrl_model} model with DRL on symbols: {symbols}")
-    logger.info(f"Data range: {start_date} to {end_date}")
-    
-    # Generate synthetic data once and reuse for all environments
-    try:
-        # Create synthetic data for testing
-        synthetic_df = create_synthetic_data(symbols, start_date, end_date)
-        logger.info(f"Created synthetic data with shape: {synthetic_df.shape}")
+    Args:
+        args: Command line arguments
+        logger: Logger
+        start_date: Start date for training
+        end_date: End date for training
+        tickers: List of tickers to trade
+        data_source: Source of data
+        num_workers: Number of workers for parallel environments
+        use_lstm_predictions: Whether to use LSTM predictions
+        lstm_model: LSTM model to use for predictions
+        lstm_processor: LSTM processor for data preprocessing
         
-        # Format the dataframe for StockTradingEnv
-        # Make sure dataframe has the right format with date as index
-        if 'date' in synthetic_df.columns and not isinstance(synthetic_df.index, pd.DatetimeIndex):
-            synthetic_df = synthetic_df.set_index('date')
+    Returns:
+        trained FinRL model
+    """
+    logger.info(f"Training FinRL agent with model: {args.finrl_model}")
+    logger.info(f"Start date: {start_date}, End date: {end_date}")
+    logger.info(f"Tickers: {tickers}")
+    logger.info(f"Number of workers: {num_workers}")
+    
+    # Set up parameters
+    lookback = 5
+    initial_balance = 1000000.0
+    include_cash = False
+    
+    # Generate synthetic data or format the real data properly
+    try:
+        logger.info("Creating synthetic data with multi-index format for FinRL...")
+        df = create_synthetic_data(tickers, start_date, end_date)
+        
+        # Format the dataframe for StockTradingEnv which requires a multi-index DataFrame
+        # with date and tic as the index levels
+        logger.info(f"Formatting DataFrame for FinRL environment, original shape: {df.shape}")
+        
+        # Make sure we have a date column that's datetime
+        if 'date' not in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+            logger.warning("No date column found, using index as date")
+            df['date'] = df.index
+        elif 'date' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['date']):
+            logger.info("Converting date column to datetime")
+            df['date'] = pd.to_datetime(df['date'])
+        
+        # Reset index if it's already a DatetimeIndex to work with the data
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+            df.rename(columns={'index': 'date'}, inplace=True)
+        
         # Add a 'day' column which is used by StockTradingEnv
-        if 'day' not in synthetic_df.columns:
-            synthetic_df['day'] = synthetic_df.index.strftime('%Y-%m-%d')
-        # Remove any duplicate index values
-        synthetic_df = synthetic_df.loc[~synthetic_df.index.duplicated(keep='first')]
-        logger.info(f"Formatted dataframe for StockTradingEnv: {synthetic_df.shape}")
+        if 'day' not in df.columns:
+            df['day'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+            
+        # Ensure we have a 'tic' column - if not, use the ticker from tickers list
+        # This assumes the dataframe has data for only one ticker
+        if 'tic' not in df.columns:
+            logger.info(f"Adding 'tic' column with value: {tickers[0]}")
+            df['tic'] = tickers[0]
+            
+        # If we have multiple tickers, we need to make sure each row has the correct ticker
+        if len(tickers) > 1 and 'tic' not in df.columns:
+            # Need to replicate data for each ticker or ensure each ticker has its own data
+            logger.warning(f"Multiple tickers {tickers} but no 'tic' column in DataFrame")
+            # This is a placeholder - in a real implementation, 
+            # you'd need to properly structure data for multiple tickers
+        
+        # Create a multi-index with date and tic
+        logger.info("Creating multi-index DataFrame with (date, tic)")
+        df = df.set_index(['date', 'tic'])
+        
+        # Log the levels of the multi-index
+        logger.info(f"DataFrame multi-index levels: {df.index.names}")
+        logger.info(f"Final dataframe shape: {df.shape}")
+        logger.info(f"DataFrame columns: {df.columns}")
+        logger.info(f"First few rows of the DataFrame:\n{df.head()}")
+        
     except Exception as e:
-        logger.warning(f"Could not create synthetic data: {e}. Will let environment fetch data.")
-        synthetic_df = None
-    
-    # Create a test environment to validate configuration
-    try:
-        # Define common environment parameters
-        lookback = getattr(args, 'lookback', 5)
-        initial_balance = getattr(args, 'initial_balance', 1000000.0)
-        include_cash = getattr(args, 'include_cash', False)
-        
-        # Create a test environment
-        logger.info("Creating single environment for initial testing...")
-        test_env = create_finrl_env(
-            start_date=start_date,
-            end_date=end_date,
-            symbols=symbols,
-            data_source="binance",
-            initial_balance=initial_balance,
-            lookback=lookback,
-            include_cash=include_cash,
-            df=synthetic_df  # Pass the synthetic data
-        )
-        
-        # Create multiple environments for parallel training if num_workers > 1
-        num_workers = getattr(args, 'num_workers', 1)
-        logger.info(f"Creating {num_workers} parallel environments with DummyVecEnv due to compatibility issues")
-        
-        # Create a list of environment creation functions
-        env_fns = []
-        for i in range(num_workers):
-            def make_env(idx=i, df=synthetic_df.copy()):  # Pass a copy of the dataframe to each environment
-                # Each environment gets the same configuration but will sample differently
-                env = create_finrl_env(
-                    start_date=start_date,
-                    end_date=end_date,
-                    symbols=symbols,
-                    data_source="binance",
-                    initial_balance=initial_balance,
-                    lookback=lookback,
-                    include_cash=include_cash,
-                    df=df  # Use the provided dataframe
-                )
-                # Add unique identification to the environment
-                env = Monitor(env, os.path.join(model_dir, f'monitor_{idx}'))
-                return env
-            env_fns.append(make_env)
-        
-        # Always use DummyVecEnv for compatibility
-        env = DummyVecEnv(env_fns)
-        logger.info(f"Using DummyVecEnv for environment vectorization due to gym compatibility issues")
-        
-        # Create the DRL agent
-        model_name = args.finrl_model.upper()
-        
-        logger.info(f"Setting up CustomDRLAgent with model: {model_name}")
-        # Get observation and action dimensions from the environment
-        state_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
-        
-        logger.info(f"State dimension: {state_dim}, Action dimension: {action_dim}")
-        
-        # Set up appropriate network architecture based on model type
-        if model_name in ["SAC", "TD3", "DDPG"]:
-            # For continuous action space models
-            # Actor and critic networks
-            actor_network_layers = [256, 256]
-            critic_network_layers = [256, 256]
-            logger.info(f"Using actor network: {actor_network_layers}, critic network: {critic_network_layers}")
-        else:
-            # For PPO with policy network
-            network_layers = [256, 256]  
-            logger.info(f"Using network: {network_layers}")
-        
-        # Get model parameters based on the chosen model
-        if model_name == "SAC":
-            model_params = {
-                "batch_size": 256,
-                "buffer_size": 1000000,
-                "learning_rate": 0.0003,
-                "learning_starts": 100,
-                "ent_coef": "auto_0.1",
-                "verbose": args.verbose,
-            }
-        elif model_name == "TD3":
-            model_params = {
-                "batch_size": 100,
-                "buffer_size": 1000000,
-                "learning_rate": 0.0003,
-                "learning_starts": 100,
-                "verbose": args.verbose,
-            }
-        elif model_name == "DDPG":
-            model_params = {
-                "batch_size": 128,
-                "buffer_size": 50000,
-                "learning_rate": 0.001,
-                "verbose": args.verbose,
-            }
-        elif model_name == "PPO":
-            model_params = {
-                "batch_size": 128,
-                "n_steps": 2048,
-                "ent_coef": 0.01,
-                "learning_rate": 0.00025,
-                "verbose": args.verbose,
-            }
-        else:
-            raise ValueError(f"Model {model_name} not supported. Choose from SAC, TD3, DDPG, PPO")
-        
-        logger.info(f"Model parameters: {model_params}")
-        
-        # Create DRL agent
-        agent = CustomDRLAgent(env=env, model_name=model_name)
-        
-        # Set up the training callback to log progress
-        log_dir = os.path.join(model_dir, 'tb_logs')
-        os.makedirs(log_dir, exist_ok=True)
-        
-        callback = TrainingLoggingCallback(
-            check_freq=1000,  # Check progress every 1000 steps
-            save_path=model_dir,
-            verbose=args.verbose,
-            save_freq=5000,  # Save every 5000 steps
-            log_dir=log_dir
-        )
-        
-        # Train the model
-        logger.info("Starting model training...")
-        model_path = os.path.join(model_dir, f"{model_name.lower()}_model")
-        model = agent.get_model(model_name, model_kwargs=model_params)
-        
-        # Train for the specified number of timesteps
-        timesteps = getattr(args, 'timesteps', 50000)
-        logger.info(f"Training for {timesteps} timesteps")
-        
-        # Train the model
-        model = agent.train_model(model=model, tb_log_name=model_name.lower(), total_timesteps=timesteps, callback=callback)
-        
-        # Save the trained model
-        logger.info(f"Saving model to {model_path}")
-        model.save(model_path)
-        
-        logger.info("Training completed successfully!")
-        return model
-    
-    except Exception as e:
-        logger.error(f"Error in train_with_finrl: {e}")
+        logger.error(f"Error creating synthetic data: {e}")
         logger.error(traceback.format_exc())
         raise
-
-def create_synthetic_data(symbols, start_date, end_date):
-    """
-    Create synthetic data for testing when real data is not available.
     
-    Args:
-        symbols: List of symbols to create data for
-        start_date: Start date as string 'YYYY-MM-DD'
-        end_date: End date as string 'YYYY-MM-DD'
-        
-    Returns:
-        DataFrame with synthetic data
-    """
-    logger.info(f"Creating synthetic data for {len(symbols)} symbols from {start_date} to {end_date}")
+    # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
+    logger.info(f"Using DummyVecEnv for environment vectorization due to compatibility issues")
     
-    # Convert dates to datetime
-    start = pd.to_datetime(start_date)
-    end = pd.to_datetime(end_date)
+    # Create the environment functions for each worker
+    def make_env():
+        """Create a single environment for vectorization"""
+        env = create_finrl_env(
+            start_date=start_date,
+            end_date=end_date,
+            symbols=tickers,
+            data_source=data_source,
+            initial_balance=initial_balance,
+            lookback=lookback,
+            state_space=args.state_dim,
+            include_cash=include_cash,
+            df=df  # Pass the formatted DataFrame
+        )
+        # Wrap with Monitor for logging
+        return gym.wrappers.Monitor(env, None, allow_early_resets=True)
     
-    # Create date range
-    dates = pd.date_range(start=start, end=end, freq='D')
+    # Create the vectorized environment using DummyVecEnv
+    envs = []
+    for i in range(num_workers):
+        envs.append(make_env)
     
-    # Create empty DataFrame
-    data = []
+    vec_env = DummyVecEnv(envs)
     
-    # Simulate data for each symbol
-    for symbol in symbols:
-        # Start with a random price
-        base_price = np.random.uniform(100, 10000)
-        
-        # Simulate price data
-        prices = np.zeros(len(dates))
-        prices[0] = base_price
-        
-        # Simple random walk with drift
-        for i in range(1, len(dates)):
-            # Random daily return between -3% and +3%
-            daily_return = np.random.normal(0.0005, 0.02)  # Slight upward bias
-            prices[i] = prices[i-1] * (1 + daily_return)
-        
-        # Create DataFrame for this symbol
-        symbol_data = pd.DataFrame({
-            'date': dates,
-            'tic': symbol,
-            'open': prices * np.random.uniform(0.98, 0.99, len(dates)),
-            'high': prices * np.random.uniform(1.01, 1.05, len(dates)),
-            'low': prices * np.random.uniform(0.95, 0.99, len(dates)),
-            'close': prices,
-            'volume': np.random.normal(1000000, 500000, len(dates)).astype(int),
-        })
-        
-        data.append(symbol_data)
+    # Set up the model parameters
+    if args.finrl_model.lower() == "sac":
+        model_class = SAC
+        policy_kwargs = dict(
+            activation_fn=nn.ReLU,
+            net_arch=dict(
+                pi=[args.hidden_dim, args.hidden_dim], 
+                qf=[args.hidden_dim, args.hidden_dim]
+            )
+        )
+    elif args.finrl_model.lower() == "td3":
+        model_class = TD3
+        policy_kwargs = dict(
+            activation_fn=nn.ReLU,
+            net_arch=dict(
+                pi=[args.hidden_dim, args.hidden_dim], 
+                qf=[args.hidden_dim, args.hidden_dim]
+            )
+        )
+    elif args.finrl_model.lower() == "ddpg":
+        model_class = DDPG
+        policy_kwargs = dict(
+            activation_fn=nn.ReLU,
+            net_arch=dict(
+                pi=[args.hidden_dim, args.hidden_dim], 
+                qf=[args.hidden_dim, args.hidden_dim]
+            )
+        )
+    elif args.finrl_model.lower() == "ppo":
+        model_class = PPO
+        policy_kwargs = dict(
+            activation_fn=nn.Tanh,
+            net_arch=[dict(
+                pi=[args.hidden_dim, args.hidden_dim],
+                vf=[args.hidden_dim, args.hidden_dim]
+            )]
+        )
+    else:
+        logger.error(f"Unsupported model: {args.finrl_model}")
+        raise ValueError(f"Unsupported model: {args.finrl_model}")
     
-    # Combine all symbol data
-    df = pd.concat(data, ignore_index=True)
-    
-    # Add technical indicators
-    df = add_technical_indicators_for_testing(df)
-    
-    return df
-
-def add_technical_indicators_for_testing(df):
-    """
-    Add synthetic technical indicators for testing.
-    
-    Args:
-        df: DataFrame with OHLCV data
-        
-    Returns:
-        DataFrame with added technical indicators
-    """
-    # List of symbols
-    symbols = df['tic'].unique()
-    
-    results = []
-    
-    # Process each symbol separately
-    for symbol in symbols:
-        symbol_df = df[df['tic'] == symbol].copy()
-        symbol_df = symbol_df.sort_values('date')
-        
-        # Calculate simple moving averages
-        for window in [5, 10, 20, 60, 120]:
-            symbol_df[f'close_{window}_sma'] = symbol_df['close'].rolling(window=window).mean().bfill()
+    # Create a callback for logging
+    class TensorboardCallback(BaseCallback):
+        def __init__(self, verbose=0):
+            super(TensorboardCallback, self).__init__(verbose)
+            self.episode_rewards = []
+            self.current_episode_reward = 0
+            self.episode_lengths = []
+            self.current_episode_length = 0
+            self.portfolio_values = []
+            self.training_iteration = 0
             
-        # Calculate exponential moving averages
-        for window in [5, 10, 20, 60, 120]:
-            symbol_df[f'close_{window}_ema'] = symbol_df['close'].ewm(span=window).mean().bfill()
+        def _on_step(self):
+            # Track reward for current step
+            reward = self.locals['rewards'][0]
+            self.current_episode_reward += reward
+            self.current_episode_length += 1
             
-        # RSI (relative strength index)
-        symbol_df['rsi_14'] = np.random.uniform(30, 70, len(symbol_df))  # Simulated RSI
-        
-        # MACD (Moving Average Convergence Divergence)
-        symbol_df['macd'] = np.random.normal(0, 1, len(symbol_df))  # Simulated MACD
-        symbol_df['macd_signal'] = np.random.normal(0, 1, len(symbol_df))  # Simulated MACD signal
-        symbol_df['macd_hist'] = symbol_df['macd'] - symbol_df['macd_signal']  # Simulated MACD histogram
-        
-        # Commodity Channel Index
-        symbol_df['cci_30'] = np.random.normal(0, 100, len(symbol_df))  # Simulated CCI
-        
-        # Directional Movement Index
-        symbol_df['dx_30'] = np.random.uniform(0, 100, len(symbol_df))  # Simulated DMI
-        
-        # Volatility
-        symbol_df['volatility_30'] = np.random.uniform(0.01, 0.05, len(symbol_df))  # Simulated volatility
-        
-        # Volume indicators
-        symbol_df['volume_change'] = np.random.normal(0, 1, len(symbol_df))  # Simulated volume change
-        symbol_df['volume_norm'] = np.random.uniform(0, 1, len(symbol_df))  # Simulated normalized volume
-        
-        results.append(symbol_df)
+            # Record current step reward
+            self.logger.record('train/step_reward', reward)
+            
+            # Record additional info from environment if available
+            if 'infos' in self.locals and len(self.locals['infos']) > 0:
+                info = self.locals['infos'][0]
+                if 'portfolio_value' in info:
+                    self.portfolio_values.append(info['portfolio_value'])
+                    self.logger.record('portfolio/value', info['portfolio_value'])
+                if 'position' in info:
+                    self.logger.record('portfolio/position', info['position'])
+                if 'trade_count' in info:
+                    self.logger.record('trades/count', info['trade_count'])
+                if 'profit_loss' in info:
+                    self.logger.record('trades/profit_loss', info['profit_loss'])
+            
+            # Check if episode is done
+            dones = self.locals.get('dones', [False])
+            if dones[0]:
+                # Record episode statistics
+                self.episode_rewards.append(self.current_episode_reward)
+                self.episode_lengths.append(self.current_episode_length)
+                
+                # Log episode statistics
+                self.logger.record('episode/reward', self.current_episode_reward)
+                self.logger.record('episode/length', self.current_episode_length)
+                
+                # Calculate and log running statistics
+                if len(self.episode_rewards) > 0:
+                    self.logger.record('episode/mean_reward', np.mean(self.episode_rewards[-100:]))
+                    self.logger.record('episode/mean_length', np.mean(self.episode_lengths[-100:]))
+                
+                if len(self.portfolio_values) > 0:
+                    self.logger.record('portfolio/final_value', self.portfolio_values[-1])
+                    self.logger.record('portfolio/mean_value', np.mean(self.portfolio_values[-100:]))
+                
+                # Reset episode tracking
+                self.current_episode_reward = 0
+                self.current_episode_length = 0
+                self.portfolio_values = []
+            
+            # Track learning progress
+            self.training_iteration += 1
+            return True
     
-    # Combine results
-    result_df = pd.concat(results, ignore_index=True)
+    # Create the model
+    logger.info(f"Creating {args.finrl_model.upper()} model with policy_kwargs: {policy_kwargs}")
+    model = model_class(
+        "MlpPolicy", 
+        vec_env, 
+        verbose=1 if args.verbose else 0,
+        policy_kwargs=policy_kwargs,
+        tensorboard_log=f"./tensorboard_logs/{args.finrl_model}/"
+    )
     
-    return result_df
+    # Train the model with callback
+    total_timesteps = args.timesteps
+    logger.info(f"Training model for {total_timesteps} timesteps")
+    model.learn(
+        total_timesteps=total_timesteps,
+        callback=TensorboardCallback()
+    )
+    
+    # Save the model
+    if args.save_model:
+        model_path = f"./models/finrl_{args.finrl_model}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        model.save(model_path)
+        logger.info(f"Saved model to {model_path}")
+    
+    return model
 
 def train_with_custom_dqn(args, market_data, data_length, device):
     """
@@ -2585,6 +2456,122 @@ def load_and_preprocess_market_data(args):
     logger.info(f"Data loaded, {data_length} samples found")
     
     return market_data, data_length
+
+def create_synthetic_data(symbols, start_date, end_date):
+    """
+    Create synthetic data for testing when real data is not available.
+    
+    Args:
+        symbols: List of symbols to create data for
+        start_date: Start date as string 'YYYY-MM-DD'
+        end_date: End date as string 'YYYY-MM-DD'
+        
+    Returns:
+        DataFrame with synthetic data
+    """
+    print(f"Creating synthetic data for {len(symbols)} symbols from {start_date} to {end_date}")
+    
+    # Convert dates to datetime
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+    
+    # Create date range
+    dates = pd.date_range(start=start, end=end, freq='D')
+    
+    # Create empty DataFrame
+    data = []
+    
+    # Simulate data for each symbol
+    for symbol in symbols:
+        # Start with a random price
+        base_price = np.random.uniform(100, 10000)
+        
+        # Simulate price data
+        prices = np.zeros(len(dates))
+        prices[0] = base_price
+        
+        # Simple random walk with drift
+        for i in range(1, len(dates)):
+            # Random daily return between -3% and +3%
+            daily_return = np.random.normal(0.0005, 0.02)  # Slight upward bias
+            prices[i] = prices[i-1] * (1 + daily_return)
+        
+        # Create DataFrame for this symbol
+        symbol_data = pd.DataFrame({
+            'date': dates,
+            'tic': symbol,
+            'open': prices * np.random.uniform(0.98, 0.99, len(dates)),
+            'high': prices * np.random.uniform(1.01, 1.05, len(dates)),
+            'low': prices * np.random.uniform(0.95, 0.99, len(dates)),
+            'close': prices,
+            'volume': np.random.normal(1000000, 500000, len(dates)).astype(int),
+        })
+        
+        data.append(symbol_data)
+    
+    # Combine all symbol data
+    df = pd.concat(data, ignore_index=True)
+    
+    # Add technical indicators
+    df = add_technical_indicators_for_testing(df)
+    
+    return df
+
+def add_technical_indicators_for_testing(df):
+    """
+    Add synthetic technical indicators for testing.
+    
+    Args:
+        df: DataFrame with OHLCV data
+        
+    Returns:
+        DataFrame with added technical indicators
+    """
+    # List of symbols
+    symbols = df['tic'].unique()
+    
+    results = []
+    
+    # Process each symbol separately
+    for symbol in symbols:
+        symbol_df = df[df['tic'] == symbol].copy()
+        symbol_df = symbol_df.sort_values('date')
+        
+        # Calculate simple moving averages
+        for window in [5, 10, 20, 60, 120]:
+            symbol_df[f'close_{window}_sma'] = symbol_df['close'].rolling(window=window).mean().bfill()
+            
+        # Calculate exponential moving averages
+        for window in [5, 10, 20, 60, 120]:
+            symbol_df[f'close_{window}_ema'] = symbol_df['close'].ewm(span=window).mean().bfill()
+            
+        # RSI (relative strength index)
+        symbol_df['rsi_14'] = np.random.uniform(30, 70, len(symbol_df))  # Simulated RSI
+        
+        # MACD (Moving Average Convergence Divergence)
+        symbol_df['macd'] = np.random.normal(0, 1, len(symbol_df))  # Simulated MACD
+        symbol_df['macd_signal'] = np.random.normal(0, 1, len(symbol_df))  # Simulated MACD signal
+        symbol_df['macd_hist'] = symbol_df['macd'] - symbol_df['macd_signal']  # Simulated MACD histogram
+        
+        # Commodity Channel Index
+        symbol_df['cci_30'] = np.random.normal(0, 100, len(symbol_df))  # Simulated CCI
+        
+        # Directional Movement Index
+        symbol_df['dx_30'] = np.random.uniform(0, 100, len(symbol_df))  # Simulated DMI
+        
+        # Volatility
+        symbol_df['volatility_30'] = np.random.uniform(0.01, 0.05, len(symbol_df))  # Simulated volatility
+        
+        # Volume indicators
+        symbol_df['volume_change'] = np.random.normal(0, 1, len(symbol_df))  # Simulated volume change
+        symbol_df['volume_norm'] = np.random.uniform(0, 1, len(symbol_df))  # Simulated normalized volume
+        
+        results.append(symbol_df)
+    
+    # Combine results
+    result_df = pd.concat(results, ignore_index=True)
+    
+    return result_df
 
 if __name__ == "__main__":
     main() 
