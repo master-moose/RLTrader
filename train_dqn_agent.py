@@ -2648,6 +2648,12 @@ class FinRLStockTradingEnv(gym.Env):
         # Get first date
         self.day = self.unique_dates[self.current_date_idx]
         
+        # Initialize portfolio values before state calculation
+        self.terminal = False
+        self.portfolio_value = self.initial_amount
+        self.asset_memory = [self.initial_amount]
+        self.day_memory = [self.day]
+        
         # Initialize state
         self.state = self._get_state()
         
@@ -2659,13 +2665,7 @@ class FinRLStockTradingEnv(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(state_space,), dtype=np.float32
         )
-        
-        # Initialize
-        self.terminal = False
-        self.portfolio_value = self.initial_amount
-        self.asset_memory = [self.initial_amount]
-        self.day_memory = [self.day]
-        
+    
     def _get_state(self):
         """
         Get the current state of the environment.
@@ -2680,130 +2680,192 @@ class FinRLStockTradingEnv(gym.Env):
             current_date = self.unique_dates[self.current_date_idx]
             self.data = self.df.loc[self.df.index == current_date].copy()
             
+        # Get current prices
+        close_prices = self.data['close'].values
+        
+        # Calculate current portfolio value (cash + stock value)
+        stock_value = sum(num_shares * price for num_shares, price in zip(self.num_stock_shares, close_prices))
+        self.portfolio_value = self.initial_amount + stock_value
+        
         # Create state representation
-        # This is a simplified version - customize based on your needs
-        state = np.array([
-            self.portfolio_value,  # Current portfolio value
-            *self.num_stock_shares,  # Current stock shares
-            *self.data['close'].values.tolist(),  # Current close prices
-        ])
+        # Ensure we have the correct dimensionality expected by the observation space
+        state_components = []
+        
+        # Add portfolio value
+        state_components.append(self.portfolio_value)
+        
+        # Add stock shares
+        state_components.extend(self.num_stock_shares)
+        
+        # Add current close prices
+        state_components.extend(close_prices.tolist())
         
         # Append technical indicators if specified
         for indicator in self.tech_indicator_list:
             if indicator in self.data.columns:
                 values = self.data[indicator].values
                 if len(values) > 0:
-                    state = np.append(state, values)
+                    state_components.extend(values.tolist())
+        
+        # Convert to numpy array
+        state = np.array(state_components, dtype=np.float32)
+        
+        # Log first state for debugging
+        if self.current_date_idx == 0:
+            logger.info(f"Initial state shape: {state.shape}, components: {len(state_components)}")
         
         return state
         
-    def reset(self):
+    def reset(self, seed=None):
         """
-        Reset the environment to initial state.
-        """
-        self.terminal = False
-        self.portfolio_value = self.initial_amount
-        self.num_stock_shares = [0] * self.stock_dim
-        self.asset_memory = [self.initial_amount]
-        
-        # Reset to first day
-        self.current_date_idx = 0
-        self.day = self.unique_dates[self.current_date_idx]
-        self.day_memory = [self.day]
-        
-        # Get state
-        self.state = self._get_state()
-        
-        return self.state
-        
-    def step(self, actions):
-        """
-        Execute actions in the environment.
+        Reset the environment to start a new episode.
         
         Args:
-            actions: Array of actions for each stock
+            seed: Random seed to set
             
         Returns:
-            next_state, reward, done, info
+            numpy.ndarray: The initial state observation
         """
-        self.terminal = False
+        # Reset the state
+        self.current_step = 0
+        self.done = False
         
-        # Get current data
-        if self.current_date_idx >= len(self.unique_dates) - 1:
-            # If we've reached the end of the data, terminate
-            self.terminal = True
-            return self.state, 0, self.terminal, {'portfolio_value': self.portfolio_value}
+        # Reset portfolio tracking
+        self.portfolio_value = self.initial_amount
+        self.num_stock_shares = np.zeros(self.n_stocks)
+        self.asset_memory = [self.portfolio_value]  # Track portfolio value over time
+        self.rewards = []  # Track rewards over time
+        
+        # Reset trade tracking
+        self.trade_count = 0
+        self.episode_trades = 0
+        self.total_trades = 0
+        
+        # Reset metrics
+        self.episode_reward = 0.0
+        
+        # Set seed if provided
+        if seed is not None:
+            self.seed(seed)
+        
+        # Get initial observation
+        obs = self._get_observation()
+        
+        if self.verbose:
+            logger.info(f"Environment reset with initial portfolio value: {self.portfolio_value}")
+        
+        return obs
+        
+    def step(self, action):
+        """
+        Execute one time step within the environment based on the agent's action.
+        
+        Args:
+            action (numpy.ndarray): Action to be taken by the agent
             
-        # Get current prices
-        if isinstance(self.df.index, pd.MultiIndex):
-            current_date = self.unique_dates[self.current_date_idx]
-            current_data = self.df.loc[current_date]
-            close_prices = current_data['close'].values
-        else:
-            current_date = self.unique_dates[self.current_date_idx]
-            current_data = self.df.loc[self.df.index == current_date]
-            close_prices = current_data['close'].values
-            
-        # Calculate portfolio value before action
-        portfolio_value_before = self.portfolio_value + sum(shares * price for shares, price in zip(self.num_stock_shares, close_prices))
+        Returns:
+            tuple: (next_state, reward, done, info) tuple containing:
+                - next_state (numpy.ndarray): The new state after action
+                - reward (float): The reward received for this action
+                - done (bool): Whether the episode has ended
+                - info (dict): Additional information for debugging
+        """
+        # Ensure the current step is not beyond the dataset
+        if self.current_step >= len(self.price_data) - 1:
+            self.done = True
+            info = {
+                'portfolio_value': self.portfolio_value,
+                'trade_count': self.trade_count,
+                'asset_memory': self.asset_memory,
+                'action': action,
+                'current_step': self.current_step,
+                'reason': 'end_of_data'
+            }
+            return self._get_observation(), 0, self.done, info
         
-        # Execute trades based on actions
-        # Normalize actions to [-1, 1] range if not already
-        actions = np.clip(actions, -1, 1)
+        # Increment the current step
+        self.current_step += 1
         
-        # Simple trading logic:
-        # For each stock, action > 0 means buy, action < 0 means sell
-        for i, action in enumerate(actions):
-            if action > 0:  # Buy
-                # Calculate max shares we can buy
-                max_shares = min(self.hmax, int(self.portfolio_value / (close_prices[i] * (1 + self.buy_cost_pct))))
-                shares_to_buy = int(max_shares * action)  # Scale by action
+        # Get prices for previous and current step
+        prev_price = self.price_data[self.current_step - 1]
+        curr_price = self.price_data[self.current_step]
+        
+        # Record the previous portfolio value
+        prev_portfolio_value = self.portfolio_value
+        
+        # Execute the action
+        action_vec = action.reshape((self.action_space.shape[0],))
+        
+        # Update portfolio based on actions
+        for i, (asset_symbol, asset_action) in enumerate(zip(self.symbols, action_vec)):
+            # Implement the trading logic based on action
+            if asset_action > 0:  # Buy
+                # Calculate number of shares to buy based on action strength
+                buy_amount = self.portfolio_value * asset_action * 0.1  # Use 10% of portfolio * action strength
                 
-                # Calculate cost including fees
-                cost = shares_to_buy * close_prices[i] * (1 + self.buy_cost_pct)
+                # Check if we have enough cash
+                if buy_amount <= self.cash_balance:
+                    shares_to_buy = buy_amount / curr_price[i]
+                    self.num_stock_shares[i] += shares_to_buy
+                    self.cash_balance -= buy_amount
+                    self.trade_count += 1
+                    self.episode_trades += 1
+                    self.total_trades += 1
+                    
+                    if self.verbose:
+                        print(f"Buy {shares_to_buy:.6f} shares of {asset_symbol} at ${curr_price[i]:.2f}")
+                    
+            elif asset_action < 0:  # Sell
+                # Calculate number of shares to sell based on action strength
+                sell_ratio = abs(asset_action) * 0.1  # Sell up to 10% of holdings * action strength
+                shares_to_sell = self.num_stock_shares[i] * sell_ratio
                 
-                # Update portfolio
-                self.num_stock_shares[i] += shares_to_buy
-                self.portfolio_value -= cost
-                
-            elif action < 0:  # Sell
-                # Calculate shares to sell
-                shares_to_sell = int(self.num_stock_shares[i] * abs(action))
-                
-                # Calculate revenue including fees
-                revenue = shares_to_sell * close_prices[i] * (1 - self.sell_cost_pct)
-                
-                # Update portfolio
-                self.num_stock_shares[i] -= shares_to_sell
-                self.portfolio_value += revenue
+                # Check if we have shares to sell
+                if shares_to_sell > 0:
+                    sell_amount = shares_to_sell * curr_price[i]
+                    self.num_stock_shares[i] -= shares_to_sell
+                    self.cash_balance += sell_amount
+                    self.trade_count += 1
+                    self.episode_trades += 1
+                    self.total_trades += 1
+                    
+                    if self.verbose:
+                        print(f"Sell {shares_to_sell:.6f} shares of {asset_symbol} at ${curr_price[i]:.2f}")
         
-        # Move to next day
-        self.current_date_idx += 1
-        if self.current_date_idx < len(self.unique_dates):
-            self.day = self.unique_dates[self.current_date_idx]
-            self.day_memory.append(self.day)
-        else:
-            self.terminal = True
-            
-        # Get new state
-        self.state = self._get_state()
+        # Calculate current portfolio value
+        stock_value = sum(shares * price for shares, price in zip(self.num_stock_shares, curr_price))
+        self.portfolio_value = self.cash_balance + stock_value
         
-        # Calculate new portfolio value
-        new_portfolio_value = self.portfolio_value + sum(shares * price for shares, price in zip(self.num_stock_shares, close_prices))
-        self.asset_memory.append(new_portfolio_value)
+        # Record portfolio value for tracking
+        self.asset_memory.append(self.portfolio_value)
         
-        # Calculate reward
-        reward = (new_portfolio_value - portfolio_value_before) * self.reward_scaling
+        # Calculate reward as the change in portfolio value
+        reward = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
         
-        # Information dictionary
+        # Apply a penalty for excessive trading if needed
+        # if self.episode_trades > SOME_THRESHOLD:
+        #    reward -= PENALTY_VALUE
+        
+        # Store reward for tracking
+        self.rewards.append(reward)
+        self.episode_reward += reward
+        
+        # Check if episode is done (end of data or bankruptcy)
+        if self.current_step >= len(self.price_data) - 1:
+            self.done = True
+        
+        # Prepare info dictionary for debugging and monitoring
         info = {
-            'portfolio_value': new_portfolio_value,
-            'date': self.day,
-            'reward': reward,
-            'terminal': self.terminal
+            'portfolio_value': self.portfolio_value,
+            'cash_balance': self.cash_balance,
+            'stock_holdings': self.num_stock_shares,
+            'trade_count': self.trade_count,
+            'step_reward': reward,
+            'total_reward': self.episode_reward,
+            'action': action
         }
         
-        return self.state, reward, self.terminal, info
+        return self._get_observation(), reward, self.done, info
         
     def render(self, mode='human'):
         """Render the environment."""
@@ -2817,6 +2879,148 @@ class FinRLStockTradingEnv(gym.Env):
         """Set random seed."""
         np.random.seed(seed)
         return [seed]
+
+    def _update_holdings(self, actions, current_price_data):
+        """
+        Update holdings based on the actions taken.
+        
+        Args:
+            actions: Array of actions for each stock
+            current_price_data: Dataframe with current price data
+        """
+        # Get close prices
+        close_prices = current_price_data['close'].values
+        
+        # Normalize actions to [-1, 1] range if not already
+        actions = np.clip(actions, -1, 1)
+        
+        # Track if any trades were made
+        made_trades = False
+        
+        # Process each action
+        for i, action in enumerate(actions):
+            if action > 0.1:  # Buy threshold
+                # Calculate max shares we can buy
+                max_shares = min(
+                    self.hmax, 
+                    int(self.portfolio_value / (close_prices[i] * (1 + self.buy_cost_pct)))
+                )
+                shares_to_buy = int(max_shares * action)
+                
+                if shares_to_buy > 0:
+                    # Calculate cost including fees
+                    cost = shares_to_buy * close_prices[i] * (1 + self.buy_cost_pct)
+                    
+                    # Update portfolio
+                    self.num_stock_shares[i] += shares_to_buy
+                    self.portfolio_value -= cost
+                    self.trade_count += 1
+                    self.episode_trades += 1
+                    made_trades = True
+                    
+                    logger.debug(f"Bought {shares_to_buy} shares of asset {i} at {close_prices[i]}, "
+                               f"cost: {cost}, remaining cash: {self.portfolio_value}")
+                    
+            elif action < -0.1:  # Sell threshold
+                # Calculate shares to sell
+                shares_to_sell = int(self.num_stock_shares[i] * abs(action))
+                
+                if shares_to_sell > 0:
+                    # Calculate revenue including fees
+                    revenue = shares_to_sell * close_prices[i] * (1 - self.sell_cost_pct)
+                    
+                    # Update portfolio
+                    self.num_stock_shares[i] -= shares_to_sell
+                    self.portfolio_value += revenue
+                    self.trade_count += 1
+                    self.episode_trades += 1
+                    made_trades = True
+                    
+                    logger.debug(f"Sold {shares_to_sell} shares of asset {i} at {close_prices[i]}, "
+                               f"revenue: {revenue}, new cash: {self.portfolio_value}")
+        
+        # Update portfolio value to include asset holdings
+        self._update_portfolio_value(close_prices)
+        
+        return made_trades
+
+    def _update_portfolio_value(self, close_prices):
+        """
+        Update the total portfolio value based on current holdings and prices.
+        
+        Args:
+            close_prices: Array of current close prices
+        """
+        # Calculate value of stocks held
+        holdings_value = sum(shares * price for shares, price in zip(self.num_stock_shares, close_prices))
+        
+        # Total portfolio value is cash + holdings
+        total_value = self.portfolio_value + holdings_value
+        
+        # For tracking purposes only - don't modify self.portfolio_value here as it represents cash
+        return total_value
+
+    def _calculate_reward(self, new_portfolio_value):
+        """
+        Calculate the reward based on portfolio performance.
+        
+        Args:
+            new_portfolio_value: Current portfolio value
+            
+        Returns:
+            float: Calculated reward
+        """
+        # If this is the first step, use initial amount as previous value
+        if len(self.asset_memory) == 0:
+            prev_portfolio_value = self.initial_amount
+        else:
+            prev_portfolio_value = self.asset_memory[-1]
+        
+        # Calculate reward as scaled portfolio change
+        reward = ((new_portfolio_value - prev_portfolio_value) / prev_portfolio_value) * self.reward_scaling
+        
+        # Apply penalty for excessive trading if configured
+        if hasattr(self, 'trade_penalty') and self.trade_penalty > 0:
+            reward -= self.episode_trades * self.trade_penalty
+        
+        return reward
+
+    def _get_observation(self):
+        """
+        Get the current state observation that will be passed to the agent.
+        
+        Returns:
+            numpy.ndarray: The observation vector including market data and agent's portfolio info
+        """
+        # Get price and LSTM feature data for the current step
+        price_data = self.price_data[self.current_step:self.current_step + 1]
+        lstm_data = self.lstm_features[self.current_step:self.current_step + 1] if self.lstm_features is not None else None
+        
+        # Create market observation vector
+        if lstm_data is not None:
+            market_obs = np.concatenate((price_data, lstm_data), axis=1)
+        else:
+            market_obs = price_data
+        
+        # Create portfolio observation (current holdings and portfolio value)
+        portfolio_obs = np.array([
+            self.portfolio_value,  # Current portfolio value 
+            *self.num_stock_shares  # Current holdings for each asset
+        ])
+        
+        # Reshape portfolio observation for concatenation
+        portfolio_obs = portfolio_obs.reshape(1, -1)
+        
+        # Combine market and portfolio observations
+        obs = np.concatenate((market_obs, portfolio_obs), axis=1)
+        
+        # Flatten the observation if required by the agent
+        obs = obs.flatten()
+        
+        # Clip observation values to prevent extremely large values
+        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
+        
+        return obs
 
 def create_finrl_env(
     start_date, end_date, symbols, data_source="binance", initial_balance=1000000.0,
