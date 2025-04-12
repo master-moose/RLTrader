@@ -958,9 +958,11 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     'action_space': action_space,
                     'tech_indicator_list': tech_indicator_list,
                     'initial_amount': initial_amount,
-                    'buy_cost_pct': buy_cost_pct_list,
+                    'transaction_cost_pct': transaction_cost_pct_list,
+                    'buy_cost_pct': buy_cost_pct_list,  # Pass as list
                     'sell_cost_pct': sell_cost_pct_list,  # Pass as list
                     'reward_scaling': reward_scaling,
+                    'state_space': state_space,  # Add the missing state_space parameter
                     'print_verbosity': 1 if idx == 0 else 0  # Only print verbose output for the first env
                 }
                 
@@ -2233,7 +2235,7 @@ def main():
                             logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
                         return True
                 
-                callbacks = [TensorboardCallback()]
+                callbacks = [GPUMonitorCallback()]
                 if args.verbose and torch.cuda.is_available():
                     callbacks.append(GPUMonitorCallback())
                 
@@ -2325,7 +2327,7 @@ def main():
                     logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
                 return True
         
-        callbacks = [TensorboardCallback()]
+        callbacks = [GPUMonitorCallback()]
         if args.verbose and torch.cuda.is_available():
             callbacks.append(GPUMonitorCallback())
         
