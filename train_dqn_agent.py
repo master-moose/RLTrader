@@ -765,7 +765,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
     hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
     
-    # Create lists for transaction costs (FinRL expects lists, not scalars)
+    # Create lists for transaction costs (required by FinRL)
+    transaction_cost_pct_list = [transaction_cost_pct] * stock_dim
     buy_cost_pct_list = [transaction_cost_pct] * stock_dim
     sell_cost_pct_list = [transaction_cost_pct] * stock_dim
     
@@ -988,15 +989,15 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             return make_env(idx)
         env_list.append(env_fn)
     
-    # Use SubprocVecEnv if specified, otherwise use DummyVecEnv
-    if use_subproc:
+    # Create the vectorized environment
+    if use_subproc and str(device).startswith('cpu'):
         # Import the SubprocVecEnv from stable_baselines3
         from stable_baselines3.common.vec_env import SubprocVecEnv
         vec_env = SubprocVecEnv(env_list)
         logger.info("Using SubprocVecEnv for parallel environment execution")
     else:
-        # Import the DummyVecEnv from stable_baselines3
-        from stable_baselines3.common.vec_env import DummyVecEnv
+        if use_subproc and not str(device).startswith('cpu'):
+            logger.info("SubprocVecEnv requested but running on GPU. Using DummyVecEnv instead for better GPU utilization.")
         vec_env = DummyVecEnv(env_list)
         logger.info("Using DummyVecEnv for environment vectorization")
     
@@ -1758,8 +1759,8 @@ def parse_args():
                        help='FinRL model to use')
     parser.add_argument('--lstm_model_path', type=str, help='Path to pretrained LSTM model')
     parser.add_argument('--timesteps', type=int, default=500000, help='Number of timesteps to train')
-    parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel environments')
-    parser.add_argument('--num_envs_per_worker', type=int, default=8, help='Number of envs per worker')
+    parser.add_argument('--num_workers', type=int, default=2, help='Number of parallel environments')
+    parser.add_argument('--num_envs_per_worker', type=int, default=4, help='Number of envs per worker')
     parser.add_argument('--use_subproc_vecenv', action='store_true', help='Use SubprocVecEnv instead of DummyVecEnv')
     
     # Hyperparameters
@@ -1768,7 +1769,7 @@ def parse_args():
     parser.add_argument('--initial_balance', type=float, default=1000000.0, help='Initial balance')
     parser.add_argument('--transaction_fee', type=float, default=0.001, help='Transaction fee')
     parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps to collect before learning (PPO)')
-    parser.add_argument('--batch_size', type=int, default=64, help='Minibatch size for PPO updates')
+    parser.add_argument('--batch_size', type=int, default=256, help='Minibatch size for PPO updates')
     parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs when optimizing the surrogate loss (PPO)')
     
     return parser.parse_args()
@@ -2199,7 +2200,7 @@ def main():
                 
                 # Create PPO model with enhanced GPU utilization
                 model = PPO(
-                    'MlpPolicy', 
+                    "MlpPolicy", 
                     vec_env,
                     learning_rate=learning_rate,
                     gamma=getattr(args, 'gamma', 0.99),
@@ -2209,7 +2210,10 @@ def main():
                     ent_coef=0.01,         # Entropy coefficient for exploration
                     verbose=1 if args.verbose else 0,
                     tensorboard_log="./tensorboard_logs",
-                    device=device
+                    device=device,
+                    policy_kwargs={
+                        'net_arch': [512, 512, 256]  # Larger network to utilize GPU better
+                    }
                 )
                 
                 # Log GPU memory usage before training
