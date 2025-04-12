@@ -1626,7 +1626,7 @@ def parse_args():
                        choices=['sac', 'ppo', 'ddpg', 'td3'], 
                        help='FinRL model to use')
     parser.add_argument('--lstm_model_path', type=str, help='Path to pretrained LSTM model')
-    parser.add_argument('--timesteps', type=int, default=50000, help='Number of timesteps to train')
+    parser.add_argument('--timesteps', type=int, default=500000, help='Number of timesteps to train')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel environments')
     
     # Hyperparameters
@@ -2050,8 +2050,12 @@ def main():
                 model = PPO(
                     'MlpPolicy', 
                     vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0003),
+                    learning_rate=getattr(args, 'learning_rate', 0.0001),  # Lower learning rate for stability
                     gamma=getattr(args, 'gamma', 0.99),
+                    n_steps=2048,  # Larger batch size
+                    batch_size=64,  # Smaller minibatch size
+                    n_epochs=10,  # More optimization epochs
+                    ent_coef=0.01,  # Slightly higher entropy for exploration
                     verbose=1 if args.verbose else 0,
                     tensorboard_log="./tensorboard_logs"
                 )
