@@ -1952,7 +1952,7 @@ def main():
         
         # Create vectorized environment
         vec_env = create_dummy_vectorized_env(lambda: wrap_env_with_monitor(CryptocurrencyTradingEnv(**env_params)), 
-                                             num_envs=num_workers)
+                                             n_envs=num_workers)
         
         # Train model based on specified FinRL model type
         if args.finrl_model.lower() == 'sac':
