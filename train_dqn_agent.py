@@ -253,6 +253,18 @@ def parse_args():
         default=1e-2,
         help='Scaling factor for rewards in the FinRL environment'
     )
+    parser.add_argument(
+        '--hmax',
+        type=int,
+        default=100,
+        help='Maximum number of shares to trade in FinRL environment'
+    )
+    parser.add_argument(
+        '--initial_balance',
+        type=float,
+        default=1000000,
+        help='Initial balance for the agent'
+    )
     
     return parser.parse_args()
 
@@ -327,6 +339,7 @@ def create_finrl_env(df, args):
     # Get unique tickers
     unique_tickers = df['tic'].unique()
     num_stocks = len(unique_tickers)
+    stock_dim = num_stocks
     
     # Initialize stock shares to 0
     num_stock_shares = [0] * num_stocks
@@ -351,13 +364,16 @@ def create_finrl_env(df, args):
     initial_amount = getattr(args, 'initial_balance', 1000000)
     transaction_cost_pct = getattr(args, 'transaction_fee', 0.001)
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
+    hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
     
     logger.info(f"Environment config: initial_amount={initial_amount}, "
                 f"transaction_cost_pct={transaction_cost_pct}, "
-                f"reward_scaling={reward_scaling}")
+                f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
     
     env = StockTradingEnv(
         df=df,
+        stock_dim=stock_dim,
+        hmax=hmax,
         num_stock_shares=num_stock_shares,
         state_space=state_space,
         action_space=action_space,
@@ -386,6 +402,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     # Get unique tickers
     unique_tickers = df['tic'].unique()
     num_stocks = len(unique_tickers)
+    stock_dim = num_stocks
     
     # Initialize stock shares to 0
     num_stock_shares = [0] * num_stocks
@@ -409,10 +426,11 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     initial_amount = getattr(args, 'initial_balance', 1000000)
     transaction_cost_pct = getattr(args, 'transaction_fee', 0.001)
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
+    hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
     
     logger.info(f"Environment config: initial_amount={initial_amount}, "
                 f"transaction_cost_pct={transaction_cost_pct}, "
-                f"reward_scaling={reward_scaling}")
+                f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
     
     # Create a list to hold our environments
     env_list = []
@@ -420,6 +438,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     for i in range(num_workers):
         env = StockTradingEnv(
             df=df,
+            stock_dim=stock_dim,
+            hmax=hmax,
             num_stock_shares=num_stock_shares.copy(),  # Use a copy to avoid sharing state
             state_space=state_space,
             action_space=action_space,
