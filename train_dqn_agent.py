@@ -251,15 +251,34 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             obs = self.env.reset()
             reset_info = {}
         
-        # Check if observation needs adjustment
-        if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
-            logger.warning(f"Adjusting observation from shape {obs.shape} to {self.observation_space.shape}")
-            
-            # Truncate if too large
+        # Log the observation content for debugging
+        if isinstance(obs, np.ndarray):
+            logger.info(f"Reset observation shape: {obs.shape}, expected: {self.observation_space.shape}")
+            if len(obs) != self.observation_space.shape[0]:
+                logger.info(f"Observation dimension mismatch: got {len(obs)}, expected {self.observation_space.shape[0]}")
+                logger.info(f"First few values of observation: {obs[:5]}")
+                
+                # If we have state in the environment, log that too for comparison
+                if hasattr(self.env, 'state'):
+                    logger.info(f"Environment state length: {len(self.env.state)}")
+                    logger.info(f"Environment state first few elements: {self.env.state[:5]}")
+                
+                # Check for specific known issues
+                if len(obs) == self.observation_space.shape[0] + 1:
+                    logger.info(f"Observation is exactly 1 dimension larger than expected - this could be an additional feature.")
+                    logger.info(f"Last value in observation: {obs[-1]}")
+                    
+                    # This is likely the correct fix - just truncate the observation
+                    logger.info(f"Truncating observation from {len(obs)} to {self.observation_space.shape[0]}")
+                    obs = obs[:self.observation_space.shape[0]]
+                    
+            # Check if observation needs adjustment
             if len(obs) > self.observation_space.shape[0]:
+                logger.warning(f"Truncating observation from shape {obs.shape} to {self.observation_space.shape}")
                 obs = obs[:self.observation_space.shape[0]]
             # Pad with zeros if too small
             elif len(obs) < self.observation_space.shape[0]:
+                logger.warning(f"Padding observation from shape {obs.shape} to {self.observation_space.shape}")
                 obs_padded = np.zeros(self.observation_space.shape[0], dtype=np.float32)
                 obs_padded[:len(obs)] = obs
                 obs = obs_padded
@@ -279,10 +298,22 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             obs, reward, done, info = self.env.step(action)
             terminated, truncated = done, False
         
-        # Check if observation needs adjustment
+        # Log step observation for debugging (only on some steps to avoid excessive logging)
+        if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
+            self.step_counter = getattr(self, 'step_counter', 0) + 1
+            if self.step_counter % 100 == 0:  # Log only every 100 steps
+                logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, expected: {self.observation_space.shape}")
+                if len(obs) != self.observation_space.shape[0]:
+                    logger.info(f"Step observation mismatch: got {len(obs)}, expected {self.observation_space.shape[0]}")
+        
+        # Handle dimension mismatch
         if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
+            # Special case for observation that's exactly 1 dimension too large
+            if len(obs) == self.observation_space.shape[0] + 1:
+                # Simply truncate to match expected dimensions
+                obs = obs[:self.observation_space.shape[0]]
             # Truncate if too large
-            if len(obs) > self.observation_space.shape[0]:
+            elif len(obs) > self.observation_space.shape[0]:
                 obs = obs[:self.observation_space.shape[0]]
             # Pad with zeros if too small
             elif len(obs) < self.observation_space.shape[0]:
