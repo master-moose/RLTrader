@@ -606,7 +606,6 @@ def train_with_finrl(args, market_data, device):
     # Create model parameters
     model_params = {
         'learning_rate': args.learning_rate,
-        'policy': 'MlpPolicy',
         'device': device
     }
     
