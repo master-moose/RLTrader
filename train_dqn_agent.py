@@ -20,6 +20,7 @@ from stable_baselines3.common.vec_env import (
     DummyVecEnv,
 )
 from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common.noise import NormalActionNoise
 
 # Add project root to path
 project_root = str(Path(__file__).parent)
@@ -273,6 +274,12 @@ def parse_args():
         type=str,
         default='[256, 256]',
         help='Network architecture for the model'
+    )
+    parser.add_argument(
+        '--total_timesteps',
+        type=int,
+        default=100000,
+        help='Total timesteps for FinRL training'
     )
     
     return parser.parse_args()
@@ -603,47 +610,49 @@ def train_with_finrl(args, market_data, device):
         logger.warning(f"Could not parse net_arch: {args.net_arch}, using default [256, 256]")
         net_arch = [256, 256]
     
-    # Create model parameters
+    # Create basic model parameters
     model_params = {
         'learning_rate': args.learning_rate,
         'device': device
     }
     
-    # Add specific parameters based on the model
-    if args.finrl_model in ['sac', 'td3', 'ddpg']:
-        # Continuous action space models might need action noise
-        if action_noise:
-            model_params['action_noise'] = 'normal'
-            
-    # Set network architecture if provided
-    if net_arch:
-        if args.finrl_model == 'sac':
-            # For SAC, we need to specify separate networks for policy and Q-function
-            model_params['policy_kwargs'] = {
-                'net_arch': {
-                    'pi': net_arch,  # Policy network
-                    'qf': net_arch   # Q-function network
-                }
-            }
-        else:
-            # For other models, simpler net_arch specification
-            model_params['policy_kwargs'] = {
-                'net_arch': net_arch
-            }
+    # Add action noise for continuous models
+    if args.finrl_model in ['sac', 'td3', 'ddpg'] and action_noise:
+        model_params['action_noise'] = NormalActionNoise(
+            mean=np.zeros(3),  # Assuming 3 actions
+            sigma=np.ones(3) * 0.1
+        )
 
     # Create and train the model
     try:
         logger.info(f"Creating {args.finrl_model.upper()} model with FinRL")
+        print(model_params)  # Print params for debugging
         agent = DRLAgent(env=env_train)
         
-        # Get the model based on the selected algorithm
-        model = agent.get_model(args.finrl_model, model_kwargs=model_params)
+        if args.finrl_model == 'sac':
+            # For SAC, create policy_kwargs directly inside the constructor
+            model = agent.get_model(
+                args.finrl_model,
+                model_kwargs=model_params,
+                policy_type="MlpPolicy",
+                net_arch=net_arch
+            )
+        else:
+            # For other models, let FinRL handle it
+            model = agent.get_model(
+                args.finrl_model,
+                model_kwargs=model_params,
+                policy_type="MlpPolicy",
+                net_arch=net_arch
+            )
         
         # Train the model
-        logger.info(f"Training {args.finrl_model.upper()} model for {args.total_timesteps} timesteps...")
-        trained_model = agent.train_model(model=model, 
-                                         tb_log_name=f"{args.finrl_model}",
-                                         total_timesteps=args.total_timesteps)
+        logger.info(f"Training {args.finrl_model.upper()} model...")
+        trained_model = agent.train_model(
+            model=model, 
+            tb_log_name=f"{args.finrl_model}",
+            total_timesteps=args.total_timesteps if hasattr(args, 'total_timesteps') else 100000
+        )
         
         # Save the trained model
         model_save_path = os.path.join(args.save_dir, f"{args.finrl_model}_model")
