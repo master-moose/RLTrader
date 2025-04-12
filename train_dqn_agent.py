@@ -268,6 +268,12 @@ def parse_args():
         default=1000,
         help='Maximum number of steps per episode'
     )
+    parser.add_argument(
+        '--net_arch',
+        type=str,
+        default='[256, 256]',
+        help='Network architecture for the model'
+    )
     
     return parser.parse_args()
 
