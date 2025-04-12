@@ -201,18 +201,22 @@ class StockTradingEnvWrapper(gym.Wrapper):
     A wrapper for StockTradingEnv that ensures consistent observation shapes.
     """
     def __init__(self, env, state_space=16):
+        """
+        Initialize the wrapper with the given environment.
+        
+        Args:
+            env: The environment to wrap
+            state_space: The expected dimension of the observation space
+        """
         super().__init__(env)
         
-        # Create a fixed observation space with the desired size
+        # Define expected observation space
         self.observation_space = gym.spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(state_space,),
-            dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(state_space,), dtype=np.float32
         )
         
         logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
-        
+    
     def reset(self):
         obs = self.env.reset()
         
@@ -225,8 +229,9 @@ class StockTradingEnvWrapper(gym.Wrapper):
                 obs = obs[:self.observation_space.shape[0]]
             # Pad with zeros if too small
             elif len(obs) < self.observation_space.shape[0]:
-                padding = np.zeros(self.observation_space.shape[0] - len(obs))
-                obs = np.concatenate([obs, padding])
+                obs_padded = np.zeros(self.observation_space.shape[0], dtype=np.float32)
+                obs_padded[:len(obs)] = obs
+                obs = obs_padded
         
         return obs
     
@@ -240,10 +245,25 @@ class StockTradingEnvWrapper(gym.Wrapper):
                 obs = obs[:self.observation_space.shape[0]]
             # Pad with zeros if too small
             elif len(obs) < self.observation_space.shape[0]:
-                padding = np.zeros(self.observation_space.shape[0] - len(obs))
-                obs = np.concatenate([obs, padding])
+                obs_padded = np.zeros(self.observation_space.shape[0], dtype=np.float32)
+                obs_padded[:len(obs)] = obs
+                obs = obs_padded
         
         return obs, reward, done, info
+    
+    def seed(self, seed=None):
+        """
+        Seed the environment's random number generator.
+        
+        Args:
+            seed: The seed to use
+            
+        Returns:
+            The seed used
+        """
+        # Implement our own seed method since StockTradingEnv doesn't have one
+        np.random.seed(seed)
+        return [seed]
 
 # Now modify the create_finrl_env function to use this wrapper
 def create_finrl_env(df, args):
@@ -761,16 +781,8 @@ def train_with_finrl(args, market_data, device):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         
-        # Handle both old and new gym API formats for seeding
-        if hasattr(env, 'seed'):
-            env.seed(args.seed)
-        elif hasattr(env, '_seed'):
-            env._seed(args.seed)
-        elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "_seed"):
-            env.unwrapped._seed(args.seed)
-        else:
-            logger.warning(f"Could not seed environment - no seed method found")
-            
+        # Directly seed the environment - it should now have a seed method from the wrapper
+        env.seed(args.seed)
         logger.info(f"Set random seed to {args.seed}")
     
     # Log environment information
