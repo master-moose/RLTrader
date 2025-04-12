@@ -365,6 +365,14 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
     # Get the primary timeframe data
     df = market_data[primary_timeframe].copy()
     
+    # Convert index to datetime if it's not already
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if 'timestamp' in df.columns:
+            df.set_index('timestamp', inplace=True)
+        else:
+            # If no timestamp column, create one from the index
+            df.index = pd.to_datetime(df.index, unit='s')
+    
     # Add required columns for FinRL
     df['tic'] = 'BTC'  # Add ticker column
     df['day'] = df.index.date  # Add day column
