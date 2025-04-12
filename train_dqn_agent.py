@@ -370,10 +370,10 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
         if 'timestamp' in df.columns:
             df.set_index('timestamp', inplace=True)
         else:
-            # If no timestamp column, create one from the index
-            # First convert to relative timestamps to avoid overflow
-            min_index = df.index.min()
-            df.index = pd.to_datetime(df.index - min_index, unit='s')
+            # Create a synthetic datetime index starting from a recent date
+            # This avoids the datetime overflow issue while maintaining relative timing
+            start_date = pd.Timestamp('2020-01-01')
+            df.index = pd.date_range(start=start_date, periods=len(df), freq='15min')
     
     # Add required columns for FinRL
     df['tic'] = 'BTC'  # Add ticker column
