@@ -608,13 +608,33 @@ def train_with_finrl(args, market_data, device):
     """
     logger.info("Using FinRL framework for training")
     
+    if args.verbose:
+        logger.info("Verbose mode enabled - will show detailed progress logs")
+    
     # Process data for FinRL
     # For FinRL, we primarily use the base timeframe (15m if available)
     # But we'll also incorporate features from higher timeframes later
+    if args.verbose:
+        logger.info(f"Processing market data for FinRL with primary timeframe: {args.primary_timeframe}")
+    
     processed_data = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
     
+    if args.verbose:
+        logger.info(f"Processed data shape: {processed_data.shape}")
+        logger.info(f"Columns: {processed_data.columns.tolist()}")
+        logger.info(f"First few rows of processed data:\n{processed_data.head()}")
+    
     # Create environment
+    if args.verbose:
+        logger.info("Creating FinRL environment with processed data")
+    
     env_train = create_finrl_env(processed_data, args)
+    
+    if args.verbose:
+        logger.info("FinRL environment created successfully")
+        logger.info(f"Environment details:")
+        logger.info(f"  - Action space: {env_train.envs[0].action_space}")
+        logger.info(f"  - Observation space: {env_train.envs[0].observation_space}")
     
     # Setup agent parameters
     if args.finrl_model in ['sac', 'td3', 'ddpg']:
@@ -627,6 +647,8 @@ def train_with_finrl(args, market_data, device):
     # Parse net_arch from string
     try:
         net_arch = eval(args.net_arch)  # Convert string to list
+        if args.verbose:
+            logger.info(f"Network architecture parsed: {net_arch}")
     except Exception:
         logger.warning(f"Could not parse net_arch: {args.net_arch}, using default [256, 256]")
         net_arch = [256, 256]
@@ -640,27 +662,107 @@ def train_with_finrl(args, market_data, device):
     # Add action noise for continuous models
     if args.finrl_model in ['sac', 'td3', 'ddpg'] and action_noise:
         model_params['action_noise'] = 'normal'  # Use string identifier instead of object
+        if args.verbose:
+            logger.info(f"Added normal action noise for {args.finrl_model}")
     
     # FinRL will handle the network architecture internally, do not pass policy_kwargs
     
     # Create and train the model
     try:
         logger.info(f"Creating {args.finrl_model.upper()} model with FinRL")
-        print(model_params)  # Print params for debugging
+        if args.verbose:
+            logger.info(f"Model parameters: {model_params}")
+        
         agent = DRLAgent(env=env_train)
         
         # Create the model based on the model type
         # For SAC and other models, pass parameters directly
         logger.info("Initializing model - this may take a moment...")
+        
+        if args.verbose:
+            logger.info(f"Getting {args.finrl_model} model with parameters: {model_params}")
+        
         model = agent.get_model(
             args.finrl_model,
             model_kwargs=model_params
         )
         
+        if args.verbose:
+            logger.info(f"Model created successfully")
+            logger.info(f"Model type: {type(model).__name__}")
+            
+            # Log model architecture if possible
+            try:
+                if hasattr(model, 'policy') and hasattr(model.policy, 'get_architecture'):
+                    logger.info(f"Model architecture: {model.policy.get_architecture()}")
+                elif hasattr(model, 'policy_kwargs'):
+                    logger.info(f"Policy kwargs: {model.policy_kwargs}")
+                elif hasattr(model, 'policy'):
+                    logger.info(f"Policy type: {type(model.policy).__name__}")
+            except Exception as e:
+                logger.info(f"Could not log model architecture: {str(e)}")
+        
         # Train the model with progress updates
         logger.info(f"Training {args.finrl_model.upper()} model...")
         
         total_timesteps = args.total_timesteps if hasattr(args, 'total_timesteps') else 100000
+        
+        # Setup monitoring for verbose mode
+        if args.verbose:
+            # Create a monitoring thread that will periodically check and log the progress
+            import threading
+            import time
+            
+            class TrainingMonitor:
+                def __init__(self, model, total_timesteps, interval=10):
+                    self.model = model
+                    self.total_timesteps = total_timesteps
+                    self.interval = interval
+                    self.running = True
+                    self.start_time = time.time()
+                    
+                def monitor(self):
+                    while self.running:
+                        try:
+                            # Try to get the current timestep count
+                            if hasattr(self.model, 'num_timesteps'):
+                                current_timesteps = self.model.num_timesteps
+                                elapsed_time = time.time() - self.start_time
+                                progress = (current_timesteps / self.total_timesteps) * 100
+                                
+                                if current_timesteps > 0:
+                                    steps_per_sec = current_timesteps / elapsed_time
+                                    remaining_steps = self.total_timesteps - current_timesteps
+                                    remaining_time = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
+                                    
+                                    logger.info(f"Training progress: {progress:.1f}% ({current_timesteps}/{self.total_timesteps}) - "
+                                                f"Steps/sec: {steps_per_sec:.1f} - "
+                                                f"Elapsed: {elapsed_time/60:.1f} minutes - "
+                                                f"Remaining: {remaining_time/60:.1f} minutes")
+                                    
+                                    # Try to log additional metrics if available
+                                    if hasattr(self.model, 'logger') and hasattr(self.model.logger, 'name_to_value'):
+                                        for key, value in self.model.logger.name_to_value.items():
+                                            logger.info(f"  - {key}: {value}")
+                        except Exception as e:
+                            logger.warning(f"Error in monitoring thread: {str(e)}")
+                        
+                        time.sleep(self.interval)
+                    
+                def start(self):
+                    self.thread = threading.Thread(target=self.monitor)
+                    self.thread.daemon = True
+                    self.thread.start()
+                    
+                def stop(self):
+                    self.running = False
+                    if hasattr(self, 'thread'):
+                        self.thread.join(timeout=1.0)
+            
+            # Add progress monitoring without using callbacks
+            logger.info(f"Starting training monitoring (will log every 10 seconds)")
+            monitor = TrainingMonitor(model, total_timesteps, interval=10)
+            monitor.start()
         
         # Add progress monitoring without using callbacks
         logger.info(f"Starting training for {total_timesteps} timesteps - this may take a while...")
@@ -675,17 +777,47 @@ def train_with_finrl(args, market_data, device):
         
         logger.info(f"Check tensorboard logs in {log_dir}/{args.finrl_model} for real-time progress monitoring")
         
+        # Log start time for manual progress tracking
+        training_start_time = time.time()
+        
         # FinRL doesn't support log_dir parameter, so we'll remove it
+        if args.verbose:
+            logger.info(f"Starting model training with {total_timesteps} timesteps...")
+            
         trained_model = agent.train_model(
             model=model, 
             tb_log_name=f"{args.finrl_model}",
             total_timesteps=total_timesteps
         )
         
+        # Calculate and log training time
+        training_time = time.time() - training_start_time
+        logger.info(f"Training completed in {training_time/60:.2f} minutes")
+        
+        # Stop the monitoring thread if it exists
+        if args.verbose and 'monitor' in locals():
+            monitor.stop()
+            logger.info("Training monitor stopped")
+        
         # Save the trained model
         model_save_path = os.path.join(args.save_dir, f"{args.finrl_model}_model")
+        if args.verbose:
+            logger.info(f"Saving model to {model_save_path}")
+            
         trained_model.save(model_save_path)
         logger.info(f"Model saved to {model_save_path}")
+        
+        # Log final model performance if verbose
+        if args.verbose:
+            logger.info("Final model information:")
+            # Try to log model info
+            try:
+                if hasattr(trained_model, 'get_parameters'):
+                    logger.info(f"Model parameters: {trained_model.get_parameters()}")
+                if hasattr(trained_model, 'get_env'):
+                    logger.info(f"Environment: {trained_model.get_env()}")
+            except Exception as e:
+                logger.info(f"Could not log final model info: {str(e)}")
         
         return trained_model
     except Exception as e:
