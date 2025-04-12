@@ -108,6 +108,47 @@ class DimensionAdjustingVecEnv(DummyVecEnv):
     Specifically designed to handle the case where environments return
     observations with more dimensions than specified in the observation space.
     """
+    def __init__(self, env_fns):
+        """
+        Initialize the VecEnv with customized observation space handling.
+        
+        Args:
+            env_fns: A list of functions that create the environments.
+        """
+        # First initialize normally
+        super().__init__(env_fns)
+        
+        # Test observation size from the first environment
+        try:
+            test_env = env_fns[0]()
+            test_obs = test_env.reset()
+            
+            # Check if observation shape matches the buffer
+            if isinstance(test_obs, np.ndarray):
+                actual_size = len(test_obs)
+                expected_size = self.observation_space.shape[0]
+                
+                if actual_size != expected_size:
+                    logger.warning(f"Observation dimension mismatch detected: got {actual_size}, expected {expected_size}")
+                    
+                    # Create a new observation space with the correct shape
+                    new_obs_space = gym.spaces.Box(
+                        low=-np.inf, 
+                        high=np.inf, 
+                        shape=(expected_size,), 
+                        dtype=np.float32
+                    )
+                    
+                    # Log what we're doing
+                    logger.info(f"Using observation space: {new_obs_space} with shape {new_obs_space.shape}")
+            
+            # Clean up
+            test_env.close()
+            
+        except Exception as e:
+            logger.error(f"Error checking observation dimensions: {e}")
+            logger.error(traceback.format_exc())
+            
     def _save_obs(self, env_idx, obs):
         """
         Override the parent _save_obs method to adjust observation dimensions
@@ -115,241 +156,95 @@ class DimensionAdjustingVecEnv(DummyVecEnv):
         for key in self.keys:
             if key is None:
                 # Special handling for non-dict observations
-                if isinstance(obs, np.ndarray) and len(obs) > self.buf_obs[key].shape[1]:
-                    # If observation has more dimensions than expected, truncate it
-                    logger.warning(f"Truncating observation from shape {obs.shape} to match {self.buf_obs[key][env_idx].shape}")
-                    self.buf_obs[key][env_idx] = obs[:self.buf_obs[key].shape[1]]
+                if isinstance(obs, np.ndarray):
+                    # Log the first time we encounter a shape mismatch
+                    if len(obs) > self.buf_obs[key].shape[1]:
+                        logger.warning(f"Truncating observation from shape {obs.shape} to match {self.buf_obs[key][env_idx].shape}")
+                        # The observation is too large - slice it to match the expected shape
+                        self.buf_obs[key][env_idx] = obs[:self.buf_obs[key].shape[1]]
+                    else:
+                        # Normal case - just assign the observation
+                        self.buf_obs[key][env_idx] = obs
                 else:
+                    # Handle non-array observations
                     self.buf_obs[key][env_idx] = obs
             else:
                 # Handle dict observations if needed
                 if isinstance(obs, dict):
                     self.buf_obs[key][env_idx] = obs[key]
+    
+    def reset(self):
+        """
+        Override the reset method to handle observation shape adjustment
+        during environment reset.
+        """
+        for env_idx in range(self.num_envs):
+            obs = self.envs[env_idx].reset()
+            
+            # Log the observation shape for the first environment
+            if env_idx == 0:
+                logger.info(f"Environment reset returned observation with shape: {np.shape(obs)}")
+                
+                # Check if there's a shape mismatch with the observation space
+                if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
+                    logger.warning(f"Observation shape mismatch in reset: {len(obs)} vs expected {self.observation_space.shape[0]}")
+            
+            # Store the observation (with dimension adjustment if needed)
+            self._save_obs(env_idx, obs)
+            
+        return self._obs_from_buf()
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description='Train a DQN agent for cryptocurrency trading.'
-    )
-    
-    # Model and training arguments
-    parser.add_argument(
-        '--lstm_model_path',
-        type=str,
-        help='Path to the trained LSTM model'
-    )
-    parser.add_argument(
-        '--use_finrl',
-        action='store_true',
-        help='Use FinRL framework for training'
-    )
-    parser.add_argument(
-        '--finrl_model',
-        type=str,
-        choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
-        default='dqn',
-        help='FinRL model to use for training'
-    )
-    parser.add_argument(
-        '--primary_timeframe',
-        type=str,
-        choices=['15m', '1d', '4h'],
-        default='15m',
-        help='Primary timeframe to use for training'
-    )
-    parser.add_argument(
-        '--data_dir',
-        type=str,
-        default='data/synthetic',
-        help='Directory containing the data files'
-    )
-    parser.add_argument(
-        '--save_dir',
-        type=str,
-        default='models/dqn',
-        help='Directory to save the trained model'
-    )
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Random seed for reproducibility'
-    )
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='cuda' if torch.cuda.is_available() else 'cpu',
-        help='Device to use for training'
-    )
-    parser.add_argument(
-        '--verbose',
-        action='store_true',
-        help='Enable verbose logging'
-    )
-    parser.add_argument(
-        '--num_workers',
-        type=int,
-        default=1,
-        help='Number of parallel environments for training'
-    )
-    
-    # Training parameters
-    parser.add_argument(
-        '--batch_size',
-        type=int,
-        default=64,
-        help='Batch size for training'
-    )
-    parser.add_argument(
-        '--learning_rate',
-        type=float,
-        default=0.0001,
-        help='Learning rate for the optimizer'
-    )
-    parser.add_argument(
-        '--gamma',
-        type=float,
-        default=0.99,
-        help='Discount factor for future rewards'
-    )
-    parser.add_argument(
-        '--epsilon_start',
-        type=float,
-        default=1.0,
-        help='Starting value for epsilon-greedy exploration'
-    )
-    parser.add_argument(
-        '--epsilon_end',
-        type=float,
-        default=0.01,
-        help='Final value for epsilon-greedy exploration'
-    )
-    parser.add_argument(
-        '--epsilon_decay',
-        type=float,
-        default=0.995,
-        help='Decay rate for epsilon-greedy exploration'
-    )
-    parser.add_argument(
-        '--target_update',
-        type=int,
-        default=1000,
-        help='Frequency of target network updates'
-    )
-    parser.add_argument(
-        '--memory_size',
-        type=int,
-        default=100000,
-        help='Size of the replay memory'
-    )
-    parser.add_argument(
-        '--episodes',
-        type=int,
-        default=1000,
-        help='Number of episodes to train'
-    )
-    parser.add_argument(
-        '--max_steps',
-        type=int,
-        default=1000,
-        help='Maximum number of steps per episode'
-    )
-    parser.add_argument(
-        '--net_arch',
-        type=str,
-        default='[256, 256]',
-        help='Network architecture for the model'
-    )
-    parser.add_argument(
-        '--total_timesteps',
-        type=int,
-        default=100000,
-        help='Total timesteps for FinRL training'
-    )
-    parser.add_argument(
-        '--transaction_fee',
-        type=float,
-        default=0.001,
-        help='Transaction fee as a percentage'
-    )
-    parser.add_argument(
-        '--reward_scaling',
-        type=float,
-        default=1e-2,
-        help='Scaling factor for rewards in the FinRL environment'
-    )
-    parser.add_argument(
-        '--hmax',
-        type=int,
-        default=100,
-        help='Maximum number of shares to trade in FinRL environment'
-    )
-    parser.add_argument(
-        '--initial_balance',
-        type=float,
-        default=1000000,
-        help='Initial balance for the agent'
-    )
-    
-    return parser.parse_args()
-
-def load_lstm_model(model_path, device):
-    """Load the trained LSTM model."""
-    try:
-        logger.info(f"Loading LSTM model from {model_path}")
+# Add this class after the BaseStockTradingEnv
+class StockTradingEnvWrapper(gym.Wrapper):
+    """
+    A wrapper for StockTradingEnv that ensures consistent observation shapes.
+    """
+    def __init__(self, env, state_space=16):
+        super().__init__(env)
         
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"LSTM model not found at {model_path}")
-        
-        # Load model configuration
-        config_path = os.path.join(os.path.dirname(model_path), 'config.json')
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-            logger.info("Loaded model configuration from config.json")
-        else:
-            logger.warning("No config.json found, using default configuration")
-            config = {
-                "model": {
-                    "hidden_dims": 64,
-                    "num_layers": 1,
-                    "dropout": 0.7,
-                    "bidirectional": True,
-                    "attention": False,
-                    "num_classes": 3,
-                    "use_batch_norm": True
-                }
-            }
-        
-        # Create a new model instance with the saved configuration
-        model = MultiTimeframeModel(
-            input_dims={"15m": 34, "4h": 34, "1d": 34},  # Match dataset feature count
-            hidden_dims=config["model"]["hidden_dims"],
-            num_layers=config["model"]["num_layers"],
-            dropout=config["model"]["dropout"],
-            bidirectional=config["model"]["bidirectional"],
-            attention=config["model"]["attention"],
-            num_classes=config["model"]["num_classes"],
-            use_batch_norm=config["model"].get("use_batch_norm", True)
+        # Create a fixed observation space with the desired size
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(state_space,),
+            dtype=np.float32
         )
         
-        # Load the state dict
-        state_dict = torch.load(model_path, map_location=device)
-        model.load_state_dict(state_dict, strict=False)  # Use strict=False to handle missing/extra keys
-        logger.info("Model state dict loaded successfully")
+        logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
         
-        # Move model to device and set to evaluation mode
-        model = model.to(device)
-        model.eval()
+    def reset(self):
+        obs = self.env.reset()
         
-        logger.info("LSTM model loaded successfully")
-        return model
+        # Check if observation needs adjustment
+        if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
+            logger.warning(f"Adjusting observation from shape {obs.shape} to {self.observation_space.shape}")
+            
+            # Truncate if too large
+            if len(obs) > self.observation_space.shape[0]:
+                obs = obs[:self.observation_space.shape[0]]
+            # Pad with zeros if too small
+            elif len(obs) < self.observation_space.shape[0]:
+                padding = np.zeros(self.observation_space.shape[0] - len(obs))
+                obs = np.concatenate([obs, padding])
         
-    except Exception as e:
-        logger.error(f"Error loading LSTM model: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+        return obs
+    
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        
+        # Check if observation needs adjustment
+        if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
+            # Truncate if too large
+            if len(obs) > self.observation_space.shape[0]:
+                obs = obs[:self.observation_space.shape[0]]
+            # Pad with zeros if too small
+            elif len(obs) < self.observation_space.shape[0]:
+                padding = np.zeros(self.observation_space.shape[0] - len(obs))
+                obs = np.concatenate([obs, padding])
+        
+        return obs, reward, done, info
 
+# Now modify the create_finrl_env function to use this wrapper
 def create_finrl_env(df, args):
     """
     Create a FinRL environment for cryptocurrency trading.
@@ -416,7 +311,24 @@ def create_finrl_env(df, args):
         print_verbosity=1
     )
     
-    return env
+    # Test observation shape from a reset
+    try:
+        test_obs = env.reset()
+        if isinstance(test_obs, np.ndarray):
+            logger.info(f"Test reset observation shape from env: {test_obs.shape}")
+            # Print first few values of the observation to help debug
+            logger.info(f"First few values of observation: {test_obs[:5]}")
+            # Check state details
+            if hasattr(env, 'state'):
+                logger.info(f"Environment state length: {len(env.state)}")
+                logger.info(f"Environment state first few elements: {env.state[:5]}")
+    except Exception as e:
+        logger.error(f"Error testing environment reset: {e}")
+    
+    # Wrap the environment to ensure consistent observation shape
+    wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
+    
+    return wrapped_env
 
 def create_parallel_finrl_envs(df, args, num_workers=4):
     """
@@ -469,13 +381,47 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 f"transaction_cost_pct={transaction_cost_pct}, "
                 f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
     
+    # Create a test environment to debug the observation space
+    test_env = StockTradingEnv(
+        df=df,
+        stock_dim=stock_dim,
+        hmax=hmax,
+        num_stock_shares=num_stock_shares.copy(),
+        state_space=state_space,
+        action_space=action_space,
+        tech_indicator_list=tech_indicator_list,
+        initial_amount=initial_amount,
+        buy_cost_pct=transaction_cost_pct,
+        sell_cost_pct=transaction_cost_pct,
+        reward_scaling=reward_scaling,
+        print_verbosity=1
+    )
+    
+    # Test reset to see the observation shape
+    try:
+        test_obs = test_env.reset()
+        if isinstance(test_obs, np.ndarray):
+            logger.info(f"Test environment observation shape: {test_obs.shape}")
+            logger.info(f"Test environment observation space: {test_env.observation_space}")
+            if hasattr(test_env, 'state'):
+                logger.info(f"Test environment state size: {len(test_env.state)}")
+                
+            # If observation shape doesn't match state_space, adjust state_space
+            if len(test_obs) != state_space:
+                logger.warning(f"Test observation shape {len(test_obs)} doesn't match state_space {state_space}")
+                if len(test_obs) > state_space:
+                    logger.info(f"Adjusting state_space to match test observation shape: {len(test_obs)}")
+                    state_space = len(test_obs)
+    except Exception as e:
+        logger.error(f"Error testing environment: {e}")
+    
     # Create a list to hold our environment creation functions
     env_list = []
     
     for i in range(num_workers):
         # Define a function that creates a new environment instance each time it's called
         def make_env(idx=i):
-            return StockTradingEnv(
+            base_env = StockTradingEnv(
                 df=df,
                 stock_dim=stock_dim,
                 hmax=hmax,
@@ -489,13 +435,14 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 reward_scaling=reward_scaling,
                 print_verbosity=1 if idx == 0 else 0  # Only print verbose output for the first env
             )
+            # Wrap the environment to ensure consistent observation shape
+            return StockTradingEnvWrapper(base_env, state_space=state_space)
         
         # Add the environment creation function to the list
         env_list.append(make_env)
     
-    # Vectorize the environments using our custom DimensionAdjustingVecEnv
-    vec_env = DimensionAdjustingVecEnv(env_list)
-    logger.info("Using DimensionAdjustingVecEnv to handle observation shape mismatches")
+    # Vectorize the environments using DummyVecEnv (not our custom class since we don't need it anymore)
+    vec_env = DummyVecEnv(env_list)
     return vec_env
 
 def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
@@ -1511,6 +1458,230 @@ def plot_training_results(rewards, profits, trades, output_dir):
     np.save(os.path.join(output_dir, 'rewards.npy'), np.array(rewards))
     np.save(os.path.join(output_dir, 'profits.npy'), np.array(profits))
     np.save(os.path.join(output_dir, 'trades.npy'), np.array(trades))
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Train a DQN agent for cryptocurrency trading.'
+    )
+    
+    # Model and training arguments
+    parser.add_argument(
+        '--lstm_model_path',
+        type=str,
+        help='Path to the trained LSTM model'
+    )
+    parser.add_argument(
+        '--use_finrl',
+        action='store_true',
+        help='Use FinRL framework for training'
+    )
+    parser.add_argument(
+        '--finrl_model',
+        type=str,
+        choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
+        default='dqn',
+        help='FinRL model to use for training'
+    )
+    parser.add_argument(
+        '--primary_timeframe',
+        type=str,
+        choices=['15m', '1d', '4h'],
+        default='15m',
+        help='Primary timeframe to use for training'
+    )
+    parser.add_argument(
+        '--data_dir',
+        type=str,
+        default='data/synthetic',
+        help='Directory containing the data files'
+    )
+    parser.add_argument(
+        '--save_dir',
+        type=str,
+        default='models/dqn',
+        help='Directory to save the trained model'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Random seed for reproducibility'
+    )
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='cuda' if torch.cuda.is_available() else 'cpu',
+        help='Device to use for training'
+    )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose logging'
+    )
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=1,
+        help='Number of parallel environments for training'
+    )
+    
+    # Training parameters
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=64,
+        help='Batch size for training'
+    )
+    parser.add_argument(
+        '--learning_rate',
+        type=float,
+        default=0.0001,
+        help='Learning rate for the optimizer'
+    )
+    parser.add_argument(
+        '--gamma',
+        type=float,
+        default=0.99,
+        help='Discount factor for future rewards'
+    )
+    parser.add_argument(
+        '--epsilon_start',
+        type=float,
+        default=1.0,
+        help='Starting value for epsilon-greedy exploration'
+    )
+    parser.add_argument(
+        '--epsilon_end',
+        type=float,
+        default=0.01,
+        help='Final value for epsilon-greedy exploration'
+    )
+    parser.add_argument(
+        '--epsilon_decay',
+        type=float,
+        default=0.995,
+        help='Decay rate for epsilon-greedy exploration'
+    )
+    parser.add_argument(
+        '--target_update',
+        type=int,
+        default=1000,
+        help='Frequency of target network updates'
+    )
+    parser.add_argument(
+        '--memory_size',
+        type=int,
+        default=100000,
+        help='Size of the replay memory'
+    )
+    parser.add_argument(
+        '--episodes',
+        type=int,
+        default=1000,
+        help='Number of episodes to train'
+    )
+    parser.add_argument(
+        '--max_steps',
+        type=int,
+        default=1000,
+        help='Maximum number of steps per episode'
+    )
+    parser.add_argument(
+        '--net_arch',
+        type=str,
+        default='[256, 256]',
+        help='Network architecture for the model'
+    )
+    parser.add_argument(
+        '--total_timesteps',
+        type=int,
+        default=100000,
+        help='Total timesteps for FinRL training'
+    )
+    parser.add_argument(
+        '--transaction_fee',
+        type=float,
+        default=0.001,
+        help='Transaction fee as a percentage'
+    )
+    parser.add_argument(
+        '--reward_scaling',
+        type=float,
+        default=1e-2,
+        help='Scaling factor for rewards in the FinRL environment'
+    )
+    parser.add_argument(
+        '--hmax',
+        type=int,
+        default=100,
+        help='Maximum number of shares to trade in FinRL environment'
+    )
+    parser.add_argument(
+        '--initial_balance',
+        type=float,
+        default=1000000,
+        help='Initial balance for the agent'
+    )
+    
+    return parser.parse_args()
+
+def load_lstm_model(model_path, device):
+    """Load the trained LSTM model."""
+    try:
+        logger.info(f"Loading LSTM model from {model_path}")
+        
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"LSTM model not found at {model_path}")
+        
+        # Load model configuration
+        config_path = os.path.join(os.path.dirname(model_path), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            logger.info("Loaded model configuration from config.json")
+        else:
+            logger.warning("No config.json found, using default configuration")
+            config = {
+                "model": {
+                    "hidden_dims": 64,
+                    "num_layers": 1,
+                    "dropout": 0.7,
+                    "bidirectional": True,
+                    "attention": False,
+                    "num_classes": 3,
+                    "use_batch_norm": True
+                }
+            }
+        
+        # Create a new model instance with the saved configuration
+        model = MultiTimeframeModel(
+            input_dims={"15m": 34, "4h": 34, "1d": 34},  # Match dataset feature count
+            hidden_dims=config["model"]["hidden_dims"],
+            num_layers=config["model"]["num_layers"],
+            dropout=config["model"]["dropout"],
+            bidirectional=config["model"]["bidirectional"],
+            attention=config["model"]["attention"],
+            num_classes=config["model"]["num_classes"],
+            use_batch_norm=config["model"].get("use_batch_norm", True)
+        )
+        
+        # Load the state dict
+        state_dict = torch.load(model_path, map_location=device)
+        model.load_state_dict(state_dict, strict=False)  # Use strict=False to handle missing/extra keys
+        logger.info("Model state dict loaded successfully")
+        
+        # Move model to device and set to evaluation mode
+        model = model.to(device)
+        model.eval()
+        
+        logger.info("LSTM model loaded successfully")
+        return model
+        
+    except Exception as e:
+        logger.error(f"Error loading LSTM model: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 def train_dqn_agent(args):
     """
