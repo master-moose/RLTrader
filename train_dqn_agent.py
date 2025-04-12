@@ -400,9 +400,11 @@ class CustomDummyVecEnv:
                 if dones[i]:
                     # For environments that automatically reset on done
                     if infos[i].get("terminal_observation") is None and hasattr(self.envs[i], "reset"):
-                        terminal_obs = obs.copy()
-                        obs = self.envs[i].reset()
+                        terminal_obs = obs
+                        if isinstance(obs, np.ndarray):
+                            terminal_obs = obs.copy()
                         infos[i]["terminal_observation"] = terminal_obs
+                        obs = self.envs[i].reset()
                 
                 self._save_obs(i, obs)
         
@@ -414,11 +416,42 @@ class CustomDummyVecEnv:
     def _save_obs(self, idx, obs):
         """
         Save observation for the idx-th environment
+        
+        Handle different types of observations:
+        - numpy arrays: direct shape verification
+        - tuples: extract the first element if it's array-like
+        - other types: try to convert to numpy array
         """
+        expected_shape = self.observation_space.shape
+        
+        # Handle tuple observations (common in recent gym versions)
+        if isinstance(obs, tuple):
+            logger.info(f"Received tuple observation with length {len(obs)}")
+            
+            # In gym, tuple observations often have the actual observation as first element
+            if len(obs) > 0:
+                # Try to get the first element if it's an array-like observation
+                first_elem = obs[0]
+                if isinstance(first_elem, np.ndarray):
+                    logger.info(f"Using first element of tuple as observation with shape {first_elem.shape}")
+                    obs = first_elem
+                elif isinstance(first_elem, (list, tuple)) and len(first_elem) > 0:
+                    # Try to convert lists to numpy arrays
+                    try:
+                        logger.info(f"Converting first element of tuple (list/tuple) to numpy array")
+                        obs = np.array(first_elem, dtype=np.float32)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not convert first element of tuple observation to array")
+                        # Default to zeros as a fallback
+                        self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
+                        return
+            else:
+                logger.warning("Received empty tuple as observation, using zeros")
+                self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
+                return
+        
         if isinstance(obs, np.ndarray):
             # Ensure observation matches the expected shape
-            expected_shape = self.observation_space.shape
-            
             if obs.shape != expected_shape:
                 logger.warning(f"Observation shape mismatch: got {obs.shape}, expected {expected_shape}")
                 
@@ -433,10 +466,25 @@ class CustomDummyVecEnv:
                     self.buf_obs[idx] = obs
             else:
                 self.buf_obs[idx] = obs
+        elif isinstance(obs, (list, float, int)):
+            # Try to convert to numpy array if it's a list, float, or int
+            try:
+                arr_obs = np.array(obs, dtype=np.float32)
+                if arr_obs.shape != expected_shape:
+                    if len(arr_obs) > expected_shape[0]:
+                        arr_obs = arr_obs[:expected_shape[0]]
+                    elif len(arr_obs) < expected_shape[0]:
+                        temp = np.zeros(expected_shape, dtype=np.float32)
+                        temp[:len(arr_obs)] = arr_obs
+                        arr_obs = temp
+                self.buf_obs[idx] = arr_obs
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error converting observation to numpy array: {e}")
+                self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
         else:
             logger.warning(f"Unexpected observation type: {type(obs)}")
-            # Try to convert to numpy array
-            self.buf_obs[idx] = np.array(obs, dtype=np.float32)
+            # Use zeros as fallback
+            self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
     
     def close(self):
         """
