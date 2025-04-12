@@ -215,6 +215,9 @@ class StockTradingEnvWrapper(gym.Wrapper):
             low=-np.inf, high=np.inf, shape=(state_space,), dtype=np.float32
         )
         
+        # Add attributes needed by Stable-Baselines3
+        self.num_envs = 1  # Not vectorized, so just one environment
+        
         logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
     
     def reset(self):
@@ -317,39 +320,64 @@ def create_finrl_env(df, args):
                 f"transaction_cost_pct={transaction_cost_pct}, "
                 f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
     
-    env = StockTradingEnv(
-        df=df,
-        stock_dim=stock_dim,
-        hmax=hmax,
-        num_stock_shares=num_stock_shares,
-        state_space=state_space,
-        action_space=action_space,
-        tech_indicator_list=tech_indicator_list,
-        initial_amount=initial_amount,
-        buy_cost_pct=transaction_cost_pct,
-        sell_cost_pct=transaction_cost_pct,
-        reward_scaling=reward_scaling,
-        print_verbosity=1
-    )
-    
-    # Test observation shape from a reset
     try:
-        test_obs = env.reset()
-        if isinstance(test_obs, np.ndarray):
-            logger.info(f"Test reset observation shape from env: {test_obs.shape}")
-            # Print first few values of the observation to help debug
-            logger.info(f"First few values of observation: {test_obs[:5]}")
-            # Check state details
-            if hasattr(env, 'state'):
-                logger.info(f"Environment state length: {len(env.state)}")
-                logger.info(f"Environment state first few elements: {env.state[:5]}")
+        # Create the StockTradingEnv
+        env = StockTradingEnv(
+            df=df,
+            stock_dim=stock_dim,
+            hmax=hmax,
+            num_stock_shares=num_stock_shares,
+            state_space=state_space,
+            action_space=action_space,
+            tech_indicator_list=tech_indicator_list,
+            initial_amount=initial_amount,
+            buy_cost_pct=transaction_cost_pct,
+            sell_cost_pct=transaction_cost_pct,
+            reward_scaling=reward_scaling,
+            print_verbosity=1
+        )
+        
+        # Test observation shape from a reset
+        try:
+            test_obs = env.reset()
+            if isinstance(test_obs, np.ndarray):
+                logger.info(f"Test reset observation shape from env: {test_obs.shape}")
+                # Print first few values of the observation to help debug
+                logger.info(f"First few values of observation: {test_obs[:5]}")
+                # Check state details
+                if hasattr(env, 'state'):
+                    logger.info(f"Environment state length: {len(env.state)}")
+                    logger.info(f"Environment state first few elements: {env.state[:5]}")
+        except Exception as e:
+            logger.error(f"Error testing environment reset: {e}")
+        
+        # Wrap the environment to ensure consistent observation shape
+        wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
+        
+        # Add additional Stable-Baselines3 compatibility
+        if not hasattr(wrapped_env, 'get_original_obs'):
+            wrapped_env.get_original_obs = lambda: wrapped_env.reset()
+        
+        # Add any missing methods needed by SB3
+        if not hasattr(wrapped_env, 'get_attr'):
+            wrapped_env.get_attr = lambda attr_name, indices=None: getattr(wrapped_env, attr_name)
+        
+        if not hasattr(wrapped_env, 'env_is_wrapped'):
+            wrapped_env.env_is_wrapped = lambda wrapper_class, indices=None: isinstance(wrapped_env, wrapper_class)
+            
+        if not hasattr(wrapped_env, 'env_method'):
+            wrapped_env.env_method = lambda method_name, *args, indices=None, **kwargs: getattr(wrapped_env, method_name)(*args, **kwargs)
+        
+        # Add unwrapped for SB3 to access the underlying env
+        if not hasattr(wrapped_env, 'unwrapped'):
+            wrapped_env.unwrapped = env
+        
+        return wrapped_env
+        
     except Exception as e:
-        logger.error(f"Error testing environment reset: {e}")
-    
-    # Wrap the environment to ensure consistent observation shape
-    wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
-    
-    return wrapped_env
+        logger.error(f"Error creating environment: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 class CustomDummyVecEnv:
     """
@@ -886,6 +914,25 @@ class CustomDRLAgent(OriginalDRLAgent):
         # Create model instance with original init method but with special handling for env
         model_class = MODELS[model_name]
         
+        # Special handling for different model types
+        if model_name.lower() == 'sac':
+            # SAC has different parameters - try to create it directly from Stable-Baselines3
+            try:
+                from stable_baselines3 import SAC
+                logger.info("Creating SAC model directly from stable_baselines3")
+                
+                # Add SAC-specific parameters if not present
+                if 'buffer_size' in model_kwargs and 'replay_buffer_class' not in model_kwargs:
+                    from stable_baselines3.common.buffers import ReplayBuffer
+                    model_kwargs['replay_buffer_class'] = ReplayBuffer
+                
+                # Create the model directly
+                model = SAC(**model_kwargs)
+                return model
+            except Exception as e:
+                logger.warning(f"Failed to create SAC directly, falling back to FinRL approach: {e}")
+                # Fall back to normal approach
+        
         # Monkey patch the _wrap_env method to disable patching
         original_wrap_env = model_class._wrap_env if hasattr(model_class, '_wrap_env') else None
         
@@ -900,7 +947,29 @@ class CustomDRLAgent(OriginalDRLAgent):
         
         # Create model
         try:
+            logger.info(f"Creating {model_name} model with kwargs: {model_kwargs}")
             model = model_class(**model_kwargs)
+        except TypeError as e:
+            logger.error(f"TypeError creating {model_name} model: {e}")
+            
+            # Special handling for common errors
+            if "unexpected keyword argument" in str(e):
+                # Identify problematic args and remove them
+                problematic_arg = str(e).split("unexpected keyword argument '")[1].split("'")[0]
+                logger.info(f"Removing problematic argument: {problematic_arg}")
+                if problematic_arg in model_kwargs:
+                    del model_kwargs[problematic_arg]
+                    # Try again with cleaned args
+                    model = model_class(**model_kwargs)
+            else:
+                # Log the model parameters and expected signature
+                try:
+                    from inspect import signature
+                    logger.info(f"Expected signature: {signature(model_class.__init__)}")
+                    logger.info(f"Model kwargs: {model_kwargs}")
+                except Exception:
+                    pass
+                raise
         except Exception as e:
             logger.error(f"Error creating {model_name} model: {e}")
             # Log the model parameters and expected signature
@@ -961,21 +1030,9 @@ def train_with_finrl(args, market_data, device):
     if isinstance(obs, np.ndarray):
         logger.info(f"Test observation shape: {obs.shape}, dtype: {obs.dtype}")
     
-    # Set up FinRL agent with the environment directly - use our custom agent class
-    agent = CustomDRLAgent(env=env)
-    
     # Network architecture for models
     net_arch = [256, 256]
     logger.info(f"Using network architecture: {net_arch}")
-    
-    # Explicitly set net_arch on the agent instance
-    agent.net_arch = net_arch
-    
-    # Initialize model_kwargs dictionary based on model type
-    # IMPORTANT: Don't include 'verbose', 'policy', or 'policy_kwargs'
-    # as these are added by the FinRL wrapper
-    is_verbose = 1 if args.verbose else 0
-    logger.info(f"Setting verbosity level: {is_verbose}")
     
     # Define model kwargs - parameters for the model
     model_kwargs = {
@@ -990,6 +1047,93 @@ def train_with_finrl(args, market_data, device):
         # For SAC, add entropy coefficient
         model_kwargs['ent_coef'] = getattr(args, 'ent_coef', 'auto_0.1')
         logger.info("Training with SAC model")
+        
+        # Try creating SAC model directly from stable_baselines3
+        try:
+            from stable_baselines3 import SAC
+            
+            # Update model kwargs for SB3 SAC
+            model_kwargs.update({
+                "env": env,
+                "verbose": 1 if args.verbose else 0,
+                "policy": "MlpPolicy",
+                "policy_kwargs": {"net_arch": net_arch},
+                "device": device
+            })
+            
+            # Create model
+            logger.info(f"Creating SAC model directly with kwargs: {model_kwargs}")
+            model = SAC(**model_kwargs)
+            
+            # Train model
+            logger.info("Starting model training...")
+            total_timesteps = getattr(args, 'total_timesteps', 100000)
+            logger.info(f"Training for {total_timesteps} timesteps")
+            
+            # Define a custom callback to log training progress
+            from stable_baselines3.common.callbacks import BaseCallback
+            
+            class LoggingCallback(BaseCallback):
+                def __init__(self, verbose=0):
+                    super().__init__(verbose)
+                    self.step_count = 0
+                    self.episode_count = 0
+                    self.episode_rewards = []
+                    self.current_episode_reward = 0
+                    
+                def _on_step(self):
+                    self.step_count += 1
+                    
+                    # If episode is done, log the episode stats
+                    if self.locals.get("dones", False):
+                        self.episode_count += 1
+                        reward = self.locals.get("rewards", [0])[0]
+                        self.current_episode_reward += reward
+                        self.episode_rewards.append(self.current_episode_reward)
+                        self.current_episode_reward = 0
+                        
+                        logger.info(f"Episode {self.episode_count} completed with reward: {self.episode_rewards[-1]:.4f}")
+                    else:
+                        # Add reward to current episode total
+                        reward = self.locals.get("rewards", [0])[0]
+                        self.current_episode_reward += reward
+                    
+                    # Log every 100 steps
+                    if self.step_count % 100 == 0:
+                        logger.info(f"Training step {self.step_count}")
+                        
+                        # For SAC, log the entropy coefficient
+                        if hasattr(self.model, 'ent_coef_tensor') and self.model.ent_coef_tensor is not None:
+                            ent_coef = self.model.ent_coef_tensor.item()
+                            logger.info(f"Current entropy coefficient: {ent_coef:.6f}")
+                        
+                        # For SAC, log the actor and critic losses
+                        if hasattr(self.model, 'actor_loss') and hasattr(self.model, 'critic_loss'):
+                            if self.model.actor_loss is not None and self.model.critic_loss is not None:
+                                actor_loss = self.model.actor_loss.item() if hasattr(self.model.actor_loss, 'item') else self.model.actor_loss
+                                critic_loss = self.model.critic_loss.item() if hasattr(self.model.critic_loss, 'item') else self.model.critic_loss
+                                logger.info(f"Actor loss: {actor_loss:.6f}, Critic loss: {critic_loss:.6f}")
+                    
+                    return True
+            
+            # Create the callback
+            callback = LoggingCallback()
+            
+            # Train the model with the callback
+            model.learn(total_timesteps=total_timesteps, callback=callback)
+            
+            # Save model
+            if args.save_dir:
+                model_save_path = os.path.join(args.save_dir, f"finrl_{args.finrl_model.lower()}_model")
+                logger.info(f"Saving model to {model_save_path}")
+                model.save(model_save_path)
+            
+            return model, env
+            
+        except Exception as e:
+            logger.error(f"Error using direct SB3 SAC implementation: {e}")
+            logger.info("Falling back to FinRL approach")
+            
     elif args.finrl_model.lower() == 'td3':
         # For TD3, add policy noise and noise clip
         model_kwargs['policy_noise'] = getattr(args, 'policy_noise', 0.2)
@@ -1007,6 +1151,18 @@ def train_with_finrl(args, market_data, device):
     
     logger.info(f"Model kwargs: {model_kwargs}")
     print(model_kwargs)
+    
+    # Set up FinRL agent with the environment directly - use our custom agent class
+    agent = CustomDRLAgent(env=env)
+    
+    # Explicitly set net_arch on the agent instance
+    agent.net_arch = net_arch
+    
+    # Initialize model_kwargs dictionary based on model type
+    # IMPORTANT: Don't include 'verbose', 'policy', or 'policy_kwargs'
+    # as these are added by the FinRL wrapper
+    is_verbose = 1 if args.verbose else 0
+    logger.info(f"Setting verbosity level: {is_verbose}")
     
     # Get the appropriate model
     # Note: agent.get_model will add 'policy', 'verbose', and 'policy_kwargs',
