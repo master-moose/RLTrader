@@ -240,7 +240,7 @@ def parse_args():
     parser.add_argument(
         '--reward_scaling',
         type=float,
-        default=1e-4,
+        default=1e-2,
         help='Scaling factor for rewards in the FinRL environment'
     )
     
@@ -555,6 +555,131 @@ def train_with_finrl(args, market_data, device):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
     
+    # Add a reward monitor to debug reward calculations
+    # This wrapper will log the raw rewards before scaling
+    class RewardMonitor(gym.Wrapper):
+        def __init__(self, env):
+            super().__init__(env)
+            self.raw_rewards = []
+            self.step_count = 0
+            self.portfolio_values = []
+            self.positions = []
+            self.actions_taken = []
+            self.initial_portfolio = None
+            self.episode_count = 0
+            
+        def reset(self, **kwargs):
+            obs = self.env.reset(**kwargs)
+            
+            # Track episode starts
+            self.episode_count += 1
+            logger.info(f"Episode {self.episode_count} started")
+            
+            # Save initial portfolio value if we can extract it
+            if hasattr(self.env, 'state') and len(self.env.state) > 0:
+                self.initial_portfolio = self.env.state[0]
+                logger.info(f"Initial portfolio value: {self.initial_portfolio}")
+            
+            return obs
+        
+        def step(self, action):
+            # Log action before executing
+            self.actions_taken.append(action)
+            
+            # Capture environment state BEFORE step for reward calculation analysis
+            pre_step_portfolio = None
+            if hasattr(self.env, 'state') and len(self.env.state) > 0:
+                pre_step_portfolio = self.env.state[0]
+            
+            # Execute step
+            obs, reward, done, info = self.env.step(action)
+            
+            # Calculate expected reward based on portfolio change
+            if pre_step_portfolio is not None and hasattr(self.env, 'state') and len(self.env.state) > 0:
+                post_step_portfolio = self.env.state[0]
+                portfolio_change = post_step_portfolio - pre_step_portfolio
+                expected_reward = portfolio_change
+                
+                # Apply known reward scaling if available
+                if hasattr(self.env, 'reward_scaling'):
+                    expected_reward *= self.env.reward_scaling
+                
+                # Check if reward matches our calculation
+                if abs(reward - expected_reward) > 1e-5 and self.step_count % 100 == 0:
+                    logger.warning(f"Reward calculation discrepancy: got {reward}, expected {expected_reward}. "
+                                f"Portfolio changed from {pre_step_portfolio} to {post_step_portfolio}")
+            
+            # Store raw reward (before scaling)
+            if 'reward_scaling' in info:
+                raw_reward = reward / info['reward_scaling']
+                self.raw_rewards.append(raw_reward)
+            else:
+                self.raw_rewards.append(reward)
+            
+            # Track portfolio value and position if available
+            if hasattr(self.env, 'state') and hasattr(self.env, 'turbulence'):
+                # For StockTradingEnv from FinRL
+                try:
+                    portfolio_value = self.env.state[0] if len(self.env.state) > 0 else 0
+                    
+                    # Get stock_dim safely - it's needed to find position in state array
+                    stock_dim = 1  # Default for single asset
+                    if hasattr(self.env, 'stock_dim'):
+                        stock_dim = self.env.stock_dim
+                    elif hasattr(self.env, 'df') and 'tic' in self.env.df.columns:
+                        stock_dim = len(self.env.df['tic'].unique())
+                    
+                    position = self.env.state[1+stock_dim] if len(self.env.state) > 1+stock_dim else 0
+                    self.portfolio_values.append(portfolio_value)
+                    self.positions.append(position)
+                except (AttributeError, IndexError) as e:
+                    logger.warning(f"Could not extract portfolio value: {e}")
+
+            # For verbose debugging every 100 steps
+            self.step_count += 1
+            if self.step_count % 100 == 0:
+                if len(self.raw_rewards) > 0:
+                    avg_raw_reward = sum(self.raw_rewards[-100:]) / min(100, len(self.raw_rewards))
+                    logger.info(f"Step {self.step_count}: Raw reward: {self.raw_rewards[-1]:.6f}, " 
+                                f"Scaled reward: {reward:.6f}, "
+                                f"Avg raw reward (last 100): {avg_raw_reward:.6f}")
+                    
+                    # Log portfolio and position changes
+                    if len(self.portfolio_values) > 2:
+                        last_portfolio = self.portfolio_values[-1]
+                        prev_portfolio = self.portfolio_values[-2]
+                        portfolio_change = last_portfolio - prev_portfolio
+                        logger.info(f"Portfolio: {last_portfolio:.2f} (change: {portfolio_change:.2f}), "
+                                    f"Position: {self.positions[-1] if self.positions else 'Unknown'}, "
+                                    f"Action: {self.actions_taken[-1]}")
+                    
+                    # Print environment state info
+                    if hasattr(self.env, 'state'):
+                        logger.info(f"Environment State (first 5 elements): {self.env.state[:5]}")
+                    
+                    # Check for transaction costs and other info
+                    if hasattr(self.env, 'cost'):
+                        logger.info(f"Transaction cost: {self.env.cost:.6f}")
+                    
+                    # Print additional info from the info dict
+                    important_keys = ['balance', 'position', 'price', 'total_trades']
+                    info_str = ", ".join([f"{k}: {info.get(k, 'N/A')}" for k in important_keys if k in info])
+                    if info_str:
+                        logger.info(f"Info: {info_str}")
+                
+            return obs, reward, done, info
+    
+    # Apply the reward monitor wrapper to the first environment in the vectorized env
+    if env.envs and hasattr(env.envs[0], 'env'):
+        env.envs[0].env = RewardMonitor(env.envs[0].env)
+        logger.info("Added reward monitoring for debugging")
+        
+        # Force environment to use higher reward scaling factor for better visibility
+        if hasattr(env.envs[0].env, 'reward_scaling'):
+            original_scaling = env.envs[0].env.reward_scaling
+            env.envs[0].env.reward_scaling = max(1e-2, original_scaling)
+            logger.info(f"Increased reward scaling from {original_scaling} to {env.envs[0].env.reward_scaling}")
+    
     # Set up FinRL agent
     agent = DRLAgent(env=env)
     
@@ -622,6 +747,33 @@ def train_with_finrl(args, market_data, device):
             'exploration_fraction': 0.1,
             'policy_kwargs': {'net_arch': net_arch}
         }
+    
+    # Custom SAC callback to monitor reward calculation
+    class SACMonitorCallback:
+        def __init__(self):
+            self.step_counter = 0
+            
+        def __call__(self, locals_dict, globals_dict):
+            # Track steps
+            self.step_counter += 1
+            
+            # Log every 100 steps
+            if self.step_counter % 100 == 0:
+                if 'rewards' in locals_dict and len(locals_dict['rewards']) > 0:
+                    logger.info(f"SAC internal rewards: {locals_dict['rewards'].tolist()}")
+                
+                # Log actions if available
+                if 'actions' in locals_dict:
+                    actions = locals_dict['actions']
+                    if hasattr(actions, 'shape'):
+                        logger.info(f"SAC actions shape: {actions.shape}, sample: {actions[0] if actions.shape[0] > 0 else 'N/A'}")
+                    
+            return True
+    
+    # Add callback for SAC training if applicable
+    if args.finrl_model.lower() == 'sac':
+        model_params['callback'] = SACMonitorCallback()
+        logger.info("Added SAC training callback for monitoring rewards")
     
     # Get the appropriate model
     model = agent.get_model(args.finrl_model.lower(), model_params)
