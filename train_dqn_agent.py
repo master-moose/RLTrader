@@ -363,6 +363,10 @@ def create_finrl_env(df, args):
     
     # Create environment
     env = CryptocurrencyTradingEnv(**env_config)
+    
+    # Wrap in DummyVecEnv for compatibility with stable-baselines3
+    env = DummyVecEnv([lambda: env])
+    
     return env
 
 def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_timeframe: str = '15m') -> pd.DataFrame:
@@ -390,13 +394,12 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
             df.set_index('timestamp', inplace=True)
         else:
             # Create a synthetic datetime index starting from a recent date
-            # This avoids the datetime overflow issue while maintaining relative timing
             start_date = pd.Timestamp('2020-01-01')
             df.index = pd.date_range(start=start_date, periods=len(df), freq='15min')
     
     # Add required columns for FinRL
     df['tic'] = 'BTC'  # Add ticker column
-    df['day'] = df.index.date  # Add day column
+    df['day'] = df.index.date  # Add day column for FinRL's indexing
     
     # Rename columns to match FinRL expectations
     column_mapping = {
@@ -412,19 +415,16 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
     # Select and rename columns
     df = df.rename(columns=column_mapping)
     
-    # Add technical indicators that FinRL expects
-    df['macd'] = df['macd']  # Already calculated
-    df['rsi'] = df['rsi_14']  # Already calculated
-    df['cci'] = df['cmf_20']  # Using CMF as CCI
-    df['dx'] = df['atr_14']  # Using ATR as DX
+    # Ensure required columns are present
+    required_columns = ['day', 'tic', 'open', 'high', 'low', 'close', 'volume']
+    if not all(col in df.columns for col in required_columns):
+        raise ValueError(f"Missing required columns. Need: {required_columns}")
     
-    # Select final columns
-    final_columns = ['day', 'tic', 'open', 'high', 'low', 'close', 'volume', 
-                    'macd', 'rsi', 'cci', 'dx']
-    df = df[final_columns]
-    
-    # Sort by date and ticker
+    # Sort by day and tic for FinRL's indexing
     df = df.sort_values(['day', 'tic'])
+    
+    # Reset index to ensure proper indexing
+    df = df.reset_index(drop=True)
     
     logger.info(f"Prepared data shape: {df.shape}")
     return df
