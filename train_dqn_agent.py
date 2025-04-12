@@ -345,6 +345,14 @@ def create_finrl_env(df, args):
     # Initialize stock shares
     num_stock_shares = [0] * num_stocks
     
+    # Define technical indicators to use
+    tech_indicator_list = [
+        'rsi', 'macd', 'macd_signal', 'macd_hist',
+        'bb_upper', 'bb_middle', 'bb_lower', 'atr',
+        'sma_7', 'sma_25', 'ema_9', 'ema_21',
+        'stoch_k', 'stoch_d'
+    ]
+    
     # Create environment configuration
     env_config = {
         'df': df,
@@ -355,9 +363,9 @@ def create_finrl_env(df, args):
         'sell_cost_pct': 0.001,  # 0.1% transaction cost for selling
         'reward_scaling': 1e-4,  # Scale rewards to avoid large numbers
         'num_stock_shares': num_stock_shares,
-        'state_space': len(INDICATORS) + 2,  # +2 for price and shares held
+        'state_space': len(tech_indicator_list) + 2,  # +2 for price and shares held
         'action_space': 3,  # buy, hold, sell
-        'tech_indicator_list': INDICATORS,
+        'tech_indicator_list': tech_indicator_list,
         'print_verbosity': 1
     }
     
@@ -409,7 +417,21 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
         'close': 'close',
         'volume': 'volume',
         'tic': 'tic',
-        'day': 'day'
+        'day': 'day',
+        'rsi_14': 'rsi',
+        'macd': 'macd',
+        'macd_signal': 'macd_signal',
+        'macd_hist': 'macd_hist',
+        'bb_upper': 'bb_upper',
+        'bb_middle': 'bb_middle',
+        'bb_lower': 'bb_lower',
+        'atr_14': 'atr',
+        'sma_7': 'sma_7',
+        'sma_25': 'sma_25',
+        'ema_9': 'ema_9',
+        'ema_21': 'ema_21',
+        'stoch_k': 'stoch_k',
+        'stoch_d': 'stoch_d'
     }
     
     # Select and rename columns
