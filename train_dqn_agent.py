@@ -526,7 +526,7 @@ def train_with_finrl(args, market_data, device):
     # Configure model parameters based on selected model
     if args.finrl_model.lower() == 'sac':
         logger.info("Training with SAC model")
-        # For SAC, we need to configure policy_kwargs properly
+        # For SAC, we need to configure properly without duplicate policy_kwargs
         model_params = {
             'policy': 'MlpPolicy',
             'verbose': 1 if args.verbose else 0,
@@ -540,12 +540,7 @@ def train_with_finrl(args, market_data, device):
             'learning_starts': 1000,
             'use_sde': False,
             'gradient_steps': 1,
-            'policy_kwargs': {
-                'net_arch': {
-                    'pi': net_arch,  # Policy network architecture
-                    'qf': net_arch   # Q-function network architecture
-                }
-            }
+            'net_arch': net_arch  # Direct inclusion without nesting in policy_kwargs
         }
     elif args.finrl_model.lower() in ['ppo', 'a2c']:
         logger.info(f"Training with {args.finrl_model.upper()} model")
