@@ -2044,8 +2044,8 @@ def main():
         env_params = {
             'df': df,
             'initial_amount': getattr(args, 'initial_balance', 1000000.0),
-            'buy_cost_pct': 0.001,  # Transaction cost
-            'sell_cost_pct': 0.001,  # Transaction cost
+            'buy_cost_pct': 0.00075,  # Transaction cost
+            'sell_cost_pct': 0.00075,  # Transaction cost
             'state_space': len(tech_indicators) + 3,  # Indicators + cash + price + owned
             'stock_dim': 1,  # Single asset trading
             'tech_indicator_list': tech_indicators,
