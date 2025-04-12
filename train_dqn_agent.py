@@ -407,7 +407,7 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
     
     # Add required columns for FinRL
     df['tic'] = 'BTC'  # Add ticker column
-    df['day'] = df.index.date  # Add day column for FinRL's indexing
+    df['date'] = df.index  # Add date column for FinRL's indexing
     
     # Rename columns to match FinRL expectations
     column_mapping = {
@@ -417,7 +417,7 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
         'close': 'close',
         'volume': 'volume',
         'tic': 'tic',
-        'day': 'day',
+        'date': 'date',
         'rsi_14': 'rsi',
         'macd': 'macd',
         'macd_signal': 'macd_signal',
@@ -438,12 +438,12 @@ def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_
     df = df.rename(columns=column_mapping)
     
     # Ensure required columns are present
-    required_columns = ['day', 'tic', 'open', 'high', 'low', 'close', 'volume']
+    required_columns = ['date', 'tic', 'open', 'high', 'low', 'close', 'volume']
     if not all(col in df.columns for col in required_columns):
         raise ValueError(f"Missing required columns. Need: {required_columns}")
     
-    # Sort by day and tic for FinRL's indexing
-    df = df.sort_values(['day', 'tic'])
+    # Sort by date and tic for FinRL's indexing
+    df = df.sort_values(['date', 'tic'])
     
     # Reset index to ensure proper indexing
     df = df.reset_index(drop=True)

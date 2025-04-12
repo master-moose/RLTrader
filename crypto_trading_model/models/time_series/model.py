@@ -2,6 +2,53 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional, Union
+import numpy as np
+
+class SelfAttention(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # x shape: (seq_len, batch_size, hidden_dim)
+        attn_output, _ = self.attention(x, x, x, attn_mask=mask)
+        x = self.norm(x + self.dropout(attn_output))
+        return x
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (seq_len, batch_size, d_model)
+        x = x + self.pe[:x.size(0)]
+        return x
+
+class TransformerBlock(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.attention = SelfAttention(hidden_dim, num_heads, dropout)
+        self.ff = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Dropout(dropout)
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
+        
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = self.attention(x, mask)
+        x = self.norm(x + self.ff(x))
+        return x
 
 class MultiTimeframeModel(nn.Module):
     """
@@ -14,17 +61,19 @@ class MultiTimeframeModel(nn.Module):
     - Dense output layers for predictions
     """
     
-    def __init__(self, 
-                input_dims: Dict[str, int], 
-                hidden_dims: int = 128, 
-                num_layers: int = 2,
-                dropout: float = 0.2,
-                bidirectional: bool = True,
-                attention: bool = True,
-                num_classes: int = 3,
-                use_batch_norm: bool = True,
-                use_residual: bool = True,
-                embedding_dim: Optional[int] = None):
+    def __init__(
+        self,
+        input_dims: Dict[str, int],
+        hidden_dims: int = 64,
+        num_layers: int = 1,
+        dropout: float = 0.7,
+        bidirectional: bool = True,
+        attention: bool = False,
+        num_classes: int = 3,
+        use_batch_norm: bool = True,
+        num_heads: int = 8,
+        use_transformer: bool = False
+    ):
         """
         Initialize the multi-timeframe model
         
@@ -37,313 +86,116 @@ class MultiTimeframeModel(nn.Module):
         - attention: Whether to use attention mechanism
         - num_classes: Number of output classes (default: 3 for buy, sell, hold)
         - use_batch_norm: Whether to use batch normalization
-        - use_residual: Whether to use residual connections
-        - embedding_dim: Optional dimension for initial feature embedding
+        - num_heads: Number of attention heads for transformer architecture
+        - use_transformer: Whether to use transformer architecture
         """
         super().__init__()
         
-        self.timeframes = list(input_dims.keys())
+        self.input_dims = input_dims
         self.hidden_dims = hidden_dims
+        self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.attention = attention
-        self.num_directions = 2 if bidirectional else 1
-        self.num_classes = num_classes
-        self.use_batch_norm = use_batch_norm
-        self.use_residual = use_residual
+        self.use_transformer = use_transformer
         
-        # Optional feature embedding layers
-        self.embeddings = nn.ModuleDict()
-        if embedding_dim is not None:
-            for tf, dim in input_dims.items():
-                self.embeddings[tf] = nn.Sequential(
-                    nn.Linear(dim, embedding_dim),
-                    nn.BatchNorm1d(embedding_dim) if use_batch_norm else nn.Identity(),
-                    nn.LeakyReLU()
-                )
-            # Update dimensions for the encoders
-            encoder_input_dims = {tf: embedding_dim for tf in input_dims}
-        else:
-            encoder_input_dims = input_dims
-        
-        # Create encoder LSTMs for each timeframe
-        self.encoders = nn.ModuleDict()
-        for tf, dim in encoder_input_dims.items():
-            self.encoders[tf] = nn.LSTM(
-                input_size=dim,
-                hidden_size=hidden_dims,
-                num_layers=num_layers,
-                batch_first=True,
-                bidirectional=bidirectional,
-                dropout=dropout if num_layers > 1 else 0
-            )
-        
-        # Batch normalization layers for encoder outputs
-        if use_batch_norm:
-            self.bn_encoders = nn.ModuleDict()
-            for tf in self.timeframes:
-                self.bn_encoders[tf] = nn.BatchNorm1d(hidden_dims * self.num_directions)
-        
-        # Improved attention mechanism with scaled dot-product attention
-        if attention:
-            attn_dim = hidden_dims * self.num_directions
-            self.query_projections = nn.ModuleDict()
-            self.key_projections = nn.ModuleDict()
-            self.value_projections = nn.ModuleDict()
-            
-            for tf in self.timeframes:
-                self.query_projections[tf] = nn.Linear(attn_dim, attn_dim)
-                self.key_projections[tf] = nn.Linear(attn_dim, attn_dim)
-                self.value_projections[tf] = nn.Linear(attn_dim, attn_dim)
-            
-            self.attn_combine = nn.Sequential(
-                nn.Linear(len(self.timeframes) * attn_dim, attn_dim),
-                nn.BatchNorm1d(attn_dim) if use_batch_norm else nn.Identity(),
-                nn.LeakyReLU(),
+        # Input processing for each timeframe
+        self.input_layers = nn.ModuleDict({
+            tf: nn.Sequential(
+                nn.Linear(dim, hidden_dims),
+                nn.BatchNorm1d(hidden_dims) if use_batch_norm else nn.Identity(),
+                nn.ReLU(),
                 nn.Dropout(dropout)
             )
+            for tf, dim in input_dims.items()
+        })
         
-        # Output layers with batch normalization and residual connections
-        output_dim = hidden_dims * self.num_directions * (1 if attention else len(self.timeframes))
+        if use_transformer:
+            # Transformer-based architecture
+            self.pos_encoding = PositionalEncoding(hidden_dims)
+            self.transformer_blocks = nn.ModuleList([
+                TransformerBlock(hidden_dims, num_heads, dropout)
+                for _ in range(num_layers)
+            ])
+        else:
+            # LSTM-based architecture
+            self.lstm_layers = nn.ModuleDict({
+                tf: nn.LSTM(
+                    input_size=hidden_dims,
+                    hidden_size=hidden_dims,
+                    num_layers=num_layers,
+                    batch_first=True,
+                    bidirectional=bidirectional,
+                    dropout=dropout if num_layers > 1 else 0
+                )
+                for tf in input_dims.keys()
+            })
+            
+            if attention:
+                self.attention_layers = nn.ModuleDict({
+                    tf: SelfAttention(hidden_dims * (2 if bidirectional else 1), num_heads, dropout)
+                    for tf in input_dims.keys()
+                })
         
-        self.fc_layers = nn.ModuleList()
-        
-        # First layer 
-        self.fc1 = nn.Sequential(
-            nn.Linear(output_dim, hidden_dims),
+        # Output layers
+        final_hidden_dim = hidden_dims * (2 if bidirectional else 1) * len(input_dims)
+        self.output_layers = nn.Sequential(
+            nn.Linear(final_hidden_dim, hidden_dims),
             nn.BatchNorm1d(hidden_dims) if use_batch_norm else nn.Identity(),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout)
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dims, num_classes)
         )
-        
-        # Second layer with residual connection
-        self.fc2 = nn.Sequential(
-            nn.Linear(hidden_dims, hidden_dims // 2),
-            nn.BatchNorm1d(hidden_dims // 2) if use_batch_norm else nn.Identity(),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout)
-        )
-        
-        # Residual connection adapter if using residual connections
-        if use_residual:
-            self.residual_adapter = nn.Linear(hidden_dims, hidden_dims // 2)
-        
-        # Final layer
-        self.fc3 = nn.Linear(hidden_dims // 2, self.num_classes)
-        
-        # Class balancing weights - initialized to equal weights
-        self.class_weights = nn.Parameter(torch.ones(num_classes))
     
-    def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Forward pass through the model
         
         Parameters:
-        - inputs: Dictionary mapping timeframe names to input tensors
+        - x: Dictionary mapping timeframe names to input tensors
                   Each tensor has shape (batch_size, seq_len, input_dim)
         
         Returns:
         - Tensor with shape (batch_size, num_classes)
         """
-        features = self.extract_features(inputs)
+        # Process each timeframe
+        processed_features = []
         
-        # Pass through fully connected layers with residual connection
-        x = self.fc1(features)
-        
-        # Apply residual connection
-        if self.use_residual and hasattr(self, 'residual_adapter'):
-            residual = self.residual_adapter(x)
-            x = self.fc2(x) + residual
-        else:
-            x = self.fc2(x)
-        
-        # Final layer with class weights
-        x = self.fc3(x)
-        
-        # Apply class weights for balanced learning
-        x = x * self.class_weights
-        
-        return x
-    
-    def extract_features(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Extract features from multiple timeframes without final classification
-        
-        Parameters:
-        - inputs: Dictionary mapping timeframe names to input tensors
-                  Each tensor has shape (batch_size, seq_len, input_dim)
-        
-        Returns:
-        - Feature tensor with shape (batch_size, feature_dim)
-        """
-        # Preprocess inputs
-        processed_inputs = self._preprocess_inputs(inputs)
-        
-        # Process each timeframe through its encoder
-        encoded_timeframes = {}
-        for tf in self.timeframes:
-            if tf in processed_inputs:
-                # Apply optional embedding
-                if tf in self.embeddings:
-                    # Reshape for batch norm: [batch, seq, features] -> [batch*seq, features]
-                    batch_size, seq_len, input_dim = processed_inputs[tf].shape
-                    flat_input = processed_inputs[tf].reshape(-1, input_dim)
-                    
-                    # Apply embedding
-                    embedded = self.embeddings[tf](flat_input)
-                    
-                    # Reshape back: [batch*seq, embedding_dim] -> [batch, seq, embedding_dim]
-                    processed_inputs[tf] = embedded.view(batch_size, seq_len, -1)
-                
-                # Run the encoder
-                output, (hidden, _) = self.encoders[tf](processed_inputs[tf])
-                
-                # Get the final hidden state(s)
-                if self.bidirectional:
-                    # Reshape hidden for easy access to directions
-                    # hidden shape: [num_layers * num_directions, batch, hidden]
-                    batch_size = hidden.size(1)
-                    num_layers = hidden.size(0) // self.num_directions
-                    
-                    # Extract last layer's hidden states (forward and backward)
-                    hidden_forward = hidden[num_layers*2-2, :, :]  # Last forward direction
-                    hidden_backward = hidden[num_layers*2-1, :, :]  # Last backward direction
-                    
-                    # Concatenate forward and backward states
-                    final_hidden = torch.cat([hidden_forward, hidden_backward], dim=1)
-                else:
-                    # For unidirectional, just take the last layer's hidden state
-                    final_hidden = hidden[-1]
-                
-                # Apply batch normalization if enabled
-                if self.use_batch_norm and tf in self.bn_encoders:
-                    final_hidden = self.bn_encoders[tf](final_hidden)
-                
-                encoded_timeframes[tf] = final_hidden
+        for tf, features in x.items():
+            # Input processing
+            batch_size, seq_len, _ = features.shape
+            features = features.reshape(-1, features.size(-1))
+            features = self.input_layers[tf](features)
+            features = features.reshape(batch_size, seq_len, -1)
+            
+            if self.use_transformer:
+                # Transformer processing
+                features = features.transpose(0, 1)  # (seq_len, batch_size, hidden_dim)
+                features = self.pos_encoding(features)
+                for block in self.transformer_blocks:
+                    features = block(features)
+                features = features.transpose(0, 1)  # (batch_size, seq_len, hidden_dim)
             else:
-                # Handle missing timeframe with zero tensor
-                batch_size = next(iter(processed_inputs.values())).size(0)
-                device = next(iter(processed_inputs.values())).device
+                # LSTM processing
+                lstm_out, _ = self.lstm_layers[tf](features)
                 
-                encoded_timeframes[tf] = torch.zeros(
-                    batch_size, 
-                    self.hidden_dims * self.num_directions,
-                    device=device
-                )
-        
-        # Apply attention mechanism if enabled
-        if self.attention:
-            combined = self._apply_attention(encoded_timeframes)
-        else:
-            # Simple concatenation of all timeframe encodings
-            combined = torch.cat([encoded_timeframes[tf] for tf in self.timeframes], dim=1)
-        
-        return combined
-    
-    def _preprocess_inputs(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """
-        Preprocess input tensors before feeding to encoders
-        
-        Parameters:
-        - inputs: Dictionary mapping timeframe names to input tensors
-        
-        Returns:
-        - Processed inputs
-        """
-        processed = {}
-        
-        # Process each timeframe input
-        for tf, tensor in inputs.items():
-            if tf in self.timeframes:
-                # Handle potential dimension mismatches
-                if tensor.dim() == 2:
-                    # Add sequence dimension if missing: [batch, features] -> [batch, 1, features]
-                    tensor = tensor.unsqueeze(1)
+                if self.attention:
+                    # Apply attention
+                    lstm_out = lstm_out.transpose(0, 1)  # (seq_len, batch_size, hidden_dim)
+                    lstm_out = self.attention_layers[tf](lstm_out)
+                    lstm_out = lstm_out.transpose(0, 1)  # (batch_size, seq_len, hidden_dim)
                 
-                # Apply input normalization to stabilize training
-                # Compute mean and std across batch and time dimensions
-                mean = tensor.mean(dim=[0, 1], keepdim=True)
-                std = tensor.std(dim=[0, 1], keepdim=True) + 1e-6  # Avoid division by zero
-                normalized = (tensor - mean) / std
-                
-                processed[tf] = normalized
-        
-        return processed
-    
-    def _apply_attention(self, encoded_timeframes: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Apply scaled dot-product attention mechanism between timeframes
-        
-        Parameters:
-        - encoded_timeframes: Dictionary of encoded features for each timeframe
-        
-        Returns:
-        - Combined attention-weighted features
-        """
-        attention_outputs = []
-        
-        # Use scaled dot-product attention
-        for tf_query in self.timeframes:
-            # Project query
-            query = self.query_projections[tf_query](encoded_timeframes[tf_query])
+                features = lstm_out
             
-            # Attend to all other timeframes
-            attended_values = []
-            
-            for tf_key in self.timeframes:
-                # Project key and value
-                key = self.key_projections[tf_key](encoded_timeframes[tf_key])
-                value = self.value_projections[tf_key](encoded_timeframes[tf_key])
-                
-                # Calculate attention scores
-                attention_scores = torch.matmul(query.unsqueeze(1), key.unsqueeze(2)) / (self.hidden_dims ** 0.5)
-                attention_scores = torch.sigmoid(attention_scores).squeeze(2)
-                
-                # Apply attention scores to values
-                attended = attention_scores.unsqueeze(1) * value.unsqueeze(1)
-                attended = attended.squeeze(1)
-                
-                attended_values.append(attended)
-            
-            # Sum all attended values
-            if attended_values:
-                summed_attended = sum(attended_values)
-                attention_outputs.append(summed_attended)
+            # Take the last timestep
+            features = features[:, -1, :]
+            processed_features.append(features)
         
-        # Concatenate all attention outputs
-        concatenated = torch.cat(attention_outputs, dim=1)
+        # Concatenate features from all timeframes
+        combined_features = torch.cat(processed_features, dim=1)
         
-        # Combine attention outputs
-        combined = self.attn_combine(concatenated)
-        
-        return combined
-    
-    def predict_probabilities(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Forward pass that returns class probabilities
-        
-        Parameters:
-        - inputs: Dictionary mapping timeframe names to input tensors
-        
-        Returns:
-        - Tensor with shape (batch_size, num_classes) containing probabilities
-        """
-        logits = self.forward(inputs)
-        return F.softmax(logits, dim=1)
-    
-    def predict_action(self, inputs: Dict[str, torch.Tensor]) -> int:
-        """
-        Predict the best action (for use with RL agents)
-        
-        Parameters:
-        - inputs: Dictionary mapping timeframe names to input tensors
-        
-        Returns:
-        - Action index (0=hold, 1=buy, 2=sell)
-        """
-        with torch.no_grad():
-            logits = self.forward(inputs)
-            probabilities = F.softmax(logits, dim=1)
-            return torch.argmax(probabilities, dim=1).item()
+        # Output processing
+        output = self.output_layers(combined_features)
+        return output
 
 class TimeSeriesTransformer(nn.Module):
     """
