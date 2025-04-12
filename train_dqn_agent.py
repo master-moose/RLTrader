@@ -752,6 +752,90 @@ def add_technical_indicators(df):
     
     return df
 
+def setup_finrl_import():
+    """Setup import for FinRL DRLAgent with version detection"""
+    global DRLAgent
+    
+    try:
+        # Try the new import path first (FinRL 0.3.7+)
+        from finrl.agents.stablebaselines3.models import DRLAgent
+        logger.info("Using FinRL 0.3.7+ import path for DRLAgent")
+        return DRLAgent
+    except ImportError:
+        try:
+            # Fall back to older path (FinRL <= 0.3.5)
+            from finrl.agents.drl_agent import DRLAgent
+            logger.info("Using FinRL <= 0.3.5 import path for DRLAgent")
+            return DRLAgent
+        except ImportError:
+            logger.error("Could not import DRLAgent from any known FinRL paths")
+            return None
+
+
+# Get the DRLAgent class
+OriginalDRLAgent = setup_finrl_import()
+
+# Create our own derived DRLAgent class to bypass patching
+class CustomDRLAgent(OriginalDRLAgent):
+    """
+    A custom DRLAgent that bypasses the patching mechanism in Stable-Baselines3.
+    This avoids the gym.spaces.Sequence compatibility issue.
+    """
+    def get_model(self, model_name, model_kwargs=None):
+        """
+        Create model without applying any patching to the environment.
+        
+        Args:
+            model_name: Name of the RL model
+            model_kwargs: Arguments for the model
+            
+        Returns:
+            Model instance
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+            
+        # Import MODELS dictionary from finrl
+        from finrl.agents.stablebaselines3.models import MODELS
+            
+        # Use the environment directly without patching
+        env = self.env
+        
+        # Add common params for all models
+        model_kwargs.update({
+            "env": env,
+            "verbose": self.verbose,
+            "policy": "MlpPolicy",
+            "policy_kwargs": {"net_arch": self.net_arch},
+        })
+        
+        # Get the model class
+        if model_name not in MODELS:
+            raise NotImplementedError(f"Model {model_name} not supported")
+            
+        # Create model instance with original init method but with special handling for env
+        model_class = MODELS[model_name]
+        
+        # Monkey patch the _wrap_env method to disable patching
+        original_wrap_env = model_class._wrap_env
+        
+        def no_patch_wrap_env(self, env, verbose=0, monitor_wrapper=True):
+            """Do not apply any patching to the environment"""
+            # Skip the patching completely - return env directly
+            return env
+            
+        # Apply monkey patch
+        model_class._wrap_env = no_patch_wrap_env
+        
+        # Create model
+        model = model_class(**model_kwargs)
+        
+        # Restore original method
+        model_class._wrap_env = original_wrap_env
+        
+        return model
+
+
 def train_with_finrl(args, market_data, device):
     """
     Train a cryptocurrency trading agent using the FinRL framework.
@@ -794,8 +878,8 @@ def train_with_finrl(args, market_data, device):
     if isinstance(obs, np.ndarray):
         logger.info(f"Test observation shape: {obs.shape}, dtype: {obs.dtype}")
     
-    # Set up FinRL agent with the environment directly
-    agent = DRLAgent(env=env)
+    # Set up FinRL agent with the environment directly - use our custom agent class
+    agent = CustomDRLAgent(env=env)
     
     # Network architecture for models
     net_arch = [256, 256]
