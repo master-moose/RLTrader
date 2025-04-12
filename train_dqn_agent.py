@@ -348,6 +348,12 @@ def create_finrl_env(df, args):
     # Create environment configuration
     env_config = {
         'df': df,
+        'stock_dim': num_stocks,
+        'hmax': 100,  # Maximum number of shares to trade
+        'initial_amount': 1000000,  # Initial capital
+        'buy_cost_pct': 0.001,  # 0.1% transaction cost for buying
+        'sell_cost_pct': 0.001,  # 0.1% transaction cost for selling
+        'reward_scaling': 1e-4,  # Scale rewards to avoid large numbers
         'num_stock_shares': num_stock_shares,
         'state_space': len(INDICATORS) + 2,  # +2 for price and shares held
         'action_space': 3,  # buy, hold, sell
