@@ -739,35 +739,34 @@ def train_with_finrl(args, market_data, device):
     # Network architecture for models
     net_arch = [256, 256]
     
-    # SAC model parameters
+    # Create policy_kwargs dictionary for all models
+    policy_kwargs = {
+        'net_arch': net_arch
+    }
+    
+    # Initialize model_kwargs dictionary based on model type
     if args.finrl_model.lower() == 'sac':
         logger.info("Training with SAC model")
-        # SAC parameters
-        model_params = {
-            'policy': 'MlpPolicy',
+        model_kwargs = {
             'verbose': 1 if args.verbose else 0,
             'batch_size': 64,
             'buffer_size': 100000,
             'learning_rate': 0.0001,
             'learning_starts': 100,
             'ent_coef': 'auto_0.1',
-            'policy_kwargs': {'net_arch': net_arch}
+            'policy_kwargs': policy_kwargs
         }
-        print(model_params)
-    # PPO and A2C have similar parameters
     elif args.finrl_model.lower() in ['ppo', 'a2c']:
         if args.finrl_model.lower() == 'ppo':
             logger.info("Training with PPO model")
         else:
             logger.info("Training with A2C model")
         
-        model_params = {
-            'policy': 'MlpPolicy',
+        model_kwargs = {
             'verbose': 1 if args.verbose else 0,
             'learning_rate': 0.0003,
-            'policy_kwargs': {'net_arch': net_arch}
+            'policy_kwargs': policy_kwargs
         }
-    # DDPG and TD3 use action noise
     elif args.finrl_model.lower() in ['ddpg', 'td3']:
         if args.finrl_model.lower() == 'ddpg':
             logger.info("Training with DDPG model")
@@ -780,24 +779,22 @@ def train_with_finrl(args, market_data, device):
             mean=np.zeros(n_actions),
             sigma=0.1 * np.ones(n_actions)
         )
-        model_params = {
-            'policy': 'MlpPolicy',
+        model_kwargs = {
             'verbose': 1 if args.verbose else 0,
             'buffer_size': 100000,
             'learning_rate': 0.0003,
             'action_noise': action_noise,
-            'policy_kwargs': {'net_arch': net_arch}
+            'policy_kwargs': policy_kwargs
         }
     else:  # Default to DQN
         logger.info("Training with DQN model")
-        model_params = {
-            'policy': 'MlpPolicy',
+        model_kwargs = {
             'verbose': 1 if args.verbose else 0,
             'learning_rate': 0.0003,
             'buffer_size': 50000,
             'exploration_final_eps': 0.1,
             'exploration_fraction': 0.1,
-            'policy_kwargs': {'net_arch': net_arch}
+            'policy_kwargs': policy_kwargs
         }
     
     # Custom SAC callback to monitor reward calculation
@@ -822,14 +819,12 @@ def train_with_finrl(args, market_data, device):
                     
             return True
     
-    # Add callback for SAC training if applicable
-    if args.finrl_model.lower() == 'sac':
-        # For SAC, don't add the callback directly to model_params
-        # as it causes issues with initialization
-        logger.info("Added SAC training callback for monitoring rewards")
+    # Print the model kwargs for debugging
+    logger.info(f"Model kwargs: {model_kwargs}")
     
     # Get the appropriate model
-    model = agent.get_model(args.finrl_model.lower(), model_kwargs=model_params)  # Changed from model_params to model_kwargs
+    # Note: The agent.get_model function will add the 'policy' parameter itself, so don't include it here
+    model = agent.get_model(model_name=args.finrl_model.lower(), model_kwargs=model_kwargs)
     
     # Train model
     logger.info("Starting model training...")
