@@ -1646,13 +1646,16 @@ def train_with_finrl(
         )
         
         # Save the model
-        save_model = getattr(args, 'save_model', True)  # Default to True if not specified
-        if save_model:
-            model_path = f"./models/finrl_{finrl_model}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            model.save(model_path)
-            logger.info(f"Saved model to {model_path}")
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
+        os.makedirs(model_path, exist_ok=True)
+        model.save(f"{model_path}/model")
+        logger.info(f"Model saved to {model_path}/model")
         
-        return model
+        # Save arguments used for training
+        with open(f"{model_path}/training_args.json", 'w') as f:
+            json.dump(vars(args), f, indent=4)
+        logger.info(f"Training arguments saved to {model_path}/training_args.json")
     except Exception as e:
         logger.error(f"Error during model creation or training: {e}")
         logger.error(traceback.format_exc())
@@ -2188,7 +2191,7 @@ def main():
                 
                 # Save the model
                 timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                model_path = f"models/finrl_{finrl_model}_{timestamp}"
+                model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
                 os.makedirs(model_path, exist_ok=True)
                 model.save(f"{model_path}/model")
                 logger.info(f"Model saved to {model_path}/model")
@@ -2280,7 +2283,7 @@ def main():
         
         # Save the model
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        model_path = f"models/finrl_{finrl_model}_{timestamp}"
+        model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
         os.makedirs(model_path, exist_ok=True)
         model.save(f"{model_path}/model")
         logger.info(f"Model saved to {model_path}/model")
