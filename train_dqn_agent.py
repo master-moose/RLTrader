@@ -1410,5 +1410,326 @@ def train_with_finrl(
     
     return model
 
+def setup_logging():
+    """Configure and return a logger for the application."""
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    logging.basicConfig(level=logging.INFO, format=log_format)
+    return logging.getLogger()
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Train DQN agent for cryptocurrency trading')
+    
+    # General arguments
+    parser.add_argument('--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (cuda or cpu)')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    
+    # Data arguments
+    parser.add_argument('--start_date', type=str, default='2018-01-01', help='Start date for training data')
+    parser.add_argument('--end_date', type=str, default='2021-12-31', help='End date for training data')
+    parser.add_argument('--tickers', type=str, default='BTC,ETH,LTC', help='Comma-separated list of tickers')
+    
+    # Model arguments
+    parser.add_argument('--use_finrl', action='store_true', help='Use FinRL framework')
+    parser.add_argument('--finrl_model', type=str, default='sac', 
+                       choices=['sac', 'ppo', 'ddpg', 'td3'], 
+                       help='FinRL model to use')
+    parser.add_argument('--lstm_model_path', type=str, help='Path to pretrained LSTM model')
+    parser.add_argument('--timesteps', type=int, default=50000, help='Number of timesteps to train')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel environments')
+    
+    # Hyperparameters
+    parser.add_argument('--learning_rate', type=float, default=0.0003, help='Learning rate')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--initial_balance', type=float, default=1000000.0, help='Initial balance')
+    parser.add_argument('--transaction_fee', type=float, default=0.001, help='Transaction fee')
+    
+    return parser.parse_args()
+
+def load_and_preprocess_market_data(args):
+    """Load and preprocess market data for training."""
+    logger.info("Loading market data...")
+    
+    # This function would normally load data from files or APIs
+    # For this implementation, we'll create synthetic data
+    
+    # Get tickers
+    if hasattr(args, 'tickers'):
+        if isinstance(args.tickers, str):
+            tickers = args.tickers.split(',')
+        else:
+            tickers = args.tickers
+    else:
+        tickers = ['BTC']
+    
+    # Create synthetic data
+    market_data = {}
+    for timeframe in ['1h', '4h', '1d']:
+        # Create a DataFrame with basic OHLCV data
+        data_length = 1000  # Number of candlesticks
+        
+        df = pd.DataFrame({
+            'open': np.random.normal(1000, 100, data_length),
+            'high': np.random.normal(1050, 100, data_length),
+            'low': np.random.normal(950, 100, data_length),
+            'close': np.random.normal(1000, 100, data_length),
+            'volume': np.random.normal(1000, 200, data_length)
+        })
+        
+        # Ensure high is the highest price
+        df['high'] = np.maximum(df['high'], np.maximum(df['open'], df['close']))
+        # Ensure low is the lowest price
+        df['low'] = np.minimum(df['low'], np.minimum(df['open'], df['close']))
+        
+        # Create a datetime index
+        start_date = pd.to_datetime(args.start_date) if hasattr(args, 'start_date') else pd.to_datetime('2018-01-01')
+        freq = '1H' if timeframe == '1h' else '4H' if timeframe == '4h' else 'D'
+        df.index = pd.date_range(start=start_date, periods=data_length, freq=freq)
+        
+        market_data[timeframe] = df
+    
+    logger.info(f"Created synthetic market data with {data_length} data points")
+    return market_data, data_length
+
+def train_with_custom_dqn(args, market_data, data_length, device):
+    """Train a DQN agent using custom implementation."""
+    logger.info("Training with custom DQN implementation")
+    
+    # This would be a full implementation
+    # For now, just return a placeholder
+    logger.info("Custom DQN training not implemented yet, returning placeholder")
+    return None
+
+def create_synthetic_data(tickers, start_date, end_date):
+    """
+    Create synthetic data for multiple tickers between start_date and end_date.
+    
+    Args:
+        tickers (list): List of ticker symbols
+        start_date (str): Start date in format 'YYYY-MM-DD'
+        end_date (str): End date in format 'YYYY-MM-DD'
+        
+    Returns:
+        pandas.DataFrame: Synthetic data with multi-index (date, tic)
+    """
+    print(f"Creating synthetic data for {len(tickers)} symbols from {start_date} to {end_date}")
+    
+    # Convert dates to pandas datetime
+    start_date = pd.to_datetime(start_date)
+    end_date = pd.to_datetime(end_date)
+    
+    # Create date range
+    dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    # Create empty list to store data for each ticker
+    all_data = []
+    
+    # Generate data for each ticker
+    for ticker in tickers:
+        # Create base price and volatility
+        base_price = np.random.uniform(100, 10000)
+        volatility = np.random.uniform(0.01, 0.05)
+        
+        # Generate price data
+        prices = [base_price]
+        for i in range(1, len(dates)):
+            # Random walk with drift
+            change = np.random.normal(0.0001, volatility)
+            new_price = prices[-1] * (1 + change)
+            prices.append(new_price)
+        
+        # Convert to numpy array for vectorized operations
+        prices = np.array(prices)
+        
+        # Create OHLCV data
+        daily_volatility = volatility / np.sqrt(252)
+        
+        df = pd.DataFrame({
+            'date': dates,
+            'tic': ticker,
+            'open': prices * np.random.uniform(0.98, 1.02, len(dates)),
+            'high': prices * np.random.uniform(1.01, 1.04, len(dates)),
+            'low': prices * np.random.uniform(0.96, 0.99, len(dates)),
+            'close': prices,
+            'volume': np.random.uniform(100000, 1000000, len(dates))
+        })
+        
+        # Ensure high is the highest price and low is the lowest price
+        df['high'] = df[['open', 'high', 'close']].max(axis=1)
+        df['low'] = df[['open', 'low', 'close']].min(axis=1)
+        
+        # Add to the list
+        all_data.append(df)
+    
+    # Concatenate all data
+    result_df = pd.concat(all_data, ignore_index=True)
+    
+    # Add technical indicators
+    # Add SMA
+    for window in [5, 10, 20, 60, 120]:
+        result_df[f'close_{window}_sma'] = result_df.groupby('tic')['close'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).mean()
+        )
+    
+    # Add EMA
+    for window in [5, 10, 20, 60, 120]:
+        result_df[f'close_{window}_ema'] = result_df.groupby('tic')['close'].transform(
+            lambda x: x.ewm(span=window, adjust=False).mean()
+        )
+    
+    # RSI
+    def calculate_rsi(series, window=14):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).fillna(0)
+        loss = (-delta.where(delta < 0, 0)).fillna(0)
+        
+        avg_gain = gain.rolling(window=window, min_periods=1).mean()
+        avg_loss = loss.rolling(window=window, min_periods=1).mean()
+        
+        rs = avg_gain / avg_loss.where(avg_loss != 0, 1)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    result_df['rsi_14'] = result_df.groupby('tic')['close'].transform(
+        lambda x: calculate_rsi(x, window=14)
+    )
+    
+    # MACD
+    def calculate_macd(series, fast=12, slow=26, signal=9):
+        ema_fast = series.ewm(span=fast, adjust=False).mean()
+        ema_slow = series.ewm(span=slow, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        macd_signal = macd.ewm(span=signal, adjust=False).mean()
+        macd_hist = macd - macd_signal
+        return macd, macd_signal, macd_hist
+    
+    for ticker in tickers:
+        ticker_data = result_df[result_df['tic'] == ticker]
+        macd, macd_signal, macd_hist = calculate_macd(ticker_data['close'])
+        
+        result_df.loc[result_df['tic'] == ticker, 'macd'] = macd.values
+        result_df.loc[result_df['tic'] == ticker, 'macd_signal'] = macd_signal.values
+        result_df.loc[result_df['tic'] == ticker, 'macd_hist'] = macd_hist.values
+    
+    # CCI
+    def calculate_cci(high, low, close, window=20):
+        tp = (high + low + close) / 3
+        sma_tp = tp.rolling(window=window, min_periods=1).mean()
+        mad = tp.rolling(window=window).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+        cci = (tp - sma_tp) / (0.015 * mad.fillna(0))
+        return cci
+    
+    result_df['cci_30'] = result_df.groupby('tic').apply(
+        lambda x: calculate_cci(x['high'], x['low'], x['close'], window=30)
+    ).reset_index(level=0, drop=True)
+    
+    # DX (Directional Index)
+    def calculate_dx(high, low, close, window=14):
+        plus_dm = high.diff()
+        minus_dm = low.diff()
+        plus_dm = plus_dm.where((plus_dm > 0) & (plus_dm > minus_dm.abs()), 0)
+        minus_dm = minus_dm.abs().where((minus_dm > 0) & (minus_dm > plus_dm), 0)
+        
+        tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+        
+        plus_di = 100 * (plus_dm.rolling(window=window).sum() / tr.rolling(window=window).sum())
+        minus_di = 100 * (minus_dm.rolling(window=window).sum() / tr.rolling(window=window).sum())
+        
+        dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).where(plus_di + minus_di != 0, 1))
+        return dx
+    
+    result_df['dx_30'] = result_df.groupby('tic').apply(
+        lambda x: calculate_dx(x['high'], x['low'], x['close'], window=30)
+    ).reset_index(level=0, drop=True)
+    
+    # Volatility
+    result_df['volatility_30'] = result_df.groupby('tic')['close'].transform(
+        lambda x: x.pct_change().rolling(window=30).std()
+    )
+    
+    # Volume indicators
+    result_df['volume_change'] = result_df.groupby('tic')['volume'].transform(
+        lambda x: x.pct_change()
+    )
+    
+    result_df['volume_norm'] = result_df.groupby('tic')['volume'].transform(
+        lambda x: (x - x.rolling(window=30, min_periods=1).min()) / 
+                 (x.rolling(window=30, min_periods=1).max() - x.rolling(window=30, min_periods=1).min() + 1e-10)
+    )
+    
+    # Add day column
+    result_df['day'] = result_df['date']
+    
+    # Fill NaN values
+    result_df = result_df.fillna(0)
+    
+    return result_df
+
+def main():
+    """Main entry point for the script."""
+    # Record start time
+    start_time = time.time()
+    
+    # Configure logging
+    global logger
+    logger = setup_logging()
+    
+    # Parse arguments
+    args = parse_args()
+    
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith('cuda') else 'cpu')
+    logger.info(f"Using device: {device}")
+    
+    # Check if using FinRL framework
+    if args.use_finrl:
+        logger.info("Using FinRL framework")
+        
+        # Set default values if not provided in args
+        start_date = getattr(args, 'start_date', '2018-01-01')
+        end_date = getattr(args, 'end_date', '2021-12-31')
+        
+        # Set tickers - use provided tickers or default to ['BTC']
+        tickers = getattr(args, 'tickers', ['BTC', 'ETH', 'LTC'])
+        if not isinstance(tickers, list):
+            # Split comma-separated string into list if needed
+            tickers = [t.strip() for t in tickers.split(',')]
+        
+        # Ensure at least BTC is included (as fallback)
+        if not tickers:
+            tickers = ['BTC']
+            
+        # Get number of workers
+        num_workers = getattr(args, 'num_workers', 4)
+        
+        # Train the model with required parameters
+        model = train_with_finrl(
+            args=args,
+            logger=logger,
+            start_date=start_date,
+            end_date=end_date,
+            tickers=tickers,
+            num_workers=num_workers
+        )
+        
+        # Record training duration
+        training_duration = time.time() - start_time
+        logger.info(f"Training completed in {training_duration:.2f} seconds")
+        
+        return model
+    
+    # For custom DQN, load data
+    market_data, data_length = load_and_preprocess_market_data(args)
+    
+    # Train the agent
+    agent = train_with_custom_dqn(args, market_data, data_length, device)
+    
+    # Record training duration
+    training_duration = time.time() - start_time
+    logger.info(f"Training completed in {training_duration:.2f} seconds")
+    
+    return agent
+
 if __name__ == "__main__":
     main() 
