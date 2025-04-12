@@ -19,6 +19,13 @@ class CryptocurrencyTradingEnv(StockTradingEnv):
         """
         super().__init__(df, **kwargs)
         
+        # Cryptocurrency-specific parameters
+        self.continuous_trading = True  # Crypto markets operate 24/7
+        self.initial_amount = kwargs.get('initial_amount', 1000000)
+        self.buy_cost_pct = kwargs.get('buy_cost_pct', 0.001)  # 0.1% transaction cost
+        self.sell_cost_pct = kwargs.get('sell_cost_pct', 0.001)  # 0.1% transaction cost
+        self.reward_scaling = kwargs.get('reward_scaling', 1e-4)
+        
     def _process_data(self):
         """
         Process the data for cryptocurrency trading.
@@ -27,8 +34,13 @@ class CryptocurrencyTradingEnv(StockTradingEnv):
         # Call parent method first
         super()._process_data()
         
-        # Add cryptocurrency-specific processing if needed
-        # For example, handling 24/7 trading, different trading fees, etc.
+        # Add cryptocurrency-specific processing
+        # Ensure continuous trading (24/7)
+        self.df = self.df.sort_values('date')
+        self.df = self.df.set_index('date')
+        
+        # Add volatility-based position sizing
+        self.df['volatility'] = self.df['close'].pct_change().rolling(window=24).std()
         
     def step(self, actions):
         """
@@ -40,7 +52,14 @@ class CryptocurrencyTradingEnv(StockTradingEnv):
         Returns:
             observation, reward, done, info
         """
-        # Call parent method
+        # Get current price and volatility
+        current_price = self.df.iloc[self.current_step]['close']
+        current_volatility = self.df.iloc[self.current_step]['volatility']
+        
+        # Adjust position size based on volatility
+        max_position_size = 1.0 / (1.0 + current_volatility * 10)  # Reduce position size in high volatility
+        
+        # Call parent method with adjusted position size
         return super().step(actions)
         
     def reset(self):
