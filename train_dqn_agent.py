@@ -171,6 +171,13 @@ def parse_args():
         help='FinRL model to use for training'
     )
     parser.add_argument(
+        '--primary_timeframe',
+        type=str,
+        choices=['15m', '1d', '4h'],
+        default='15m',
+        help='Primary timeframe to use for training'
+    )
+    parser.add_argument(
         '--data_dir',
         type=str,
         default='data/synthetic',
