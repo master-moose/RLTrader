@@ -2263,11 +2263,13 @@ def train_dqn_agent(args):
         return train_with_custom_dqn(args, market_data, data_length, device)
 
 def main():
-    """Main function for training the DQN agent."""
+    """Main entry point for the script."""
+    # Record start time
     start_time = time.time()
     
-    # Set up logging (if not already configured)
-    setup_logging()
+    # Configure logging
+    global logger
+    logger = setup_logging()
     
     # Parse arguments
     args = parse_args()
@@ -2279,8 +2281,33 @@ def main():
     # Check if using FinRL framework
     if args.use_finrl:
         logger.info("Using FinRL framework")
-        # No need to load data - environment handles it
-        model = train_with_finrl(args)
+        
+        # Set default values if not provided in args
+        start_date = getattr(args, 'start_date', '2018-01-01')
+        end_date = getattr(args, 'end_date', '2021-12-31')
+        
+        # Set tickers - use provided tickers or default to ['BTC']
+        tickers = getattr(args, 'tickers', ['BTC', 'ETH', 'LTC'])
+        if not isinstance(tickers, list):
+            # Split comma-separated string into list if needed
+            tickers = [t.strip() for t in tickers.split(',')]
+        
+        # Ensure at least BTC is included (as fallback)
+        if not tickers:
+            tickers = ['BTC']
+            
+        # Get number of workers
+        num_workers = getattr(args, 'num_workers', 4)
+        
+        # Train the model with required parameters
+        model = train_with_finrl(
+            args=args,
+            logger=logger,
+            start_date=start_date,
+            end_date=end_date,
+            tickers=tickers,
+            num_workers=num_workers
+        )
         
         # Record training duration
         training_duration = time.time() - start_time
