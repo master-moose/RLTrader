@@ -619,15 +619,13 @@ def train_with_finrl(args, market_data, device):
     if net_arch:
         # For SAC and other continuous models, we might need to specify more details
         if args.finrl_model == 'sac':
-            model_params['policy_kwargs'] = {
-                'net_arch': {
-                    'pi': net_arch,  # Policy network
-                    'qf': net_arch   # Q-function network
-                }
+            model_params['net_arch'] = {
+                'pi': net_arch,  # Policy network
+                'qf': net_arch   # Q-function network
             }
         else:
             # For other models, simpler net_arch specification
-            model_params['policy_kwargs'] = {'net_arch': net_arch}
+            model_params['net_arch'] = net_arch
 
     # Create and train the model
     try:
