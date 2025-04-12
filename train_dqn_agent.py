@@ -14,6 +14,7 @@ import traceback
 import numpy as np
 import torch
 import gym
+import gymnasium
 import sys
 import time
 from pathlib import Path
@@ -196,9 +197,10 @@ class DimensionAdjustingVecEnv(DummyVecEnv):
         return self._obs_from_buf()
 
 # Add this class after the BaseStockTradingEnv
-class StockTradingEnvWrapper(gym.Wrapper):
+class StockTradingEnvWrapper(gymnasium.Wrapper):
     """
-    A wrapper for StockTradingEnv that ensures consistent observation shapes.
+    A wrapper for StockTradingEnv that ensures consistent observation shapes
+    and is compatible with Gymnasium API used by Stable-Baselines3.
     """
     def __init__(self, env, state_space=16):
         """
@@ -208,21 +210,46 @@ class StockTradingEnvWrapper(gym.Wrapper):
             env: The environment to wrap
             state_space: The expected dimension of the observation space
         """
-        super().__init__(env)
-        
-        # Define expected observation space with FINITE bounds
-        # This is critical for SB3 compatibility which doesn't support infinite bounds
-        self.observation_space = gym.spaces.Box(
-            low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
-        )
-        
-        # Add attributes needed by Stable-Baselines3
-        self.num_envs = 1  # Not vectorized, so just one environment
-        
-        logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
+        # Convert to Gymnasium environment first if it's not already
+        if not isinstance(env, gymnasium.Env):
+            # Create a proper gymnasium-compatible observation space
+            self.observation_space = gymnasium.spaces.Box(
+                low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
+            )
+            self.action_space = env.action_space
+            if isinstance(self.action_space, gym.spaces.Box):
+                # Convert gym Box to gymnasium Box
+                self.action_space = gymnasium.spaces.Box(
+                    low=env.action_space.low,
+                    high=env.action_space.high,
+                    shape=env.action_space.shape,
+                    dtype=env.action_space.dtype
+                )
+            # We'll initialize the wrapper later
+            self.env = env
+            # Add num_envs attribute required by SB3
+            self.num_envs = 1
+            
+            logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
+        else:
+            # If already a gymnasium environment, just wrap it directly
+            super().__init__(env)
+            # Override the observation space to have finite bounds
+            self.observation_space = gymnasium.spaces.Box(
+                low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
+            )
+            logger.info(f"Wrapped Gymnasium environment with observation space: {self.observation_space}")
     
-    def reset(self):
-        obs = self.env.reset()
+    def reset(self, **kwargs):
+        """Reset the environment, with compatibility for both gym and gymnasium APIs."""
+        try:
+            # Try gymnasium API first (for newer environments)
+            obs, info = self.env.reset(**kwargs)
+            reset_info = info
+        except (ValueError, TypeError):
+            # Fall back to old gym API
+            obs = self.env.reset()
+            reset_info = {}
         
         # Check if observation needs adjustment
         if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
@@ -239,10 +266,18 @@ class StockTradingEnvWrapper(gym.Wrapper):
         
         # Clip observation to be within bounds for SB3 compatibility
         obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
-        return obs
+        return obs, reset_info
     
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
+        """Take a step, with compatibility for both gym and gymnasium APIs."""
+        try:
+            # Try with gymnasium API (5 values)
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+        except ValueError:
+            # Fall back to old gym API (4 values)
+            obs, reward, done, info = self.env.step(action)
+            terminated, truncated = done, False
         
         # Check if observation needs adjustment
         if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
@@ -257,19 +292,15 @@ class StockTradingEnvWrapper(gym.Wrapper):
         
         # Clip observation to be within bounds for SB3 compatibility
         obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
-        return obs, reward, done, info
+        
+        # Return in gymnasium format
+        return obs, reward, terminated, truncated, info
     
     def seed(self, seed=None):
-        """
-        Seed the environment's random number generator.
-        
-        Args:
-            seed: The seed to use
-            
-        Returns:
-            The seed used
-        """
-        # Implement our own seed method since StockTradingEnv doesn't have one
+        """Seed the environment if the underlying env supports it."""
+        if hasattr(self.env, 'seed'):
+            return self.env.seed(seed)
+        # For gymnasium API, implement a basic seed method
         np.random.seed(seed)
         return [seed]
 
@@ -283,7 +314,7 @@ def create_finrl_env(df, args):
         args: Command line arguments
         
     Returns:
-        FinRL environment
+        FinRL environment compatible with Stable-Baselines3
     """
     # Get unique tickers
     unique_tickers = df['tic'].unique()
@@ -356,14 +387,11 @@ def create_finrl_env(df, args):
         except Exception as e:
             logger.error(f"Error testing environment reset: {e}")
         
-        # Wrap the environment to ensure consistent observation shape
+        # Wrap the environment with our gymnasium-compatible wrapper
         wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
         
-        # Wrap with SB3's Monitor for proper tracking, but disable file writing
-        from stable_baselines3.common.monitor import Monitor
-        monitored_env = Monitor(wrapped_env, None, allow_early_resets=True)
-        
-        return monitored_env
+        # Return the wrapped environment directly
+        return wrapped_env
         
     except Exception as e:
         logger.error(f"Error creating environment: {e}")
@@ -1005,18 +1033,34 @@ def train_with_finrl(args, market_data, device):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         
-        # Directly seed the environment - it should now have a seed method from the wrapper
-        env.seed(args.seed)
-        logger.info(f"Set random seed to {args.seed}")
+        # Seed the environment - handle both gym and gymnasium APIs
+        try:
+            # Try the gymnasium API first (returns None)
+            env.reset(seed=args.seed)
+            logger.info(f"Set environment seed to {args.seed} using gymnasium API")
+        except (TypeError, ValueError):
+            # Fall back to the older gym API
+            env.seed(args.seed)
+            logger.info(f"Set environment seed to {args.seed} using gym API")
     
     # Log environment information
     logger.info(f"Environment observation space: {env.observation_space}")
     logger.info(f"Environment action space: {env.action_space}")
     
-    # Test reset to validate
-    obs = env.reset()
-    if isinstance(obs, np.ndarray):
-        logger.info(f"Test observation shape: {obs.shape}, dtype: {obs.dtype}")
+    # Test reset to validate - handle both gym and gymnasium APIs
+    try:
+        obs_and_info = env.reset()
+        # Check if obs_and_info is a tuple (gymnasium API)
+        if isinstance(obs_and_info, tuple) and len(obs_and_info) == 2:
+            obs = obs_and_info[0]  # In gymnasium, reset returns (obs, info)
+        else:
+            obs = obs_and_info  # In gym, reset only returns obs
+            
+        if isinstance(obs, np.ndarray):
+            logger.info(f"Test observation shape: {obs.shape}, dtype: {obs.dtype}")
+    except Exception as e:
+        logger.error(f"Error during test reset: {e}")
+        logger.error(traceback.format_exc())
     
     # Network architecture for models
     net_arch = [256, 256]
