@@ -747,21 +747,31 @@ def train_with_finrl(args, market_data, device):
     # Prepare data in FinRL format
     df = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
     
+    # Using a different approach for environment creation to ensure compatibility
+    # with Stable Baselines3 models
+    
+    # First, create a single environment to test
+    logger.info("Creating a test environment for setup")
+    test_env = create_finrl_env(df, args)
+    
+    # Get environment parameters from test environment
+    obs_shape = test_env.observation_space.shape
+    logger.info(f"Observation space shape from test environment: {obs_shape}")
+    
+    # Create environment creation function that will be used by the vectorized environment
+    def make_env():
+        env = create_finrl_env(df, args)
+        return env
+    
     # Number of workers for parallel environments
     num_workers = args.num_workers if hasattr(args, 'num_workers') else 4
+    logger.info(f"Creating environment with {num_workers} workers")
     
-    # Create parallel environments for training
-    if num_workers > 1:
-        logger.info(f"Creating {num_workers} parallel environments for training")
-        env = create_parallel_finrl_envs(df, args, num_workers)
-        logger.info("Using CustomDummyVecEnv implementation to avoid gym compatibility issues")
-    else:
-        # Create single environment
-        logger.info("Creating single environment for training")
-        env = create_finrl_env(df, args)
-        # Wrap in our custom vec env
-        env = DimensionAdjustingVecEnv([lambda: env])
-        logger.info("Using DimensionAdjustingVecEnv to handle observation shape mismatches")
+    # Use DummyVecEnv which is compatible with Stable Baselines3
+    # We won't use SubprocVecEnv due to compatibility issues
+    env_fns = [make_env for _ in range(num_workers)]
+    env = DummyVecEnv(env_fns)
+    logger.info("Using standard DummyVecEnv for compatibility with Stable Baselines3")
     
     # Set random seeds for reproducibility
     if args.seed is not None:
@@ -771,98 +781,39 @@ def train_with_finrl(args, market_data, device):
     # Validate observation space
     logger.info(f"Vector environment observation space: {env.observation_space}")
     
-    # Create an observation shape adapter wrapper
-    class ObservationShapeAdapter(gym.Wrapper):
-        """Wrapper to adapt observation shapes to match the expected dimensions"""
-        def __init__(self, env):
-            super().__init__(env)
-            # Keep the original observation space for reference
-            self.original_obs_space = env.observation_space
-            logger.info(f"Original observation space: {self.original_obs_space}")
-            
-        def reset(self, **kwargs):
-            obs = self.env.reset(**kwargs)
-            if isinstance(obs, np.ndarray):
-                logger.info(f"Reset raw observation shape: {obs.shape}")
-                # If observation doesn't match expected shape, modify it
-                if hasattr(self.original_obs_space, 'shape') and len(obs) != self.original_obs_space.shape[0]:
-                    logger.warning(f"Observation shape mismatch in reset: {obs.shape} vs expected {self.original_obs_space.shape}")
-                    # Adapt observation to match expected shape (trim if too large)
-                    if len(obs) > self.original_obs_space.shape[0]:
-                        obs = obs[:self.original_obs_space.shape[0]]
-                        logger.info(f"Trimmed observation to shape: {obs.shape}")
-            return obs
-            
-        def step(self, action):
-            obs, reward, done, info = self.env.step(action)
-            if isinstance(obs, np.ndarray):
-                # If observation doesn't match expected shape, modify it
-                if hasattr(self.original_obs_space, 'shape') and len(obs) != self.original_obs_space.shape[0]:
-                    logger.warning(f"Observation shape mismatch in step: {obs.shape} vs expected {self.original_obs_space.shape}")
-                    # Adapt observation to match expected shape (trim if too large)
-                    if len(obs) > self.original_obs_space.shape[0]:
-                        obs = obs[:self.original_obs_space.shape[0]]
-            return obs, reward, done, info
-    
-    # Test reset to validate observation shape
+    # Test observation to ensure it works
     test_obs = env.reset()
     if isinstance(test_obs, np.ndarray):
         logger.info(f"Test observation shape: {test_obs.shape}, dtype: {test_obs.dtype}")
-        
-        # Check if observation shape matches what we expect
-        tech_indicator_list = ['rsi', 'macd', 'macd_signal', 'macd_hist', 
-                          'bb_upper', 'bb_middle', 'bb_lower', 'atr',
-                          'sma_7', 'sma_25', 'ema_9', 'ema_21',
-                          'stoch_k', 'stoch_d']
-        
-        unique_tickers = df['tic'].unique()
-        num_stocks = len(unique_tickers)
-        expected_state_size = 1 + num_stocks + (num_stocks * len(tech_indicator_list))
-        
-        if test_obs.shape[1] != expected_state_size:
-            logger.warning(f"Unexpected observation shape: got {test_obs.shape[1]}, expected {expected_state_size}")
-            logger.info("This might cause failures during training due to shape mismatch")
     
-    # Apply the observation shape adapter to each environment in the vectorized env
-    for i in range(len(env.envs)):
-        if hasattr(env.envs[i], 'env'):
-            env.envs[i].env = ObservationShapeAdapter(env.envs[i].env)
-            logger.info(f"Added observation shape adapter to environment {i}")
-    
-    # Add a reward monitor to debug reward calculations
-    # This wrapper will log the raw rewards before scaling
-    class RewardMonitor(gym.Wrapper):
+    # Create a wrapper for reward monitoring - applied to all environments
+    class RewardMonitorWrapper(gym.Wrapper):
+        """Wrapper to monitor rewards and other metrics"""
         def __init__(self, env):
             super().__init__(env)
+            self.episode_rewards = []
             self.raw_rewards = []
-            self.step_count = 0
             self.portfolio_values = []
             self.positions = []
             self.actions_taken = []
+            self.step_count = 0
             self.initial_portfolio = None
-            self.episode_count = 0
-            
-            # Save original observation space shape for debugging
-            if hasattr(env, 'observation_space'):
-                self.original_obs_shape = env.observation_space.shape
-                logger.info(f"Original observation space shape: {self.original_obs_shape}")
-            
+        
         def reset(self, **kwargs):
             obs = self.env.reset(**kwargs)
             
-            # Track episode starts
-            self.episode_count += 1
-            logger.info(f"Episode {self.episode_count} started")
-            
-            # Log observation shape for debugging
-            if isinstance(obs, np.ndarray):
-                logger.info(f"Reset observation shape: {obs.shape}, dtype: {obs.dtype}")
+            # Initialize/reset episode metrics
+            self.episode_rewards = []
+            self.raw_rewards = []
+            self.portfolio_values = []
+            self.positions = []
+            self.actions_taken = []
+            self.step_count = 0
             
             # Save initial portfolio value if we can extract it
             if hasattr(self.env, 'state') and len(self.env.state) > 0:
                 self.initial_portfolio = self.env.state[0]
                 logger.info(f"Initial portfolio value: {self.initial_portfolio}")
-                logger.info(f"Initial state shape: {len(self.env.state)}")
             
             return obs
         
@@ -875,12 +826,9 @@ def train_with_finrl(args, market_data, device):
             if hasattr(self.env, 'state') and len(self.env.state) > 0:
                 pre_step_portfolio = self.env.state[0]
             
-            # Execute step
+            # Execute action
             obs, reward, done, info = self.env.step(action)
-            
-            # Log observation shape for debugging on first few steps
-            if self.step_count < 5 and isinstance(obs, np.ndarray):
-                logger.info(f"Step {self.step_count} observation shape: {obs.shape}, dtype: {obs.dtype}")
+            self.step_count += 1
             
             # Calculate expected reward based on portfolio change
             if pre_step_portfolio is not None and hasattr(self.env, 'state') and len(self.env.state) > 0:
@@ -888,7 +836,7 @@ def train_with_finrl(args, market_data, device):
                 portfolio_change = post_step_portfolio - pre_step_portfolio
                 expected_reward = portfolio_change
                 
-                # Apply known reward scaling if available
+                # Scale the reward if needed
                 if hasattr(self.env, 'reward_scaling'):
                     expected_reward *= self.env.reward_scaling
                 
@@ -904,8 +852,10 @@ def train_with_finrl(args, market_data, device):
             else:
                 self.raw_rewards.append(reward)
             
-            # Track portfolio value and position if available
-            if hasattr(self.env, 'state') and hasattr(self.env, 'turbulence'):
+            self.episode_rewards.append(reward)
+            
+            # Store portfolio value and position
+            try:
                 # For StockTradingEnv from FinRL
                 try:
                     portfolio_value = self.env.state[0] if len(self.env.state) > 0 else 0
@@ -921,10 +871,11 @@ def train_with_finrl(args, market_data, device):
                     self.portfolio_values.append(portfolio_value)
                     self.positions.append(position)
                 except (AttributeError, IndexError) as e:
-                    logger.warning(f"Could not extract portfolio value: {e}")
-
-            # For verbose debugging every 100 steps
-            self.step_count += 1
+                    pass
+            except Exception as e:
+                logger.error(f"Error capturing portfolio metrics: {e}")
+            
+            # Log periodically
             if self.step_count % 100 == 0:
                 if len(self.raw_rewards) > 0:
                     avg_raw_reward = sum(self.raw_rewards[-100:]) / min(100, len(self.raw_rewards))
@@ -958,89 +909,60 @@ def train_with_finrl(args, market_data, device):
                 
             return obs, reward, done, info
     
-    # Apply the reward monitor wrapper to the first environment in the vectorized env
-    if env.envs and hasattr(env.envs[0], 'env'):
-        env.envs[0].env = RewardMonitor(env.envs[0].env)
+    # Wrap the environment with our monitor for the first environment in the vectorized env
+    if hasattr(env, 'envs') and len(env.envs) > 0:
+        env.envs[0] = RewardMonitorWrapper(env.envs[0])
         logger.info("Added reward monitoring for debugging")
-        
-        # Force environment to use higher reward scaling factor for better visibility
-        if hasattr(env.envs[0].env, 'reward_scaling'):
-            original_scaling = env.envs[0].env.reward_scaling
-            env.envs[0].env.reward_scaling = max(1e-2, original_scaling)
-            logger.info(f"Increased reward scaling from {original_scaling} to {env.envs[0].env.reward_scaling}")
     
     # Set up FinRL agent
     agent = DRLAgent(env=env)
     
-    # Network architecture for models - we'll define this but not pass it directly in model_kwargs
-    # as FinRL seems to want to handle this itself
+    # Network architecture for models
     net_arch = [256, 256]
     logger.info(f"Using network architecture: {net_arch}")
     
-    # Initialize model_kwargs dictionary based on model type - IMPORTANT: Don't include 'verbose', 
-    # 'policy', or 'policy_kwargs' as these are added by the FinRL wrapper
+    # Initialize model_kwargs dictionary based on model type
+    # IMPORTANT: Don't include 'verbose', 'policy', or 'policy_kwargs'
+    # as these are added by the FinRL wrapper
     is_verbose = 1 if args.verbose else 0
     logger.info(f"Setting verbosity level: {is_verbose}")
     
-    # Important: FinRL's DRLAgent.get_model() method appears to be adding:
-    # 1. 'policy': 'MlpPolicy'
-    # 2. 'verbose': is_verbose
-    # 3. 'policy_kwargs': {'net_arch': [...]}
-    # So we should NOT include these in our model_kwargs
+    # Define model kwargs - parameters for the model
+    model_kwargs = {
+        'batch_size': getattr(args, 'batch_size', 64),
+        'buffer_size': getattr(args, 'buffer_size', 100000),
+        'learning_rate': getattr(args, 'learning_rate', 1e-4),
+        'learning_starts': getattr(args, 'learning_starts', 100)
+    }
     
+    # Add specific model parameters based on model type
     if args.finrl_model.lower() == 'sac':
+        # For SAC, add entropy coefficient
+        model_kwargs['ent_coef'] = getattr(args, 'ent_coef', 'auto_0.1')
         logger.info("Training with SAC model")
-        model_kwargs = {
-            'batch_size': 64,
-            'buffer_size': 100000,
-            'learning_rate': 0.0001,
-            'learning_starts': 100,
-            'ent_coef': 'auto_0.1'
-            # Removed policy_kwargs which is set by FinRL
-        }
-    elif args.finrl_model.lower() in ['ppo', 'a2c']:
-        if args.finrl_model.lower() == 'ppo':
-            logger.info("Training with PPO model")
-        else:
-            logger.info("Training with A2C model")
-        
-        model_kwargs = {
-            'learning_rate': 0.0003
-            # Removed policy_kwargs which is set by FinRL
-        }
-    elif args.finrl_model.lower() in ['ddpg', 'td3']:
-        if args.finrl_model.lower() == 'ddpg':
-            logger.info("Training with DDPG model")
-        else:
-            logger.info("Training with TD3 model")
-        
-        # For continuous action space models, we need action noise
-        n_actions = env.action_space.shape[0]
-        action_noise = NormalActionNoise(
-            mean=np.zeros(n_actions),
-            sigma=0.1 * np.ones(n_actions)
-        )
-        model_kwargs = {
-            'buffer_size': 100000,
-            'learning_rate': 0.0003,
-            'action_noise': action_noise
-            # Removed policy_kwargs which is set by FinRL
-        }
-    else:  # Default to DQN
-        logger.info("Training with DQN model")
-        model_kwargs = {
-            'learning_rate': 0.0003,
-            'buffer_size': 50000,
-            'exploration_final_eps': 0.1,
-            'exploration_fraction': 0.1
-            # Removed policy_kwargs which is set by FinRL
-        }
+    elif args.finrl_model.lower() == 'td3':
+        # For TD3, add policy noise and noise clip
+        model_kwargs['policy_noise'] = getattr(args, 'policy_noise', 0.2)
+        model_kwargs['noise_clip'] = getattr(args, 'noise_clip', 0.5)
+        logger.info("Training with TD3 model")
+    elif args.finrl_model.lower() == 'ddpg':
+        # DDPG doesn't require special parameters
+        logger.info("Training with DDPG model")
+    elif args.finrl_model.lower() == 'ppo':
+        # For PPO, add specific parameters
+        model_kwargs['n_steps'] = getattr(args, 'n_steps', 2048)
+        model_kwargs['gae_lambda'] = getattr(args, 'gae_lambda', 0.95)
+        model_kwargs['clip_range'] = getattr(args, 'clip_range', 0.2)
+        logger.info("Training with PPO model")
     
-    # Custom SAC callback to monitor reward calculation
+    logger.info(f"Model kwargs: {model_kwargs}")
+    print(model_kwargs)
+    
+    # Define callback for monitoring
     class SACMonitorCallback:
         def __init__(self):
             self.step_counter = 0
-            
+        
         def __call__(self, locals_dict, globals_dict):
             # Track steps
             self.step_counter += 1
@@ -1058,19 +980,20 @@ def train_with_finrl(args, market_data, device):
                     
             return True
     
-    # Print the model kwargs for debugging
-    logger.info(f"Model kwargs: {model_kwargs}")
+    # Add the callback if using SAC
+    callback = SACMonitorCallback() if args.finrl_model.lower() == 'sac' else None
     
     # Get the appropriate model
-    # Note: agent.get_model will add 'policy', 'verbose', and 'policy_kwargs', so we don't include them in model_kwargs
+    # Note: agent.get_model will add 'policy', 'verbose', and 'policy_kwargs',
+    # so we don't include them in model_kwargs
     model = agent.get_model(model_name=args.finrl_model.lower(), model_kwargs=model_kwargs)
     
     # Train model
     logger.info("Starting model training...")
     trained_model = agent.train_model(
         model=model,
-        tb_log_name=f"{args.finrl_model.lower()}_crypto",
-        total_timesteps=args.total_timesteps or 100000
+        tb_log_name=f"{args.finrl_model.lower()}",
+        total_timesteps=getattr(args, 'total_timesteps', 100000)
     )
     
     # Save model
