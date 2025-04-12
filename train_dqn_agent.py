@@ -781,6 +781,17 @@ class CustomDRLAgent(OriginalDRLAgent):
     A custom DRLAgent that bypasses the patching mechanism in Stable-Baselines3.
     This avoids the gym.spaces.Sequence compatibility issue.
     """
+    def __init__(self, env, verbose=1):
+        """
+        Initialize the agent with the given environment.
+        
+        Args:
+            env: The environment to use
+            verbose: Verbosity level
+        """
+        # Make sure to call the parent class initializer
+        super().__init__(env=env, verbose=verbose)
+        
     def get_model(self, model_name, model_kwargs=None):
         """
         Create model without applying any patching to the environment.
