@@ -664,13 +664,18 @@ def train_with_finrl(args, market_data, device):
         
         # Add progress monitoring without using callbacks
         logger.info(f"Starting training for {total_timesteps} timesteps - this may take a while...")
-        logger.info(f"Check tensorboard logs for real-time progress monitoring")
+        logger.info(f"Check tensorboard logs in logs/runs/{args.finrl_model} for real-time progress monitoring")
+        
+        # Create the logs directory if it doesn't exist
+        log_dir = os.path.join("logs", "runs")
+        os.makedirs(log_dir, exist_ok=True)
         
         # FinRL doesn't support callback parameter, so we'll remove it
         trained_model = agent.train_model(
             model=model, 
             tb_log_name=f"{args.finrl_model}",
-            total_timesteps=total_timesteps
+            total_timesteps=total_timesteps,
+            log_dir=log_dir
         )
         
         # Save the trained model
