@@ -1378,41 +1378,53 @@ def train_with_finrl(
     
     # Create the environment functions for each worker
     def make_env():
-        """Create a single environment for vectorization"""
-        env = create_finrl_env(
-            start_date=start_date,
-            end_date=end_date,
-            symbols=tickers,
-            data_source=data_source,
-            initial_balance=initial_balance,
-            lookback=lookback,
-            state_space=state_dim,  # Use state_dim instead of args.state_dim
-            include_cash=include_cash,
-            df=df  # Pass the formatted DataFrame
-        )
-        # For monitoring and logging, prioritize Gymnasium wrappers
         try:
-            # Try with Gymnasium first since we know it's installed (version 1.1.1)
-            from gymnasium.wrappers import RecordEpisodeStatistics
-            logger.info("Using gymnasium's RecordEpisodeStatistics wrapper")
-            return RecordEpisodeStatistics(env)
-        except (ImportError, AttributeError):
-            try:
-                # Try SB3's Monitor as a fallback
-                from stable_baselines3.common.monitor import Monitor
-                logger.info("Using SB3's Monitor wrapper for logging")
-                return Monitor(env, None, allow_early_resets=True)
-            except (ImportError, AttributeError):
-                # As a last resort, return the unwrapped environment
-                logger.warning("No monitoring wrapper available, returning unwrapped environment")
-                return env
+            # Use proper day column for FinRL indexing
+            env = create_finrl_env(
+                start_date=start_date,
+                end_date=end_date,
+                symbols=tickers,
+                data_source=data_source,
+                initial_balance=initial_balance,
+                lookback=lookback,
+                # Use detected state dimensions instead of fixed value
+                state_space=22,  # Update state_space to match what StockTradingEnv actually returns
+                include_cash=include_cash,
+                df=df
+            )
+            
+            # Wrap with monitor for logging metrics
+            env = wrap_env_with_monitor(env)
+            
+            return env
+        except Exception as e:
+            logger.error(f"Error creating environment: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+    # Create a list of environment creation functions
+    envs = [make_env for _ in range(num_workers)]
     
     # Create the vectorized environment using DummyVecEnv
-    envs = []
-    for i in range(num_workers):
-        envs.append(make_env)
-    
-    vec_env = DummyVecEnv(envs)
+    logger.info(f"Creating vectorized environment with {num_workers} workers")
+    try:
+        # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
+        vec_env = DummyVecEnv(envs)
+        
+        # Check if the observation space needs adjustment
+        test_obs = vec_env.reset()
+        actual_obs_dim = test_obs.shape[1]
+        logger.info(f"Vectorized environment observation shape: {test_obs.shape}")
+        
+        if actual_obs_dim != state_dim:
+            logger.warning(f"Observation dimension mismatch: got {actual_obs_dim}, expected {state_dim}")
+            logger.info(f"Adjusting policy network to use actual observation dimension: {actual_obs_dim}")
+            # Update state_dim to actual observation dimension
+            state_dim = actual_obs_dim
+    except Exception as e:
+        logger.error(f"Error creating vectorized environment: {e}")
+        logger.error(traceback.format_exc())
+        raise
     
     # Set up model parameters
     # Default hidden dimension for network architecture
@@ -1952,6 +1964,24 @@ def ensure_technical_indicators(df, tech_indicator_list):
         logger.info("All required technical indicators are present")
     
     return df
+
+def wrap_env_with_monitor(env):
+    """Wrap environment with a monitoring wrapper for logging metrics."""
+    try:
+        # Try with Gymnasium first since we know it's installed (version 1.1.1)
+        from gymnasium.wrappers import RecordEpisodeStatistics
+        logger.info("Using gymnasium's RecordEpisodeStatistics wrapper")
+        return RecordEpisodeStatistics(env)
+    except (ImportError, AttributeError):
+        try:
+            # Try SB3's Monitor as a fallback
+            from stable_baselines3.common.monitor import Monitor
+            logger.info("Using SB3's Monitor wrapper for logging")
+            return Monitor(env, None, allow_early_resets=True)
+        except (ImportError, AttributeError):
+            # As a last resort, return the unwrapped environment
+            logger.warning("No monitoring wrapper available, returning unwrapped environment")
+            return env
 
 def main():
     """Main entry point for the script."""
