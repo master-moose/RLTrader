@@ -339,6 +339,60 @@ def create_finrl_env(df, config):
     env = CryptocurrencyTradingEnv(**env_config)
     return env
 
+def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_timeframe: str = '15m') -> pd.DataFrame:
+    """
+    Prepare cryptocurrency data for FinRL training.
+    
+    Args:
+        market_data: Dictionary of dataframes for different timeframes
+        primary_timeframe: The primary timeframe to use for training
+        
+    Returns:
+        Processed dataframe in FinRL format
+    """
+    logger.info(f"Preparing data for FinRL using {primary_timeframe} timeframe")
+    
+    if primary_timeframe not in market_data:
+        raise ValueError(f"Primary timeframe {primary_timeframe} not found in market data")
+    
+    # Get the primary timeframe data
+    df = market_data[primary_timeframe].copy()
+    
+    # Add required columns for FinRL
+    df['tic'] = 'BTC'  # Add ticker column
+    df['day'] = df.index.date  # Add day column
+    
+    # Rename columns to match FinRL expectations
+    column_mapping = {
+        'open': 'open',
+        'high': 'high',
+        'low': 'low',
+        'close': 'close',
+        'volume': 'volume',
+        'tic': 'tic',
+        'day': 'day'
+    }
+    
+    # Select and rename columns
+    df = df.rename(columns=column_mapping)
+    
+    # Add technical indicators that FinRL expects
+    df['macd'] = df['macd']  # Already calculated
+    df['rsi'] = df['rsi_14']  # Already calculated
+    df['cci'] = df['cmf_20']  # Using CMF as CCI
+    df['dx'] = df['atr_14']  # Using ATR as DX
+    
+    # Select final columns
+    final_columns = ['day', 'tic', 'open', 'high', 'low', 'close', 'volume', 
+                    'macd', 'rsi', 'cci', 'dx']
+    df = df[final_columns]
+    
+    # Sort by date and ticker
+    df = df.sort_values(['day', 'tic'])
+    
+    logger.info(f"Prepared data shape: {df.shape}")
+    return df
+
 def train_dqn_agent(args):
     """
     Train the DQN agent.
