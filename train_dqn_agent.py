@@ -27,21 +27,6 @@ sys.path.append(project_root)
 
 from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
 from crypto_trading_model.dqn_agent import DQNAgent
-from crypto_trading_model.data.data_loader import load_crypto_data
-from crypto_trading_model.utils.logging import setup_logging
-
-# Setup logging
-logger = setup_logging()
-
-# FinRL imports
-from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
-from finrl.agents.stablebaselines3.models import DRLAgent
-from finrl.meta.data_processor import DataProcessor
-
-# Original imports
-from lstm_dqn_agent import LSTMDQNAgent
-from utils.data_utils import prepare_data, load_data
 import pandas as pd
 from typing import Dict
 from datetime import datetime, timedelta
@@ -50,10 +35,89 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import h5py
-from concurrent.futures import ThreadPoolExecutor
-import psutil
-import matplotlib.pyplot as plt
-import torch.nn.functional as F
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# FinRL imports
+from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from finrl.agents.stablebaselines3.models import DRLAgent
+from finrl.meta.data_processor import DataProcessor
+
+def load_crypto_data(data_dir: str = 'data/synthetic') -> Dict[str, pd.DataFrame]:
+    """
+    Load cryptocurrency data from the specified directory.
+    
+    Args:
+        data_dir: Directory containing the data files
+        
+    Returns:
+        Dictionary of dataframes for different timeframes
+    """
+    logger.info(f"Loading data from {data_dir}")
+    
+    if not os.path.exists(data_dir):
+        raise ValueError(f"Data directory {data_dir} does not exist")
+    
+    market_data = {}
+    h5_file_path = os.path.join(data_dir, "synthetic_dataset.h5")
+    
+    if not os.path.exists(h5_file_path):
+        raise ValueError(f"No HDF5 data file found in {data_dir}")
+    
+    # Load data from h5 file
+    with h5py.File(h5_file_path, 'r') as h5f:
+        timeframes = list(h5f.keys())
+        logger.info(f"Found timeframes: {timeframes}")
+        
+        for tf in timeframes:
+            # Get the group for this timeframe
+            group = h5f[tf]
+            
+            # Check if the group has a 'table' dataset
+            if 'table' not in group:
+                logger.error(f"No 'table' dataset found in group {tf}")
+                continue
+            
+            # Get the table dataset
+            table = group['table']
+            logger.info(f"Found table dataset for {tf} with shape {table.shape} and dtype {table.dtype}")
+            
+            try:
+                # Convert the structured array to a pandas DataFrame
+                data = table[:]  # Read the entire dataset
+                df = pd.DataFrame(data)
+                
+                # Set the index column if it exists
+                if 'index' in df.columns:
+                    df.set_index('index', inplace=True)
+                
+                # Convert timestamp to datetime if it exists
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df.set_index('timestamp', inplace=True)
+                
+                market_data[tf] = df
+                logger.info(f"Successfully loaded data for {tf}: {df.shape}")
+                
+            except Exception as e:
+                logger.error(f"Error loading data for timeframe {tf}: {e}")
+                logger.error(f"Table info: shape={table.shape}, dtype={table.dtype}")
+                raise
+    
+    return market_data
+
+# Original imports
+from lstm_dqn_agent import LSTMDQNAgent
+from utils.data_utils import prepare_data, load_data
+from crypto_trading_model.trading_environment import TradingEnvironment
+from crypto_trading_model.models.time_series.model import MultiTimeframeModel
+from crypto_trading_model.utils import set_seeds
 
 # Define a fallback for INDICATORS in case we can't import it
 INDICATORS = ['macd', 'rsi', 'cci', 'dx']
