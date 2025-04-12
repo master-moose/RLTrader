@@ -112,16 +112,8 @@ def load_crypto_data(data_dir: str = 'data/synthetic') -> Dict[str, pd.DataFrame
     
     return market_data
 
-# Original imports
-from lstm_dqn_agent import LSTMDQNAgent
-from utils.data_utils import prepare_data, load_data
-from crypto_trading_model.trading_environment import TradingEnvironment
-from crypto_trading_model.models.time_series.model import MultiTimeframeModel
-from crypto_trading_model.utils import set_seeds
-
 # Define a fallback for INDICATORS in case we can't import it
 INDICATORS = ['macd', 'rsi', 'cci', 'dx']
-
 
 class BaseStockTradingEnv(gym.Env):
     """Placeholder StockTradingEnv in case FinRL imports fail"""
@@ -137,7 +129,6 @@ class BaseStockTradingEnv(gym.Env):
     
     def step(self, action):
         return np.zeros(100), 0, True, {}
-
 
 # Use FinRL's StockTradingEnv if available, otherwise use placeholder
 StockTradingEnv = StockTradingEnv if StockTradingEnv else BaseStockTradingEnv
