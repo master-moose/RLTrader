@@ -811,7 +811,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     
     # Environment parameters
     initial_amount = getattr(args, 'initial_balance', 1000000)
-    transaction_cost_pct = getattr(args, 'transaction_fee', 0.001)
+    # Hardcode transaction costs to use crypto exchange maker/taker fees of 0.075%
+    transaction_cost_pct = 0.00075  # 0.075% as a decimal
+    logger.info(f"Using hardcoded crypto exchange maker/taker fees: 0.075%")
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
     hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
     
