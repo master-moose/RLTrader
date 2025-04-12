@@ -571,15 +571,15 @@ def create_finrl_env(
         logger.error(traceback.format_exc())
         raise
 
-class CustomDummyVecEnv(gymnasium.vector.VectorEnv):
+class CustomDummyVecEnv:
     """
-    Custom implementation of DummyVecEnv for vectorized environments.
+    Custom implementation of a vectorized environment that doesn't inherit from gymnasium.vector.VectorEnv.
     This creates a simple vectorized wrapper for multiple environments.
     """
     
     def __init__(self, env_fns):
         """
-        Properly initialize the parent VectorEnv class.
+        Initialize the vectorized environment.
         
         Args:
             env_fns: List of functions that create environments to run in parallel
@@ -589,16 +589,8 @@ class CustomDummyVecEnv(gymnasium.vector.VectorEnv):
         
         # Get the observation and action spaces from the first environment
         env = self.envs[0]
-        observation_space = env.observation_space
-        action_space = env.action_space
-        
-        # Initialize the parent class with just self argument (no additional parameters)
-        # This is the correct way to initialize object.__init__()
-        super().__init__(
-            self.num_envs,
-            observation_space, 
-            action_space
-        )
+        self.observation_space = env.observation_space
+        self.action_space = env.action_space
         
         # Set up the observation and action buffers
         self.obs_buffer = np.zeros((self.num_envs,) + env.observation_space.shape, 
@@ -648,7 +640,7 @@ class CustomDummyVecEnv(gymnasium.vector.VectorEnv):
         """Close all environments."""
         for env in self.envs:
             env.close()
-    
+
 # Now modify the create_parallel_finrl_envs function to use this wrapper
 def create_parallel_finrl_envs(df, args, num_workers=4):
     """
