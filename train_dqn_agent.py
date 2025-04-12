@@ -28,6 +28,7 @@ import pandas as pd
 from typing import Dict
 from datetime import datetime, timedelta
 import torch.nn as nn
+import torch.nn.functional as F  # Add F for functional
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
@@ -36,6 +37,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import ta
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.callbacks import BaseCallback
+import matplotlib.pyplot as plt  # Add matplotlib
+import psutil  # Add psutil
 
 # Add project root to path
 project_root = str(Path(__file__).parent)
@@ -2062,6 +2066,163 @@ def main():
     logger.info(f"Training completed in {training_duration:.2f} seconds")
     
     return agent
+
+# Define setup_logging function - add this before the main function
+def setup_logging():
+    """Configure logging settings for the application."""
+    global logger
+    # Only configure if not already configured
+    if not len(logger.handlers):
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        logger = logging.getLogger(__name__)
+    return logger
+
+# Add the missing TrainingLoggingCallback class
+class TrainingLoggingCallback(BaseCallback):
+    """
+    Custom callback for logging training progress.
+    
+    Args:
+        check_freq: Frequency at which to log training progress
+        save_path: Path to save the model
+        verbose: Verbosity level
+        save_freq: Frequency at which to save the model
+        log_dir: Directory for tensorboard logs
+    """
+    def __init__(self, check_freq=1000, save_path=None, verbose=1, save_freq=5000, log_dir=None):
+        super(TrainingLoggingCallback, self).__init__(verbose)
+        self.check_freq = check_freq
+        self.save_path = save_path
+        self.save_freq = save_freq
+        self.log_dir = log_dir
+        self.total_rewards = []
+        self.episode_lengths = []
+        self.episode_count = 0
+        self.step_count = 0
+        self.current_episode_reward = 0
+        
+    def _init_callback(self):
+        """Initialize the callback."""
+        # Create save directory if it doesn't exist
+        if self.save_path is not None:
+            os.makedirs(self.save_path, exist_ok=True)
+            
+    def _on_step(self):
+        """Called at each step."""
+        self.step_count += 1
+        
+        # Get current environment info
+        if self.locals.get("dones", False):
+            self.episode_count += 1
+            self.total_rewards.append(self.current_episode_reward)
+            self.current_episode_reward = 0
+            
+            # Log every few episodes
+            if self.episode_count % 10 == 0:
+                mean_reward = np.mean(self.total_rewards[-10:])
+                logger.info(f"Episode {self.episode_count} - Mean reward over last 10 episodes: {mean_reward:.2f}")
+        else:
+            # Add current reward to episode total
+            reward = self.locals.get("rewards", [0])[0]
+            self.current_episode_reward += reward
+                
+        # Save the model periodically
+        if self.step_count % self.save_freq == 0:
+            logger.info(f"Saving model at {self.step_count} steps")
+            self.model.save(os.path.join(self.save_path, f'model_{self.step_count}_steps'))
+            
+        # Log progress periodically
+        if self.step_count % self.check_freq == 0:
+            logger.info(f"Training progress: {self.step_count} steps completed")
+            
+        return True
+
+def load_and_preprocess_market_data(args):
+    """
+    Load market data from the specified path.
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        Dictionary of market data dataframes and data length
+    """
+    # Path to data directory
+    data_path = args.data_path
+    logger.info(f"Loading data from {data_path}")
+    
+    market_data = {}
+    
+    # List available h5 files in the directory
+    h5_files = []
+    for file_path in Path(data_path).glob("*.h5"):
+        h5_files.append(file_path)
+    
+    if not h5_files:
+        # Try looking in subdirectories
+        for subdir in Path(data_path).iterdir():
+            if subdir.is_dir():
+                for file_path in subdir.glob("*.h5"):
+                    h5_files.append(file_path)
+    
+    if not h5_files:
+        logger.error(f"No h5 files found in {data_path}")
+        raise FileNotFoundError(f"No h5 files found in {data_path}")
+    
+    # Get first file (assuming all files have similar timeframes)
+    h5_path = h5_files[0]
+    
+    # Get timeframes from the file
+    with h5py.File(h5_path, 'r') as f:
+        timeframes = list(f.keys())
+        logger.info(f"Found timeframes: {timeframes}")
+    
+    # Load data for each timeframe
+    for tf in timeframes:
+        # Skip if not in selected timeframes
+        if args.timeframes and tf not in args.timeframes:
+            continue
+            
+        with h5py.File(h5_path, 'r') as f:
+            # Check if timeframe exists in this file
+            if tf not in f:
+                logger.warning(f"Timeframe {tf} not found in {h5_path}")
+                continue
+                
+            # Get the timeframe group
+            group = f[tf]
+            
+            # Get the table dataset
+            table = group['table']
+            logger.info(f"Found table dataset for {tf} with shape {table.shape} and dtype {table.dtype}")
+            
+            try:
+                # Convert the structured array to a pandas DataFrame
+                data = np.array(table)
+                
+                # Create pandas DataFrame
+                market_data[tf] = pd.DataFrame({
+                    name: data[name] for name in table.dtype.names
+                })
+                logger.info(f"Successfully loaded data for {tf}: {market_data[tf].shape}")
+                
+            except Exception as e:
+                logger.error(f"Error loading data for timeframe {tf}: {e}")
+                logger.error(f"Table info: shape={table.shape}, dtype={table.dtype}")
+                raise
+    
+    # Check if we successfully loaded any data
+    if not market_data:
+        raise ValueError("Failed to load market data from H5 files")
+        
+    data_length = len(next(iter(market_data.values())))  # Get length from first timeframe
+    logger.info(f"Data loaded, {data_length} samples found")
+    
+    return market_data, data_length
 
 if __name__ == "__main__":
     main() 
