@@ -1255,10 +1255,36 @@ def train_with_finrl(
             # Create a multi-index dataframe with (timestamp, tic)
             logger.info("Creating multi-index DataFrame with (timestamp, tic)")
             df = df.rename(columns={'timestamp': 'date'})  # FinRL expects 'date'
-            df = df.set_index(['date', 'tic'])
             
+            # Special preparation for FinRL's StockTradingEnv
+            # The environment expects a DataFrame with a numeric index and 'date' and 'tic' columns
+            # NOT a multi-index DataFrame as we initially thought
+            if 'date' in df.columns and 'tic' in df.columns:
+                # Keep date and tic as columns (don't set as index)
+                # Sort the DataFrame by date and tic
+                df = df.sort_values(['date', 'tic']).reset_index(drop=True)
+                logger.info("Data prepared as DataFrame with 'date' and 'tic' columns (FinRL format)")
+            else:
+                # Create a multi-index but we'll need to transform it later
+                df = df.set_index(['date', 'tic'])
+                # Convert back to columns for FinRL compatibility
+                df = df.reset_index()
+                logger.info("Data prepared with 'date' and 'tic' as regular columns")
+            
+            # Factor the dates to integers (0, 1, 2, ...) which StockTradingEnv expects
+            # This is CRITICAL for FinRL's StockTradingEnv to work
+            if 'date' in df.columns:
+                df['day'] = df['date'].factorize()[0]
+                logger.info(f"Factorized dates to day column with range: {df['day'].min()} - {df['day'].max()}")
+                
+            # Final sort by day and tic
+            if 'day' in df.columns and 'tic' in df.columns:
+                df = df.sort_values(['day', 'tic'])
+                
             logger.info(f"Processed data shape: {df.shape}")
             logger.info(f"DataFrame columns: {df.columns}")
+            logger.info(f"DataFrame index: {df.index.name or 'default'}")
+            logger.info(f"Sample of prepared data:\n{df.head(3)}")
         except Exception as e:
             logger.error(f"Error loading synthetic data: {e}")
             logger.error(traceback.format_exc())
@@ -1298,14 +1324,35 @@ def train_with_finrl(
                 # Add tic column
                 df['tic'] = tickers[0]  # Assign first ticker to all rows
                 
-                # Set multi-index
-                df = df.set_index(['date', 'tic'])
+                # Factor the dates to integers (0, 1, 2, ...) which StockTradingEnv expects
+                df['day'] = df['date'].factorize()[0]
+                logger.info(f"Factorized dates to day column with range: {df['day'].min()} - {df['day'].max()}")
+                
+                # Sort by day and tic for FinRL compatibility
+                df = df.sort_values(['day', 'tic']).reset_index(drop=True)
                 
                 logger.info(f"Generated synthetic data using generate_data.py's format")
+                logger.info(f"Sample data:\n{df.head(3)}")
             except (ImportError, ModuleNotFoundError):
                 logger.warning("Could not import generate_data module, falling back to internal synthetic data generation")
                 logger.info("Creating synthetic data with multi-index format for FinRL...")
                 df = create_synthetic_data(tickers, start_date, end_date)
+                
+                # Make sure the internal synthetic data is also properly formatted
+                if isinstance(df.index, pd.MultiIndex):
+                    df = df.reset_index()
+                    
+                # Ensure we have a day column with numeric indices
+                if 'day' not in df.columns and 'date' in df.columns:
+                    df['day'] = df['date'].factorize()[0]
+                    logger.info(f"Added day column with factorized dates: {df['day'].min()} - {df['day'].max()}")
+                
+                # Final sorting by day and tic
+                if 'day' in df.columns and 'tic' in df.columns:
+                    df = df.sort_values(['day', 'tic']).reset_index(drop=True)
+                    
+                logger.info(f"Internal synthetic data prepared with shape: {df.shape}")
+                logger.info(f"Sample data:\n{df.head(3)}")
         except Exception as e:
             logger.error(f"Error creating synthetic data: {e}")
             logger.error(traceback.format_exc())
@@ -1587,7 +1634,7 @@ def create_synthetic_data(tickers, start_date, end_date):
         end_date (str): End date in format 'YYYY-MM-DD'
         
     Returns:
-        pandas.DataFrame: Synthetic data with multi-index (date, tic)
+        pandas.DataFrame: Synthetic data formatted for FinRL
     """
     print(f"Creating synthetic data for {len(tickers)} symbols from {start_date} to {end_date}")
     
@@ -1734,11 +1781,17 @@ def create_synthetic_data(tickers, start_date, end_date):
                  (x.rolling(window=30, min_periods=1).max() - x.rolling(window=30, min_periods=1).min() + 1e-10)
     )
     
-    # Add day column
-    result_df['day'] = result_df['date']
+    # Create day column with factorized dates for FinRL compatibility
+    result_df['day'] = result_df['date'].factorize()[0]
     
     # Fill NaN values
     result_df = result_df.fillna(0)
+    
+    # Sort by day and tic for FinRL compatibility
+    result_df = result_df.sort_values(['day', 'tic']).reset_index(drop=True)
+    
+    print(f"Created synthetic data with shape {result_df.shape}")
+    print(f"Day range: {result_df['day'].min()} - {result_df['day'].max()}")
     
     return result_df
 
