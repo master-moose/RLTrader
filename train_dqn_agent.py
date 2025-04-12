@@ -22,13 +22,6 @@ from stable_baselines3.common.vec_env import (
 )
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.noise import NormalActionNoise
-
-# Add project root to path
-project_root = str(Path(__file__).parent)
-sys.path.append(project_root)
-
-from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
-from crypto_trading_model.dqn_agent import DQNAgent
 import pandas as pd
 from typing import Dict
 from datetime import datetime, timedelta
@@ -37,6 +30,25 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 import h5py
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import ta
+
+# Add project root to path
+project_root = str(Path(__file__).parent)
+sys.path.append(project_root)
+
+from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
+from crypto_trading_model.dqn_agent import DQNAgent
+from crypto_trading_model.trading_environment import TradingEnvironment
+from crypto_trading_model.models.time_series.model import MultiTimeframeModel
+from crypto_trading_model.utils import set_seeds
+
+# Import FinRL components
+from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from finrl.agents.drl_agent import DRLAgent
+from finrl.config import INDICATORS
 
 # Setup logging
 logging.basicConfig(
@@ -44,75 +56,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# FinRL imports
-from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
-from finrl.agents.stablebaselines3.models import DRLAgent
-from finrl.meta.data_processor import DataProcessor
-
-def load_crypto_data(data_dir: str = 'data/synthetic') -> Dict[str, pd.DataFrame]:
-    """
-    Load cryptocurrency data from the specified directory.
-    
-    Args:
-        data_dir: Directory containing the data files
-        
-    Returns:
-        Dictionary of dataframes for different timeframes
-    """
-    logger.info(f"Loading data from {data_dir}")
-    
-    if not os.path.exists(data_dir):
-        raise ValueError(f"Data directory {data_dir} does not exist")
-    
-    market_data = {}
-    h5_file_path = os.path.join(data_dir, "synthetic_dataset.h5")
-    
-    if not os.path.exists(h5_file_path):
-        raise ValueError(f"No HDF5 data file found in {data_dir}")
-    
-    # Load data from h5 file
-    with h5py.File(h5_file_path, 'r') as h5f:
-        timeframes = list(h5f.keys())
-        logger.info(f"Found timeframes: {timeframes}")
-        
-        for tf in timeframes:
-            # Get the group for this timeframe
-            group = h5f[tf]
-            
-            # Check if the group has a 'table' dataset
-            if 'table' not in group:
-                logger.error(f"No 'table' dataset found in group {tf}")
-                continue
-            
-            # Get the table dataset
-            table = group['table']
-            logger.info(f"Found table dataset for {tf} with shape {table.shape} and dtype {table.dtype}")
-            
-            try:
-                # Convert the structured array to a pandas DataFrame
-                data = table[:]  # Read the entire dataset
-                df = pd.DataFrame(data)
-                
-                # Set the index column if it exists
-                if 'index' in df.columns:
-                    df.set_index('index', inplace=True)
-                
-                # Convert timestamp to datetime if it exists
-                if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    df.set_index('timestamp', inplace=True)
-                
-                market_data[tf] = df
-                logger.info(f"Successfully loaded data for {tf}: {df.shape}")
-                
-            except Exception as e:
-                logger.error(f"Error loading data for timeframe {tf}: {e}")
-                logger.error(f"Table info: shape={table.shape}, dtype={table.dtype}")
-                raise
-    
-    return market_data
 
 # Define a fallback for INDICATORS in case we can't import it
 INDICATORS = ['macd', 'rsi', 'cci', 'dx']
@@ -207,6 +150,12 @@ def parse_args():
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
+    )
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=1,
+        help='Number of parallel environments for training'
     )
     
     # Training parameters
@@ -353,477 +302,312 @@ def create_finrl_env(df, args):
     Returns:
         FinRL environment
     """
-    # Get number of unique tickers
-    num_stocks = len(df['tic'].unique())
+    # Get unique tickers
+    unique_tickers = df['tic'].unique()
+    num_stocks = len(unique_tickers)
     
-    # Initialize stock shares
+    # Initialize stock shares to 0
     num_stock_shares = [0] * num_stocks
     
-    # Define technical indicators to use - ensure these match columns in the dataframe
-    tech_indicator_list = [
-        'rsi', 'macd', 'macd_signal', 'macd_hist',
-        'bb_upper', 'bb_middle', 'bb_lower', 'atr',
-        'sma_7', 'sma_25', 'ema_9', 'ema_21',
-        'stoch_k', 'stoch_d'
-    ]
+    # Create list of technical indicators
+    tech_indicator_list = ['rsi', 'macd', 'macd_signal', 'macd_hist', 
+                          'bb_upper', 'bb_middle', 'bb_lower', 'atr',
+                          'sma_7', 'sma_25', 'ema_9', 'ema_21',
+                          'stoch_k', 'stoch_d']
     
-    # The state space must account for:
-    # 1. Technical indicators for each stock
-    # 2. Price for each stock
-    # 3. Shares held for each stock  
-    # 4. Cash balance
-    # In StockTradingEnv, the state is structured as:
-    # [cash] + [stock_price_1, stock_num_shares_1, ...other stock features..., stock_price_n, stock_num_shares_n]
-    state_space_dim = len(tech_indicator_list) + 2  # +2 for price and shares held per stock
+    # Calculate state space dimension
+    state_space = len(tech_indicator_list) + 2  # technical indicators + shares + balance
     
-    logger.info(f"Creating environment with state space dimension: {state_space_dim}, num_stocks: {num_stocks}")
+    # Set action space - Buy, Hold, Sell
+    action_space = 3
     
-    # For SAC, the action space needs to be compatible with the way the environment handles indices
-    # In the StockTradingEnv, it accesses actions[index] where index is the stock index
-    action_dim = num_stocks
+    # Log environment configuration
+    logger.info(f"Creating environment with state_space={state_space}, "
+                f"action_space={action_space}, num_stocks={num_stocks}")
     
-    # In the StockTradingEnv, transaction costs are accessed as self.buy_cost_pct[index]
-    # The indexing must match how the environment accesses them when buying/selling
-    # Use larger arrays to prevent index out of bounds
-    cost_arrays_size = max(num_stocks, 10)  # Ensure arrays are big enough
-    
-    # Create environment configuration
-    env_config = {
-        'df': df,
-        'stock_dim': num_stocks,
-        'hmax': 100,  # Maximum number of shares to trade
-        'initial_amount': 1000000,  # Initial capital
-        'buy_cost_pct': [0.001] * cost_arrays_size,  # 0.1% transaction cost for buying (per stock)
-        'sell_cost_pct': [0.001] * cost_arrays_size,  # 0.1% transaction cost for selling (per stock)
-        'reward_scaling': 1e-4,  # Scale rewards to avoid large numbers
-        'num_stock_shares': num_stock_shares,
-        'state_space': state_space_dim * num_stocks + 1,  # Total state space: indicators per stock + cash
-        'action_space': action_dim,  # action space dimensionality matches the number of stocks
-        'tech_indicator_list': tech_indicator_list,
-        'print_verbosity': 1
-    }
-    
-    # Create environment
-    env = CryptocurrencyTradingEnv(**env_config)
-    
-    # Wrap in DummyVecEnv for compatibility with stable-baselines3
-    env = DummyVecEnv([lambda: env])
+    env = StockTradingEnv(
+        df=df,
+        num_stock_shares=num_stock_shares,
+        state_space=state_space,
+        action_space=action_space,
+        tech_indicator_list=tech_indicator_list,
+        print_verbosity=1
+    )
     
     return env
 
-def prepare_crypto_data_for_finrl(market_data: Dict[str, pd.DataFrame], primary_timeframe: str = '15m') -> pd.DataFrame:
+def create_parallel_finrl_envs(df, args, num_workers=4):
     """
-    Prepare cryptocurrency data for FinRL training.
+    Create multiple FinRL environments for parallel training.
     
     Args:
-        market_data: Dictionary of dataframes for different timeframes
+        df: Processed dataframe in FinRL format
+        args: Command line arguments
+        num_workers: Number of parallel environments to create
+        
+    Returns:
+        Vectorized environment with multiple workers
+    """
+    # Get unique tickers
+    unique_tickers = df['tic'].unique()
+    num_stocks = len(unique_tickers)
+    
+    # Initialize stock shares to 0
+    num_stock_shares = [0] * num_stocks
+    
+    # Create list of technical indicators
+    tech_indicator_list = ['rsi', 'macd', 'macd_signal', 'macd_hist', 
+                          'bb_upper', 'bb_middle', 'bb_lower', 'atr',
+                          'sma_7', 'sma_25', 'ema_9', 'ema_21',
+                          'stoch_k', 'stoch_d']
+    
+    # Calculate state space dimension
+    state_space = len(tech_indicator_list) + 2  # technical indicators + shares + balance
+    
+    # Set action space - Buy, Hold, Sell
+    action_space = 3
+    
+    logger.info(f"Creating {num_workers} parallel environments with "
+                f"state_space={state_space}, action_space={action_space}")
+    
+    # Create a list to hold our environments
+    env_list = []
+    
+    for i in range(num_workers):
+        env = StockTradingEnv(
+            df=df,
+            num_stock_shares=num_stock_shares.copy(),  # Use a copy to avoid sharing state
+            state_space=state_space,
+            action_space=action_space,
+            tech_indicator_list=tech_indicator_list,
+            print_verbosity=1 if i == 0 else 0  # Only print verbose output for the first env
+        )
+        env_list.append(lambda: env)  # Add environment creator function to the list
+    
+    # Vectorize the environments
+    vec_env = DummyVecEnv(env_list)
+    return vec_env
+
+def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
+    """
+    Prepare cryptocurrency data for FinRL format.
+    
+    Args:
+        market_data: Dictionary containing market data for different timeframes
         primary_timeframe: The primary timeframe to use for training
         
     Returns:
-        Processed dataframe in FinRL format
+        DataFrame in FinRL format
     """
-    logger.info(f"Preparing data for FinRL using {primary_timeframe} timeframe")
+    logger.info(f"Preparing crypto data for FinRL using {primary_timeframe} timeframe")
     
+    # Get data for the primary timeframe
     if primary_timeframe not in market_data:
         raise ValueError(f"Primary timeframe {primary_timeframe} not found in market data")
     
-    # Get the primary timeframe data
     df = market_data[primary_timeframe].copy()
     
-    # Convert index to datetime if it's not already
+    # Ensure we have a proper index
     if not isinstance(df.index, pd.DatetimeIndex):
-        if 'timestamp' in df.columns:
-            df.set_index('timestamp', inplace=True)
-        else:
-            # Create a synthetic datetime index starting from a recent date
-            start_date = pd.Timestamp('2020-01-01')
-            df.index = pd.date_range(start=start_date, periods=len(df), freq='15min')
+        # First find the minimum index value
+        min_idx = df.index.min()
+        # Convert indices to relative timestamps to avoid potential overflow
+        relative_idx = df.index - min_idx
+        # Convert to datetime (will be within valid range since we're using relative values)
+        df.index = pd.to_datetime('1970-01-01') + pd.to_timedelta(relative_idx, unit='ms')
     
-    # Add required columns for FinRL
-    df['tic'] = 'BTC'  # Add ticker column
-    df['date'] = df.index  # Add date column for FinRL's indexing
+    # Add ticker column (default to BTC as this is crypto data)
+    df['tic'] = 'BTC'
     
-    # Rename columns to match FinRL expectations
-    column_mapping = {
-        'open': 'open',
-        'high': 'high',
-        'low': 'low',
-        'close': 'close',
-        'volume': 'volume',
-        'tic': 'tic',
-        'date': 'date',
-        'rsi_14': 'rsi',
-        'macd': 'macd',
-        'macd_signal': 'macd_signal',
-        'macd_hist': 'macd_hist',
-        'bb_upper': 'bb_upper',
-        'bb_middle': 'bb_middle',
-        'bb_lower': 'bb_lower',
-        'atr_14': 'atr',
-        'sma_7': 'sma_7',
-        'sma_25': 'sma_25',
-        'ema_9': 'ema_9',
-        'ema_21': 'ema_21',
-        'stoch_k': 'stoch_k',
-        'stoch_d': 'stoch_d'
-    }
+    # Ensure required columns exist
+    required_columns = ['open', 'high', 'low', 'close', 'volume']
+    for col in required_columns:
+        if col not in df.columns:
+            raise ValueError(f"Required column {col} not found in dataframe")
     
-    # Select and rename columns
-    df = df.rename(columns=column_mapping)
+    # Add standard FinRL columns if they don't exist
+    if 'day' not in df.columns:
+        df['day'] = df.index.day
+    if 'date' not in df.columns:
+        df['date'] = df.index.date
+
+    # Calculate additional technical indicators
+    df = add_technical_indicators(df)
     
-    # Ensure required columns are present
-    required_columns = ['date', 'tic', 'open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in required_columns):
-        raise ValueError(f"Missing required columns. Need: {required_columns}")
+    # Make sure all values are finite
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna()
     
-    # Sort by date and tic for FinRL's indexing
-    df = df.sort_values(['date', 'tic'])
-    
-    # Reset index to ensure proper indexing
-    df = df.reset_index(drop=True)
-    
-    logger.info(f"Prepared data shape: {df.shape}")
+    logger.info(f"Prepared FinRL data with shape: {df.shape}")
     return df
 
-def train_dqn_agent(args):
+def add_technical_indicators(df):
     """
-    Train the DQN agent.
+    Add technical indicators to the dataframe.
     
-    Parameters:
-    -----------
-    args : argparse.Namespace
-        Command line arguments
+    Args:
+        df: DataFrame containing OHLCV data
+        
+    Returns:
+        DataFrame with additional technical indicators
     """
-    # Set seeds for reproducibility
-    if args.use_finrl:
-        set_random_seed(args.seed)
-    else:
-        set_seeds(args.seed)
+    # Calculate RSI
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
     
-    # Set device
-    use_cuda = torch.cuda.is_available() and (args.device == 'cuda' or args.use_amp)
-    device = "cuda" if use_cuda else "cpu"
-    logger.info(f"Using device: {device}")
+    # Calculate MACD
+    macd = ta.trend.MACD(df['close'])
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
+    df['macd_hist'] = macd.macd_diff()
     
-    # Advanced GPU optimizations
-    if device == "cuda":
-        # Enable TF32 for faster training on Ampere GPUs
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
-        
-        # Log GPU information
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        logger.info(f"GPU: {gpu_name} with {gpu_memory:.1f} GB memory")
-
-    # Load data from specified path using h5py
-    data_path = args.data_dir
-    logger.info(f"Loading data from {data_path}")
+    # Calculate Bollinger Bands
+    bollinger = ta.volatility.BollingerBands(df['close'])
+    df['bb_upper'] = bollinger.bollinger_hband()
+    df['bb_middle'] = bollinger.bollinger_mavg()
+    df['bb_lower'] = bollinger.bollinger_lband()
     
-    # Check which h5 file to use
-    h5_file_path = os.path.join(data_path, "synthetic_dataset.h5")
-    if not os.path.exists(h5_file_path):
-        h5_file_path = os.path.join(data_path, "train_data.h5")
-        
-    if not os.path.exists(h5_file_path):
-        raise ValueError(f"No HDF5 data file found in {data_path}")
+    # Calculate ATR
+    df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
     
-    # Load data from h5 file
-    market_data = {}
-    with h5py.File(h5_file_path, 'r') as h5f:
-        timeframes = list(h5f.keys())
-        logger.info(f"Found timeframes: {timeframes}")
-        
-        for tf in timeframes:
-            # Get the group for this timeframe
-            group = h5f[tf]
-            
-            # Check if the group has a 'table' dataset
-            if 'table' not in group:
-                logger.error(f"No 'table' dataset found in group {tf}")
-                continue
-            
-            # Get the table dataset
-            table = group['table']
-            logger.info(f"Found table dataset for {tf} with shape {table.shape} and dtype {table.dtype}")
-            
-            try:
-                # Convert the structured array to a pandas DataFrame
-                # The structured array has a field for each column
-                data = table[:]  # Read the entire dataset
-                
-                # Create a DataFrame from the structured array
-                df = pd.DataFrame(data)
-                
-                # Set the index column if it exists
-                if 'index' in df.columns:
-                    df.set_index('index', inplace=True)
-                
-                # Convert timestamp to datetime if it exists
-                if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    df.set_index('timestamp', inplace=True)
-                
-                market_data[tf] = df
-                logger.info(f"Successfully loaded data for {tf}: {df.shape}")
-                
-            except Exception as e:
-                logger.error(f"Error loading data for timeframe {tf}: {e}")
-                logger.error(f"Table info: shape={table.shape}, dtype={table.dtype}")
-                raise
+    # Calculate SMAs
+    df['sma_7'] = ta.trend.SMAIndicator(df['close'], window=7).sma_indicator()
+    df['sma_25'] = ta.trend.SMAIndicator(df['close'], window=25).sma_indicator()
     
-    # Check if we successfully loaded any data
-    if not market_data:
-        raise ValueError("Failed to load market data from H5 files")
-        
-    data_length = len(next(iter(market_data.values())))  # Get length from first timeframe
-    logger.info(f"Data loaded, {data_length} samples found")
-
-    # Choose between FinRL and custom implementation
-    if args.use_finrl:
-        logger.info("Using FinRL framework for training")
-        return train_with_finrl(args, market_data, device)
-    else:
-        logger.info("Using custom DQN implementation for training")
-        return train_with_custom_dqn(args, market_data, data_length, device)
+    # Calculate EMAs
+    df['ema_9'] = ta.trend.EMAIndicator(df['close'], window=9).ema_indicator()
+    df['ema_21'] = ta.trend.EMAIndicator(df['close'], window=21).ema_indicator()
+    
+    # Calculate Stochastic Oscillator
+    stoch = ta.momentum.StochasticOscillator(df['high'], df['low'], df['close'])
+    df['stoch_k'] = stoch.stoch()
+    df['stoch_d'] = stoch.stoch_signal()
+    
+    return df
 
 def train_with_finrl(args, market_data, device):
     """
-    Train a reinforcement learning agent for cryptocurrency trading using FinRL.
+    Train a cryptocurrency trading agent using the FinRL framework.
     
-    Parameters:
-    -----------
-    args : argparse.Namespace
-        Command line arguments
-    market_data : dict
-        Dictionary containing market data for different timeframes
-    device : str
-        Device to use for training ('cpu' or 'cuda')
+    Args:
+        args: Command line arguments
+        market_data: Dictionary of market data dataframes
+        device: Device to train on
         
     Returns:
-    --------
-    agent : FinRLAgent
-        Trained FinRL agent
+        Trained agent and environment
     """
-    logger.info("Using FinRL framework for training")
+    # Prepare data in FinRL format
+    df = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
     
-    if args.verbose:
-        logger.info("Verbose mode enabled - will show detailed progress logs")
+    # Number of workers for parallel environments
+    num_workers = args.num_workers if hasattr(args, 'num_workers') else 4
     
-    # Process data for FinRL
-    # For FinRL, we primarily use the base timeframe (15m if available)
-    # But we'll also incorporate features from higher timeframes later
-    if args.verbose:
-        logger.info(f"Processing market data for FinRL with primary timeframe: {args.primary_timeframe}")
-    
-    processed_data = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
-    
-    if args.verbose:
-        logger.info(f"Processed data shape: {processed_data.shape}")
-        logger.info(f"Columns: {processed_data.columns.tolist()}")
-        logger.info(f"First few rows of processed data:\n{processed_data.head()}")
-    
-    # Create environment
-    if args.verbose:
-        logger.info("Creating FinRL environment with processed data")
-    
-    env_train = create_finrl_env(processed_data, args)
-    
-    if args.verbose:
-        logger.info("FinRL environment created successfully")
-        logger.info(f"Environment details:")
-        logger.info(f"  - Action space: {env_train.envs[0].action_space}")
-        logger.info(f"  - Observation space: {env_train.envs[0].observation_space}")
-    
-    # Setup agent parameters
-    if args.finrl_model in ['sac', 'td3', 'ddpg']:
-        logger.info(f"Using continuous action space for {args.finrl_model}")
-        action_noise = True
+    # Create parallel environments for training
+    if num_workers > 1:
+        logger.info(f"Creating {num_workers} parallel environments for training")
+        env = create_parallel_finrl_envs(df, args, num_workers)
     else:
-        logger.info(f"Using discrete action space for {args.finrl_model}")
-        action_noise = False
+        # Create single environment
+        logger.info("Creating single environment for training")
+        env = create_finrl_env(df, args)
+        env = DummyVecEnv([lambda: env])
     
-    # Parse net_arch from string
-    try:
-        net_arch = eval(args.net_arch)  # Convert string to list
-        if args.verbose:
-            logger.info(f"Network architecture parsed: {net_arch}")
-    except Exception:
-        logger.warning(f"Could not parse net_arch: {args.net_arch}, using default [256, 256]")
-        net_arch = [256, 256]
+    # Set random seeds for reproducibility
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
     
-    # Create basic model parameters
-    model_params = {
-        'learning_rate': args.learning_rate,
-        'device': device
-    }
+    # Set up FinRL agent
+    agent = DRLAgent(env=env)
     
-    # Add action noise for continuous models
-    if args.finrl_model in ['sac', 'td3', 'ddpg'] and action_noise:
-        model_params['action_noise'] = 'normal'  # Use string identifier instead of object
-        if args.verbose:
-            logger.info(f"Added normal action noise for {args.finrl_model}")
+    # Network architecture for models
+    net_arch = [256, 256]
     
-    # FinRL will handle the network architecture internally, do not pass policy_kwargs
-    
-    # Create and train the model
-    try:
-        logger.info(f"Creating {args.finrl_model.upper()} model with FinRL")
-        if args.verbose:
-            logger.info(f"Model parameters: {model_params}")
-        
-        agent = DRLAgent(env=env_train)
-        
-        # Create the model based on the model type
-        # For SAC and other models, pass parameters directly
-        logger.info("Initializing model - this may take a moment...")
-        
-        if args.verbose:
-            logger.info(f"Getting {args.finrl_model} model with parameters: {model_params}")
-        
-        model = agent.get_model(
-            args.finrl_model,
-            model_kwargs=model_params
+    # Configure model parameters based on selected model
+    if args.finrl_model.lower() == 'sac':
+        logger.info("Training with SAC model")
+        # For SAC, we need to configure policy_kwargs properly
+        model_params = {
+            'policy': 'MlpPolicy',
+            'verbose': 1 if args.verbose else 0,
+            'learning_rate': 0.0003,
+            'batch_size': 256,
+            'gamma': 0.99,
+            'buffer_size': 100000,
+            'tau': 0.005,
+            'ent_coef': 'auto',
+            'train_freq': 1,
+            'learning_starts': 1000,
+            'use_sde': False,
+            'gradient_steps': 1,
+            'policy_kwargs': {
+                'net_arch': {
+                    'pi': net_arch,  # Policy network architecture
+                    'qf': net_arch   # Q-function network architecture
+                }
+            }
+        }
+    elif args.finrl_model.lower() in ['ppo', 'a2c']:
+        logger.info(f"Training with {args.finrl_model.upper()} model")
+        model_params = {
+            'policy': 'MlpPolicy',
+            'verbose': 1 if args.verbose else 0,
+            'n_steps': 2048,
+            'batch_size': 64,
+            'gae_lambda': 0.95,
+            'gamma': 0.99,
+            'n_epochs': 10,
+            'ent_coef': 0.01,
+            'learning_rate': 0.0003,
+            'clip_range': 0.2,
+            'policy_kwargs': {'net_arch': net_arch}
+        }
+    elif args.finrl_model.lower() in ['ddpg', 'td3']:
+        logger.info(f"Training with {args.finrl_model.upper()} model")
+        # Action noise for exploration in DDPG/TD3
+        n_actions = env.action_space.shape[0]
+        action_noise = NormalActionNoise(
+            mean=np.zeros(n_actions),
+            sigma=0.1 * np.ones(n_actions)
         )
-        
-        if args.verbose:
-            logger.info(f"Model created successfully")
-            logger.info(f"Model type: {type(model).__name__}")
-            
-            # Log model architecture if possible
-            try:
-                if hasattr(model, 'policy') and hasattr(model.policy, 'get_architecture'):
-                    logger.info(f"Model architecture: {model.policy.get_architecture()}")
-                elif hasattr(model, 'policy_kwargs'):
-                    logger.info(f"Policy kwargs: {model.policy_kwargs}")
-                elif hasattr(model, 'policy'):
-                    logger.info(f"Policy type: {type(model.policy).__name__}")
-            except Exception as e:
-                logger.info(f"Could not log model architecture: {str(e)}")
-        
-        # Train the model with progress updates
-        logger.info(f"Training {args.finrl_model.upper()} model...")
-        
-        total_timesteps = args.total_timesteps if hasattr(args, 'total_timesteps') else 100000
-        
-        # Setup monitoring for verbose mode
-        if args.verbose:
-            # Create a monitoring thread that will periodically check and log the progress
-            import threading
-            import time
-            
-            class TrainingMonitor:
-                def __init__(self, model, total_timesteps, interval=10):
-                    self.model = model
-                    self.total_timesteps = total_timesteps
-                    self.interval = interval
-                    self.running = True
-                    self.start_time = time.time()
-                    
-                def monitor(self):
-                    while self.running:
-                        try:
-                            # Try to get the current timestep count
-                            if hasattr(self.model, 'num_timesteps'):
-                                current_timesteps = self.model.num_timesteps
-                                elapsed_time = time.time() - self.start_time
-                                progress = (current_timesteps / self.total_timesteps) * 100
-                                
-                                if current_timesteps > 0:
-                                    steps_per_sec = current_timesteps / elapsed_time
-                                    remaining_steps = self.total_timesteps - current_timesteps
-                                    remaining_time = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
-                                    
-                                    logger.info(f"Training progress: {progress:.1f}% ({current_timesteps}/{self.total_timesteps}) - "
-                                                f"Steps/sec: {steps_per_sec:.1f} - "
-                                                f"Elapsed: {elapsed_time/60:.1f} minutes - "
-                                                f"Remaining: {remaining_time/60:.1f} minutes")
-                                    
-                                    # Try to log additional metrics if available
-                                    if hasattr(self.model, 'logger') and hasattr(self.model.logger, 'name_to_value'):
-                                        for key, value in self.model.logger.name_to_value.items():
-                                            logger.info(f"  - {key}: {value}")
-                        except Exception as e:
-                            logger.warning(f"Error in monitoring thread: {str(e)}")
-                        
-                        time.sleep(self.interval)
-                    
-                def start(self):
-                    self.thread = threading.Thread(target=self.monitor)
-                    self.thread.daemon = True
-                    self.thread.start()
-                    
-                def stop(self):
-                    self.running = False
-                    if hasattr(self, 'thread'):
-                        self.thread.join(timeout=1.0)
-            
-            # Add progress monitoring without using callbacks
-            logger.info(f"Starting training monitoring (will log every 10 seconds)")
-            monitor = TrainingMonitor(model, total_timesteps, interval=10)
-            monitor.start()
-        
-        # Add progress monitoring without using callbacks
-        logger.info(f"Starting training for {total_timesteps} timesteps - this may take a while...")
-        
-        # Set tensorboard log directory through environment variable
-        # Create the logs directory
-        log_dir = os.path.join("logs", "runs")
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # Set environment variable for tensorboard logs
-        os.environ['TENSORBOARD_LOGDIR'] = log_dir
-        
-        logger.info(f"Check tensorboard logs in {log_dir}/{args.finrl_model} for real-time progress monitoring")
-        
-        # Log start time for manual progress tracking
-        training_start_time = time.time()
-        
-        # FinRL doesn't support log_dir parameter, so we'll remove it
-        if args.verbose:
-            logger.info(f"Starting model training with {total_timesteps} timesteps...")
-            
-        trained_model = agent.train_model(
-            model=model, 
-            tb_log_name=f"{args.finrl_model}",
-            total_timesteps=total_timesteps
-        )
-        
-        # Calculate and log training time
-        training_time = time.time() - training_start_time
-        logger.info(f"Training completed in {training_time/60:.2f} minutes")
-        
-        # Stop the monitoring thread if it exists
-        if args.verbose and 'monitor' in locals():
-            monitor.stop()
-            logger.info("Training monitor stopped")
-        
-        # Save the trained model
-        model_save_path = os.path.join(args.save_dir, f"{args.finrl_model}_model")
-        if args.verbose:
-            logger.info(f"Saving model to {model_save_path}")
-            
+        model_params = {
+            'policy': 'MlpPolicy',
+            'verbose': 1 if args.verbose else 0,
+            'buffer_size': 100000,
+            'learning_rate': 0.0003,
+            'action_noise': action_noise,
+            'policy_kwargs': {'net_arch': net_arch}
+        }
+    else:  # Default to DQN
+        logger.info("Training with DQN model")
+        model_params = {
+            'policy': 'MlpPolicy',
+            'verbose': 1 if args.verbose else 0,
+            'learning_rate': 0.0003,
+            'buffer_size': 50000,
+            'exploration_final_eps': 0.1,
+            'exploration_fraction': 0.1,
+            'policy_kwargs': {'net_arch': net_arch}
+        }
+    
+    # Get the appropriate model
+    model = agent.get_model(args.finrl_model.lower(), model_params)
+    
+    # Train model
+    logger.info("Starting model training...")
+    trained_model = agent.train_model(
+        model=model,
+        tb_log_name=f"{args.finrl_model.lower()}_crypto",
+        total_timesteps=args.total_timesteps or 100000
+    )
+    
+    # Save model
+    if args.save_dir:
+        model_save_path = os.path.join(args.save_dir, f"finrl_{args.finrl_model.lower()}_model")
+        logger.info(f"Saving model to {model_save_path}")
         trained_model.save(model_save_path)
-        logger.info(f"Model saved to {model_save_path}")
-        
-        # Log final model performance if verbose
-        if args.verbose:
-            logger.info("Final model information:")
-            # Try to log model info
-            try:
-                if hasattr(trained_model, 'get_parameters'):
-                    logger.info(f"Model parameters: {trained_model.get_parameters()}")
-                if hasattr(trained_model, 'get_env'):
-                    logger.info(f"Environment: {trained_model.get_env()}")
-            except Exception as e:
-                logger.info(f"Could not log final model info: {str(e)}")
-        
-        return trained_model
-    except Exception as e:
-        logger.error(f"Error during FinRL training: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
+    
+    return trained_model, env
 
 def train_with_custom_dqn(args, market_data, data_length, device):
     """
@@ -1371,6 +1155,109 @@ def plot_training_results(rewards, profits, trades, output_dir):
     np.save(os.path.join(output_dir, 'rewards.npy'), np.array(rewards))
     np.save(os.path.join(output_dir, 'profits.npy'), np.array(profits))
     np.save(os.path.join(output_dir, 'trades.npy'), np.array(trades))
+
+def train_dqn_agent(args):
+    """
+    Train the DQN agent.
+    
+    Parameters:
+    -----------
+    args : argparse.Namespace
+        Command line arguments
+    """
+    # Set seeds for reproducibility
+    if args.use_finrl:
+        set_random_seed(args.seed)
+    else:
+        set_seeds(args.seed)
+    
+    # Set device
+    use_cuda = torch.cuda.is_available() and (args.device == 'cuda' or args.use_amp)
+    device = "cuda" if use_cuda else "cpu"
+    logger.info(f"Using device: {device}")
+    
+    # Advanced GPU optimizations
+    if device == "cuda":
+        # Enable TF32 for faster training on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        
+        # Log GPU information
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        logger.info(f"GPU: {gpu_name} with {gpu_memory:.1f} GB memory")
+
+    # Load data from specified path using h5py
+    data_path = args.data_dir
+    logger.info(f"Loading data from {data_path}")
+    
+    # Check which h5 file to use
+    h5_file_path = os.path.join(data_path, "synthetic_dataset.h5")
+    if not os.path.exists(h5_file_path):
+        h5_file_path = os.path.join(data_path, "train_data.h5")
+        
+    if not os.path.exists(h5_file_path):
+        raise ValueError(f"No HDF5 data file found in {data_path}")
+    
+    # Load data from h5 file
+    market_data = {}
+    with h5py.File(h5_file_path, 'r') as h5f:
+        timeframes = list(h5f.keys())
+        logger.info(f"Found timeframes: {timeframes}")
+        
+        for tf in timeframes:
+            # Get the group for this timeframe
+            group = h5f[tf]
+            
+            # Check if the group has a 'table' dataset
+            if 'table' not in group:
+                logger.error(f"No 'table' dataset found in group {tf}")
+                continue
+            
+            # Get the table dataset
+            table = group['table']
+            logger.info(f"Found table dataset for {tf} with shape {table.shape} and dtype {table.dtype}")
+            
+            try:
+                # Convert the structured array to a pandas DataFrame
+                # The structured array has a field for each column
+                data = table[:]  # Read the entire dataset
+                
+                # Create a DataFrame from the structured array
+                df = pd.DataFrame(data)
+                
+                # Set the index column if it exists
+                if 'index' in df.columns:
+                    df.set_index('index', inplace=True)
+                
+                # Convert timestamp to datetime if it exists
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df.set_index('timestamp', inplace=True)
+                
+                market_data[tf] = df
+                logger.info(f"Successfully loaded data for {tf}: {df.shape}")
+                
+            except Exception as e:
+                logger.error(f"Error loading data for timeframe {tf}: {e}")
+                logger.error(f"Table info: shape={table.shape}, dtype={table.dtype}")
+                raise
+    
+    # Check if we successfully loaded any data
+    if not market_data:
+        raise ValueError("Failed to load market data from H5 files")
+        
+    data_length = len(next(iter(market_data.values())))  # Get length from first timeframe
+    logger.info(f"Data loaded, {data_length} samples found")
+
+    # Choose between FinRL and custom implementation
+    if args.use_finrl:
+        logger.info("Using FinRL framework for training")
+        return train_with_finrl(args, market_data, device)
+    else:
+        logger.info("Using custom DQN implementation for training")
+        return train_with_custom_dqn(args, market_data, data_length, device)
 
 if __name__ == "__main__":
     args = parse_args()
