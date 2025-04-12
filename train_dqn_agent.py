@@ -377,7 +377,22 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         """Reset the environment, with compatibility for both gym and gymnasium APIs."""
         try:
             # Try gymnasium API first (for newer environments)
-            obs, info = self.env.reset(**kwargs)
+            reset_return = self.env.reset(**kwargs)
+            
+            # Handle different return types from reset
+            if isinstance(reset_return, tuple):
+                if len(reset_return) == 2:
+                    # Standard gymnasium API: (obs, info)
+                    obs, info = reset_return
+                else:
+                    # Some environments might return more values
+                    # Take the first value as observation and create empty info
+                    obs = reset_return[0]
+                    info = {} if len(reset_return) <= 1 else reset_return[1]
+            else:
+                # Single return value (older gym API)
+                obs = reset_return
+                info = {}
         except TypeError:
             try:
                 # Try gym API
@@ -411,7 +426,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                     low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
                 )
         
-        logger.info(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
+        logger.debug(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
             
         # Ensure observation has the right shape
         if len(obs) != self.state_space:
@@ -438,11 +453,30 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         try:
             # Try gymnasium API first
             result = self.env.step(action)
-            if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
-                obs, reward, terminated, truncated, info = result
-                done = terminated or truncated
-            else:  # gym API (obs, reward, done, info)
-                obs, reward, done, info = result
+            
+            # Handle different return formats
+            if isinstance(result, tuple):
+                if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
+                    obs, reward, terminated, truncated, info = result
+                    done = terminated or truncated
+                elif len(result) == 4:  # gym API (obs, reward, done, info)
+                    obs, reward, done, info = result
+                    terminated, truncated = done, False
+                else:
+                    # Unexpected number of return values - use defaults
+                    logger.warning(f"Unexpected number of return values from step: {len(result)}")
+                    obs = result[0] if len(result) > 0 else np.zeros(self.observation_space.shape)
+                    reward = result[1] if len(result) > 1 else 0.0
+                    done = result[2] if len(result) > 2 else False
+                    info = result[3] if len(result) > 3 else {}
+                    terminated, truncated = done, False
+            else:
+                # Handle unexpected return type (should not happen)
+                logger.error(f"Unexpected return type from step: {type(result)}")
+                obs = np.zeros(self.observation_space.shape)
+                reward = 0.0
+                done = True
+                info = {}
                 terminated, truncated = done, False
         except Exception as e:
             logger.error(f"Error in step: {e}")
