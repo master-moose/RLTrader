@@ -841,8 +841,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         env_list.append(env_fn)
     
     # Use our custom DummyVecEnv implementation that avoids compatibility issues
-    logger.info("Using CustomDummyVecEnv for environment vectorization (to avoid gym compatibility issues)")
-    vec_env = CustomDummyVecEnv(env_list)
+    logger.info("Using DummyVecEnv for environment vectorization")
+    # Import the DummyVecEnv from stable_baselines3
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    vec_env = DummyVecEnv(env_list)
     
     return vec_env
 
@@ -1216,7 +1218,7 @@ def train_with_finrl(
         Trained model
     """
     logger.info("Training with FinRL framework")
-    print("=== Starting FinRL training with updated CustomDummyVecEnv ===")
+    print("=== Starting FinRL training ===")
     
     try:
         # Import stable-baselines3 and torch.nn
@@ -2026,8 +2028,10 @@ def create_dummy_vectorized_env(env_function, n_envs=1):
     Returns:
         Vectorized environment
     """
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    
     env_fns = [env_function for _ in range(n_envs)]
-    return CustomDummyVecEnv(env_fns)
+    return DummyVecEnv(env_fns)
 
 if __name__ == "__main__":
     main() 
