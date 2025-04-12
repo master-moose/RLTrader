@@ -2054,7 +2054,7 @@ def main():
                     gamma=getattr(args, 'gamma', 0.99),
                     n_steps=2048,  # Larger batch size
                     batch_size=64,  # Smaller minibatch size
-                    n_epochs=10,  # More optimization epochs
+                    n_epochs=100,  # More optimization epochs
                     ent_coef=0.01,  # Slightly higher entropy for exploration
                     verbose=1 if args.verbose else 0,
                     tensorboard_log="./tensorboard_logs"
