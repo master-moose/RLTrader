@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
+    SubprocVecEnv
 )
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.noise import NormalActionNoise
@@ -441,8 +442,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         # Add the environment creation function to the list
         env_list.append(make_env)
     
-    # Vectorize the environments using DummyVecEnv (not our custom class since we don't need it anymore)
-    vec_env = DummyVecEnv(env_list)
+    # Use SubprocVecEnv for parallel processing when num_workers > 1
+    # This gives better performance by running environments in separate processes
+    logger.info(f"Using {'SubprocVecEnv' if num_workers > 1 else 'DummyVecEnv'} for environment vectorization")
+    vec_env = SubprocVecEnv(env_list) if num_workers > 1 else DummyVecEnv(env_list)
     return vec_env
 
 def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
@@ -584,7 +587,7 @@ def train_with_finrl(args, market_data, device):
     
     # Create parallel environments for training
     if num_workers > 1:
-        logger.info(f"Creating {num_workers} parallel environments for training")
+        logger.info(f"Creating {num_workers} parallel environments for training with SubprocVecEnv")
         env = create_parallel_finrl_envs(df, args, num_workers)
     else:
         # Create single environment
