@@ -231,6 +231,18 @@ def parse_args():
         default=100000,
         help='Total timesteps for FinRL training'
     )
+    parser.add_argument(
+        '--transaction_fee',
+        type=float,
+        default=0.001,
+        help='Transaction fee as a percentage'
+    )
+    parser.add_argument(
+        '--reward_scaling',
+        type=float,
+        default=1e-4,
+        help='Scaling factor for rewards in the FinRL environment'
+    )
     
     return parser.parse_args()
 
@@ -325,12 +337,25 @@ def create_finrl_env(df, args):
     logger.info(f"Creating environment with state_space={state_space}, "
                 f"action_space={action_space}, num_stocks={num_stocks}")
     
+    # Environment parameters
+    initial_amount = getattr(args, 'initial_balance', 1000000)
+    transaction_cost_pct = getattr(args, 'transaction_fee', 0.001)
+    reward_scaling = getattr(args, 'reward_scaling', 1e-4)
+    
+    logger.info(f"Environment config: initial_amount={initial_amount}, "
+                f"transaction_cost_pct={transaction_cost_pct}, "
+                f"reward_scaling={reward_scaling}")
+    
     env = StockTradingEnv(
         df=df,
         num_stock_shares=num_stock_shares,
         state_space=state_space,
         action_space=action_space,
         tech_indicator_list=tech_indicator_list,
+        initial_amount=initial_amount,
+        buy_cost_pct=transaction_cost_pct,
+        sell_cost_pct=transaction_cost_pct,
+        reward_scaling=reward_scaling,
         print_verbosity=1
     )
     
@@ -370,6 +395,15 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     logger.info(f"Creating {num_workers} parallel environments with "
                 f"state_space={state_space}, action_space={action_space}")
     
+    # Environment parameters
+    initial_amount = getattr(args, 'initial_balance', 1000000)
+    transaction_cost_pct = getattr(args, 'transaction_fee', 0.001)
+    reward_scaling = getattr(args, 'reward_scaling', 1e-4)
+    
+    logger.info(f"Environment config: initial_amount={initial_amount}, "
+                f"transaction_cost_pct={transaction_cost_pct}, "
+                f"reward_scaling={reward_scaling}")
+    
     # Create a list to hold our environments
     env_list = []
     
@@ -380,6 +414,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             state_space=state_space,
             action_space=action_space,
             tech_indicator_list=tech_indicator_list,
+            initial_amount=initial_amount,
+            buy_cost_pct=transaction_cost_pct,
+            sell_cost_pct=transaction_cost_pct,
+            reward_scaling=reward_scaling,
             print_verbosity=1 if i == 0 else 0  # Only print verbose output for the first env
         )
         env_list.append(lambda: env)  # Add environment creator function to the list
