@@ -350,10 +350,12 @@ def create_finrl_env(df, args):
                           'sma_7', 'sma_25', 'ema_9', 'ema_21',
                           'stoch_k', 'stoch_d']
     
-    # Calculate state space dimension - need to account for all elements in the state space
-    # Each stock has: 1 share value + len(tech_indicator_list) technical indicators
-    # Plus we have 1 for balance, and num_stocks position values
-    state_space = 1 + num_stocks + len(tech_indicator_list)
+    # Calculate state space dimension
+    # The observation space has:
+    # - Balance (1)
+    # - Shares for each stock (num_stocks)
+    # - Technical indicators for each stock (num_stocks * len(tech_indicator_list))
+    state_space = 1 + num_stocks + (num_stocks * len(tech_indicator_list))
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
@@ -415,10 +417,12 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                           'sma_7', 'sma_25', 'ema_9', 'ema_21',
                           'stoch_k', 'stoch_d']
     
-    # Calculate state space dimension - need to account for all elements in the state space
-    # Each stock has: 1 share value + len(tech_indicator_list) technical indicators
-    # Plus we have 1 for balance, and num_stocks position values
-    state_space = 1 + num_stocks + len(tech_indicator_list)
+    # Calculate state space dimension
+    # The observation space has:
+    # - Balance (1)
+    # - Shares for each stock (num_stocks)
+    # - Technical indicators for each stock (num_stocks * len(tech_indicator_list))
+    state_space = 1 + num_stocks + (num_stocks * len(tech_indicator_list))
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
@@ -616,6 +620,28 @@ def train_with_finrl(args, market_data, device):
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
     
+    # Validate observation space
+    logger.info(f"Vector environment observation space: {env.observation_space}")
+    
+    # Test reset to validate observation shape
+    test_obs = env.reset()
+    if isinstance(test_obs, np.ndarray):
+        logger.info(f"Test observation shape: {test_obs.shape}, dtype: {test_obs.dtype}")
+        
+        # Check if observation shape matches what we expect
+        tech_indicator_list = ['rsi', 'macd', 'macd_signal', 'macd_hist', 
+                          'bb_upper', 'bb_middle', 'bb_lower', 'atr',
+                          'sma_7', 'sma_25', 'ema_9', 'ema_21',
+                          'stoch_k', 'stoch_d']
+        
+        unique_tickers = df['tic'].unique()
+        num_stocks = len(unique_tickers)
+        expected_state_size = 1 + num_stocks + (num_stocks * len(tech_indicator_list))
+        
+        if test_obs.shape[1] != expected_state_size:
+            logger.warning(f"Unexpected observation shape: got {test_obs.shape[1]}, expected {expected_state_size}")
+            logger.info(f"This might cause failures during training due to shape mismatch")
+    
     # Add a reward monitor to debug reward calculations
     # This wrapper will log the raw rewards before scaling
     class RewardMonitor(gym.Wrapper):
@@ -629,6 +655,11 @@ def train_with_finrl(args, market_data, device):
             self.initial_portfolio = None
             self.episode_count = 0
             
+            # Save original observation space shape for debugging
+            if hasattr(env, 'observation_space'):
+                self.original_obs_shape = env.observation_space.shape
+                logger.info(f"Original observation space shape: {self.original_obs_shape}")
+            
         def reset(self, **kwargs):
             obs = self.env.reset(**kwargs)
             
@@ -636,10 +667,15 @@ def train_with_finrl(args, market_data, device):
             self.episode_count += 1
             logger.info(f"Episode {self.episode_count} started")
             
+            # Log observation shape for debugging
+            if isinstance(obs, np.ndarray):
+                logger.info(f"Reset observation shape: {obs.shape}, dtype: {obs.dtype}")
+            
             # Save initial portfolio value if we can extract it
             if hasattr(self.env, 'state') and len(self.env.state) > 0:
                 self.initial_portfolio = self.env.state[0]
                 logger.info(f"Initial portfolio value: {self.initial_portfolio}")
+                logger.info(f"Initial state shape: {len(self.env.state)}")
             
             return obs
         
@@ -654,6 +690,10 @@ def train_with_finrl(args, market_data, device):
             
             # Execute step
             obs, reward, done, info = self.env.step(action)
+            
+            # Log observation shape for debugging on first few steps
+            if self.step_count < 5 and isinstance(obs, np.ndarray):
+                logger.info(f"Step {self.step_count} observation shape: {obs.shape}, dtype: {obs.dtype}")
             
             # Calculate expected reward based on portfolio change
             if pre_step_portfolio is not None and hasattr(self.env, 'state') and len(self.env.state) > 0:
@@ -717,6 +757,7 @@ def train_with_finrl(args, market_data, device):
                     # Print environment state info
                     if hasattr(self.env, 'state'):
                         logger.info(f"Environment State (first 5 elements): {self.env.state[:5]}")
+                        logger.info(f"Environment State shape: {len(self.env.state)}")
                     
                     # Check for transaction costs and other info
                     if hasattr(self.env, 'cost'):
