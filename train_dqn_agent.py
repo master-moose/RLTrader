@@ -385,7 +385,8 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
 # Now modify the create_finrl_env function to use this wrapper
 def create_finrl_env(
     start_date, end_date, symbols, data_source="binance", initial_balance=1000000.0,
-    lookback=5, state_space=16, include_cash=False, initial_stocks=None, window_size=None
+    lookback=5, state_space=16, include_cash=False, initial_stocks=None, window_size=None,
+    df=None  # New parameter to allow passing a pre-created DataFrame
 ):
     """
     Create a FinRL-compatible environment for cryptocurrency trading.
@@ -401,6 +402,7 @@ def create_finrl_env(
         include_cash: Whether to include cash in the state
         initial_stocks: The initial stocks for the environment
         window_size: The window size for the environment
+        df: Optional pre-created DataFrame to use instead of downloading data
     
     Returns:
         A StockTradingEnvWrapper instance that is compatible with stable-baselines3
@@ -447,6 +449,27 @@ def create_finrl_env(
     logger.info(f"Date range: {start_date} to {end_date}")
     logger.info(f"Symbols: {symbols}")
     
+    # If df is None and we're using a FinRL env that requires data, generate synthetic data
+    if df is None:
+        # Check if we need a DataFrame (most FinRL envs do)
+        if 'df' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+            logger.info("No DataFrame provided, generating synthetic data...")
+            df = create_synthetic_data(symbols, start_date, end_date)
+            logger.info(f"Created synthetic dataframe with shape: {df.shape}")
+            
+            # Format the dataframe if needed based on the environment's expected format
+            # For stock trading env, we need a multi-index with date and tic
+            if StockTradingEnvClass.__name__ == 'StockTradingEnv':
+                # Make sure dataframe has the right format with date as index
+                if 'date' in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                    df = df.set_index('date')
+                # Add a 'day' column which is used by StockTradingEnv
+                if 'day' not in df.columns:
+                    df['day'] = df.index.strftime('%Y-%m-%d')
+                # Remove any duplicate index values
+                df = df.loc[~df.index.duplicated(keep='first')]
+                logger.info(f"Formatted dataframe for StockTradingEnv: {df.shape}")
+    
     # Define standard technical indicators that most FinRL environments expect
     tech_indicator_list = [
         'macd', 'rsi_14', 'cci_30', 'dx_30',
@@ -468,7 +491,7 @@ def create_finrl_env(
     
     # Create a dictionary of all parameters for the environment
     env_params = {
-        'df': None,  # Will download data if None
+        'df': df,  # Now using the actual DataFrame
         'state_space': state_space,
         'initial_amount': initial_balance,
         'buy_cost_pct': 0.001,
@@ -1211,14 +1234,25 @@ def train_with_finrl(args):
     logger.info(f"Training {args.finrl_model} model with DRL on symbols: {symbols}")
     logger.info(f"Data range: {start_date} to {end_date}")
     
-    # Try to create a synthetic DataFrame if we can't load real data
+    # Generate synthetic data once and reuse for all environments
     try:
-        # Check if we can create a synthetic dataset for testing
-        df = create_synthetic_data(symbols, start_date, end_date)
-        logger.info(f"Created synthetic data with shape: {df.shape}")
+        # Create synthetic data for testing
+        synthetic_df = create_synthetic_data(symbols, start_date, end_date)
+        logger.info(f"Created synthetic data with shape: {synthetic_df.shape}")
+        
+        # Format the dataframe for StockTradingEnv
+        # Make sure dataframe has the right format with date as index
+        if 'date' in synthetic_df.columns and not isinstance(synthetic_df.index, pd.DatetimeIndex):
+            synthetic_df = synthetic_df.set_index('date')
+        # Add a 'day' column which is used by StockTradingEnv
+        if 'day' not in synthetic_df.columns:
+            synthetic_df['day'] = synthetic_df.index.strftime('%Y-%m-%d')
+        # Remove any duplicate index values
+        synthetic_df = synthetic_df.loc[~synthetic_df.index.duplicated(keep='first')]
+        logger.info(f"Formatted dataframe for StockTradingEnv: {synthetic_df.shape}")
     except Exception as e:
         logger.warning(f"Could not create synthetic data: {e}. Will let environment fetch data.")
-        df = None
+        synthetic_df = None
     
     # Create a test environment to validate configuration
     try:
@@ -1236,7 +1270,8 @@ def train_with_finrl(args):
             data_source="binance",
             initial_balance=initial_balance,
             lookback=lookback,
-            include_cash=include_cash
+            include_cash=include_cash,
+            df=synthetic_df  # Pass the synthetic data
         )
         
         # Create multiple environments for parallel training if num_workers > 1
@@ -1246,7 +1281,7 @@ def train_with_finrl(args):
         # Create a list of environment creation functions
         env_fns = []
         for i in range(num_workers):
-            def make_env(idx=i):
+            def make_env(idx=i, df=synthetic_df.copy()):  # Pass a copy of the dataframe to each environment
                 # Each environment gets the same configuration but will sample differently
                 env = create_finrl_env(
                     start_date=start_date,
@@ -1255,7 +1290,8 @@ def train_with_finrl(args):
                     data_source="binance",
                     initial_balance=initial_balance,
                     lookback=lookback,
-                    include_cash=include_cash
+                    include_cash=include_cash,
+                    df=df  # Use the provided dataframe
                 )
                 # Add unique identification to the environment
                 env = Monitor(env, os.path.join(model_dir, f'monitor_{idx}'))
@@ -1447,11 +1483,11 @@ def add_technical_indicators_for_testing(df):
         
         # Calculate simple moving averages
         for window in [5, 10, 20, 60, 120]:
-            symbol_df[f'close_{window}_sma'] = symbol_df['close'].rolling(window=window).mean().fillna(method='bfill')
+            symbol_df[f'close_{window}_sma'] = symbol_df['close'].rolling(window=window).mean().bfill()
             
         # Calculate exponential moving averages
         for window in [5, 10, 20, 60, 120]:
-            symbol_df[f'close_{window}_ema'] = symbol_df['close'].ewm(span=window).mean().fillna(method='bfill')
+            symbol_df[f'close_{window}_ema'] = symbol_df['close'].ewm(span=window).mean().bfill()
             
         # RSI (relative strength index)
         symbol_df['rsi_14'] = np.random.uniform(30, 70, len(symbol_df))  # Simulated RSI
