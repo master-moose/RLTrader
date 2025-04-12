@@ -739,43 +739,42 @@ def train_with_finrl(args, market_data, device):
     # Network architecture for models
     net_arch = [256, 256]
     
-    # Configure model parameters based on selected model
+    # SAC model parameters
     if args.finrl_model.lower() == 'sac':
         logger.info("Training with SAC model")
-        # For SAC, we need to configure properly without duplicate policy_kwargs
+        # SAC parameters
         model_params = {
             'policy': 'MlpPolicy',
             'verbose': 1 if args.verbose else 0,
-            'learning_rate': 0.0003,
-            'batch_size': 256,
-            'gamma': 0.99,
-            'buffer_size': 100000,
-            'tau': 0.005,
-            'ent_coef': 'auto',
-            'train_freq': 1,
-            'learning_starts': 1000,
-            'use_sde': False,
-            'gradient_steps': 1,
-            'net_arch': net_arch  # Direct inclusion without nesting in policy_kwargs
-        }
-    elif args.finrl_model.lower() in ['ppo', 'a2c']:
-        logger.info(f"Training with {args.finrl_model.upper()} model")
-        model_params = {
-            'policy': 'MlpPolicy',
-            'verbose': 1 if args.verbose else 0,
-            'n_steps': 2048,
             'batch_size': 64,
-            'gae_lambda': 0.95,
-            'gamma': 0.99,
-            'n_epochs': 10,
-            'ent_coef': 0.01,
-            'learning_rate': 0.0003,
-            'clip_range': 0.2,
+            'buffer_size': 100000,
+            'learning_rate': 0.0001,
+            'learning_starts': 100,
+            'ent_coef': 'auto_0.1',
             'policy_kwargs': {'net_arch': net_arch}
         }
+        print(model_params)
+    # PPO and A2C have similar parameters
+    elif args.finrl_model.lower() in ['ppo', 'a2c']:
+        if args.finrl_model.lower() == 'ppo':
+            logger.info("Training with PPO model")
+        else:
+            logger.info("Training with A2C model")
+        
+        model_params = {
+            'policy': 'MlpPolicy',
+            'verbose': 1 if args.verbose else 0,
+            'learning_rate': 0.0003,
+            'policy_kwargs': {'net_arch': net_arch}
+        }
+    # DDPG and TD3 use action noise
     elif args.finrl_model.lower() in ['ddpg', 'td3']:
-        logger.info(f"Training with {args.finrl_model.upper()} model")
-        # Action noise for exploration in DDPG/TD3
+        if args.finrl_model.lower() == 'ddpg':
+            logger.info("Training with DDPG model")
+        else:
+            logger.info("Training with TD3 model")
+        
+        # For continuous action space models, we need action noise
         n_actions = env.action_space.shape[0]
         action_noise = NormalActionNoise(
             mean=np.zeros(n_actions),
@@ -825,11 +824,12 @@ def train_with_finrl(args, market_data, device):
     
     # Add callback for SAC training if applicable
     if args.finrl_model.lower() == 'sac':
-        model_params['callback'] = SACMonitorCallback()
+        # For SAC, don't add the callback directly to model_params
+        # as it causes issues with initialization
         logger.info("Added SAC training callback for monitoring rewards")
     
     # Get the appropriate model
-    model = agent.get_model(args.finrl_model.lower(), model_params)
+    model = agent.get_model(args.finrl_model.lower(), model_kwargs=model_params)  # Changed from model_params to model_kwargs
     
     # Train model
     logger.info("Starting model training...")
