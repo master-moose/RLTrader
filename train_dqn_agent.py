@@ -331,6 +331,122 @@ def create_finrl_env(df, args):
     
     return wrapped_env
 
+class CustomDummyVecEnv:
+    """
+    Custom implementation of DummyVecEnv that doesn't use the patching mechanism
+    which causes compatibility issues with gym.spaces.Sequence.
+    
+    This is a simplified version that only implements the essential functionality
+    needed for our use case.
+    """
+    def __init__(self, env_fns):
+        """
+        Arguments:
+        env_fns: A list of functions that create environments to run in parallel
+        """
+        self.envs = [fn() for fn in env_fns]
+        self.num_envs = len(env_fns)
+        
+        # Get observation and action spaces from first environment
+        self.observation_space = self.envs[0].observation_space
+        self.action_space = self.envs[0].action_space
+        
+        # Initialize buffers for observations
+        obs_shape = self.observation_space.shape
+        self.buf_obs = np.zeros((self.num_envs,) + obs_shape, dtype=np.float32)
+        
+        # Track done states
+        self.dones = np.array([False] * self.num_envs)
+        
+        logger.info(f"Created CustomDummyVecEnv with {self.num_envs} environments")
+        logger.info(f"Observation space: {self.observation_space}, Action space: {self.action_space}")
+    
+    def reset(self):
+        """
+        Reset all environments and return initial observations
+        """
+        for i in range(self.num_envs):
+            obs = self.envs[i].reset()
+            self._save_obs(i, obs)
+        
+        # Reset done states
+        self.dones = np.array([False] * self.num_envs)
+        
+        return self.buf_obs.copy()
+    
+    def step(self, actions):
+        """
+        Step all environments with the given actions
+        
+        Arguments:
+        actions: Actions to take in each environment
+        
+        Returns:
+        observations, rewards, dones, infos
+        """
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        dones = np.array([False] * self.num_envs)
+        infos = [{} for _ in range(self.num_envs)]
+        
+        for i in range(self.num_envs):
+            if not self.dones[i]:
+                # Convert scalar actions to the correct type
+                if isinstance(actions, np.ndarray) and actions.ndim > 1:
+                    action = actions[i]
+                else:
+                    action = actions[i] if isinstance(actions, list) else actions
+                
+                obs, rewards[i], dones[i], infos[i] = self.envs[i].step(action)
+                if dones[i]:
+                    # For environments that automatically reset on done
+                    if infos[i].get("terminal_observation") is None and hasattr(self.envs[i], "reset"):
+                        terminal_obs = obs.copy()
+                        obs = self.envs[i].reset()
+                        infos[i]["terminal_observation"] = terminal_obs
+                
+                self._save_obs(i, obs)
+        
+        # Update done states
+        self.dones = dones.copy()
+        
+        return self.buf_obs.copy(), rewards, dones, infos
+    
+    def _save_obs(self, idx, obs):
+        """
+        Save observation for the idx-th environment
+        """
+        if isinstance(obs, np.ndarray):
+            # Ensure observation matches the expected shape
+            expected_shape = self.observation_space.shape
+            
+            if obs.shape != expected_shape:
+                logger.warning(f"Observation shape mismatch: got {obs.shape}, expected {expected_shape}")
+                
+                # Handle dimension mismatch - truncate if too large
+                if len(obs) > expected_shape[0]:
+                    self.buf_obs[idx] = obs[:expected_shape[0]]
+                # Pad with zeros if too small
+                elif len(obs) < expected_shape[0]:
+                    self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
+                    self.buf_obs[idx][:len(obs)] = obs
+                else:
+                    self.buf_obs[idx] = obs
+            else:
+                self.buf_obs[idx] = obs
+        else:
+            logger.warning(f"Unexpected observation type: {type(obs)}")
+            # Try to convert to numpy array
+            self.buf_obs[idx] = np.array(obs, dtype=np.float32)
+    
+    def close(self):
+        """
+        Close all environments
+        """
+        for env in self.envs:
+            if hasattr(env, "close"):
+                env.close()
+
+# Now modify the create_parallel_finrl_envs function
 def create_parallel_finrl_envs(df, args, num_workers=4):
     """
     Create multiple FinRL environments for parallel training.
@@ -443,10 +559,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         env_fn = lambda idx=i: make_env(idx)
         env_list.append(env_fn)
     
-    # Due to compatibility issues with gym.spaces.Sequence in SubprocVecEnv,
-    # we always use DummyVecEnv regardless of num_workers
-    logger.info("Using DummyVecEnv for environment vectorization (SubprocVecEnv disabled due to gym compatibility issues)")
-    vec_env = DummyVecEnv(env_list)
+    # Use our custom DummyVecEnv implementation that avoids compatibility issues
+    logger.info("Using CustomDummyVecEnv for environment vectorization (to avoid gym compatibility issues)")
+    vec_env = CustomDummyVecEnv(env_list)
     
     return vec_env
 
@@ -591,12 +706,12 @@ def train_with_finrl(args, market_data, device):
     if num_workers > 1:
         logger.info(f"Creating {num_workers} parallel environments for training")
         env = create_parallel_finrl_envs(df, args, num_workers)
-        logger.info("Note: Using DummyVecEnv instead of SubprocVecEnv due to gym compatibility issues")
+        logger.info("Using CustomDummyVecEnv implementation to avoid gym compatibility issues")
     else:
         # Create single environment
         logger.info("Creating single environment for training")
         env = create_finrl_env(df, args)
-        # Wrap in our custom vec env instead of standard DummyVecEnv
+        # Wrap in our custom vec env
         env = DimensionAdjustingVecEnv([lambda: env])
         logger.info("Using DimensionAdjustingVecEnv to handle observation shape mismatches")
     
