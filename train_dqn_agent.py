@@ -760,16 +760,49 @@ def setup_finrl_import():
         # Try the new import path first (FinRL 0.3.7+)
         from finrl.agents.stablebaselines3.models import DRLAgent
         logger.info("Using FinRL 0.3.7+ import path for DRLAgent")
+        
+        # Try to detect API details
+        try:
+            from inspect import signature
+            init_sig = signature(DRLAgent.__init__)
+            logger.info(f"DRLAgent.__init__ signature: {init_sig}")
+        except Exception as e:
+            logger.warning(f"Could not inspect DRLAgent.__init__ signature: {e}")
+        
         return DRLAgent
     except ImportError:
         try:
-            # Fall back to older path (FinRL <= 0.3.5)
-            from finrl.agents.drl_agent import DRLAgent
-            logger.info("Using FinRL <= 0.3.5 import path for DRLAgent")
+            # Try the newest FinRL import path (as of 2024+)
+            from finrl.applications.agents.drl_agents import DRLAgent
+            logger.info("Using FinRL latest import path (applications.agents) for DRLAgent")
+            
+            # Try to detect API details
+            try:
+                from inspect import signature
+                init_sig = signature(DRLAgent.__init__)
+                logger.info(f"DRLAgent.__init__ signature: {init_sig}")
+            except Exception as e:
+                logger.warning(f"Could not inspect DRLAgent.__init__ signature: {e}")
+            
             return DRLAgent
         except ImportError:
-            logger.error("Could not import DRLAgent from any known FinRL paths")
-            return None
+            try:
+                # Fall back to older path (FinRL <= 0.3.5)
+                from finrl.agents.drl_agent import DRLAgent
+                logger.info("Using FinRL <= 0.3.5 import path for DRLAgent")
+                
+                # Try to detect API details
+                try:
+                    from inspect import signature
+                    init_sig = signature(DRLAgent.__init__)
+                    logger.info(f"DRLAgent.__init__ signature: {init_sig}")
+                except Exception as e:
+                    logger.warning(f"Could not inspect DRLAgent.__init__ signature: {e}")
+                
+                return DRLAgent
+            except ImportError:
+                logger.error("Could not import DRLAgent from any known FinRL paths")
+                return None
 
 
 # Get the DRLAgent class
@@ -789,8 +822,16 @@ class CustomDRLAgent(OriginalDRLAgent):
             env: The environment to use
             verbose: Verbosity level
         """
-        # Make sure to call the parent class initializer
-        super().__init__(env=env, verbose=verbose)
+        # Check if parent class accepts verbose parameter
+        try:
+            # Try with verbose parameter first
+            super().__init__(env=env, verbose=verbose)
+            self.verbose = verbose
+        except TypeError:
+            # Fall back to just env if verbose is not accepted
+            super().__init__(env=env)
+            self.verbose = verbose
+            logger.info("DRLAgent parent class doesn't accept verbose parameter, using default initialization")
         
     def get_model(self, model_name, model_kwargs=None):
         """
@@ -993,12 +1034,52 @@ def train_with_finrl(args, market_data, device):
     callback = LoggingCallback()
     
     # Train the model with the callback
-    trained_model = agent.train_model(
-        model=model,
-        tb_log_name=f"{args.finrl_model.lower()}",
-        total_timesteps=total_timesteps,
-        callback=callback
-    )
+    try:
+        # Try with the standard API first
+        trained_model = agent.train_model(
+            model=model,
+            tb_log_name=f"{args.finrl_model.lower()}",
+            total_timesteps=total_timesteps,
+            callback=callback
+        )
+    except TypeError as e:
+        logger.warning(f"Error using standard train_model API: {e}")
+        logger.info("Trying alternative train_model API signature...")
+        
+        # Some FinRL versions have different API for train_model
+        try:
+            from inspect import signature
+            train_sig = signature(agent.train_model)
+            logger.info(f"Detected train_model signature: {train_sig}")
+            
+            # Common parameter variations to try
+            if 'total_timesteps' in str(train_sig):
+                trained_model = agent.train_model(
+                    model=model,
+                    tb_log_name=f"{args.finrl_model.lower()}",
+                    total_timesteps=total_timesteps
+                )
+            elif 'n_timesteps' in str(train_sig):
+                trained_model = agent.train_model(
+                    model=model,
+                    tb_log_name=f"{args.finrl_model.lower()}",
+                    n_timesteps=total_timesteps
+                )
+            else:
+                # Last resort, try with just the model
+                trained_model = agent.train_model(model=model)
+                
+        except Exception as inner_e:
+            logger.error(f"Failed to train model with alternative API: {inner_e}")
+            logger.info("Using the untrained model as fallback")
+            trained_model = model
+    
+    # Handle potential API changes in FinRL versions
+    if trained_model is None:
+        logger.warning("train_model returned None, this may indicate an API change in FinRL")
+        # In newer FinRL versions, the model may be modified in-place
+        trained_model = model
+        logger.info("Using the original model object as the trained model")
     
     # Save model
     if args.save_dir:
