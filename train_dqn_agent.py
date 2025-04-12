@@ -2062,6 +2062,18 @@ def main():
                     verbose=1 if args.verbose else 0,
                     tensorboard_log="./tensorboard_logs"
                 )
+            elif args.finrl_model.lower() == 'sac':
+                # If SAC was specified but we have discrete actions, use DQN instead
+                logger.warning("SAC does not support discrete action spaces. Using DQN instead.")
+                from stable_baselines3 import DQN
+                model = DQN(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0001),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
             else:
                 # Default to DQN for discrete action spaces
                 from stable_baselines3 import DQN
