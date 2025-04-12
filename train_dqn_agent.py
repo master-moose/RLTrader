@@ -443,24 +443,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         env_fn = lambda idx=i: make_env(idx)
         env_list.append(env_fn)
     
-    try:
-        # Use SubprocVecEnv for parallel processing when num_workers > 1
-        # This gives better performance by running environments in separate processes
-        logger.info(f"Using {'SubprocVecEnv' if num_workers > 1 else 'DummyVecEnv'} for environment vectorization")
-        if num_workers > 1:
-            # Try to create SubprocVecEnv with error handling
-            try:
-                vec_env = SubprocVecEnv(env_list)
-                logger.info("Successfully created SubprocVecEnv")
-            except Exception as e:
-                logger.warning(f"Failed to create SubprocVecEnv: {str(e)}. Falling back to DummyVecEnv")
-                vec_env = DummyVecEnv(env_list)
-        else:
-            vec_env = DummyVecEnv(env_list)
-    except Exception as e:
-        logger.error(f"Error creating vectorized environment: {str(e)}")
-        logger.info("Falling back to DummyVecEnv as a safety measure")
-        vec_env = DummyVecEnv(env_list)
+    # Due to compatibility issues with gym.spaces.Sequence in SubprocVecEnv,
+    # we always use DummyVecEnv regardless of num_workers
+    logger.info("Using DummyVecEnv for environment vectorization (SubprocVecEnv disabled due to gym compatibility issues)")
+    vec_env = DummyVecEnv(env_list)
     
     return vec_env
 
@@ -603,8 +589,9 @@ def train_with_finrl(args, market_data, device):
     
     # Create parallel environments for training
     if num_workers > 1:
-        logger.info(f"Creating {num_workers} parallel environments for training with SubprocVecEnv")
+        logger.info(f"Creating {num_workers} parallel environments for training")
         env = create_parallel_finrl_envs(df, args, num_workers)
+        logger.info("Note: Using DummyVecEnv instead of SubprocVecEnv due to gym compatibility issues")
     else:
         # Create single environment
         logger.info("Creating single environment for training")
