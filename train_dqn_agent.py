@@ -358,7 +358,7 @@ def create_finrl_env(df, args):
     # Initialize stock shares
     num_stock_shares = [0] * num_stocks
     
-    # Define technical indicators to use
+    # Define technical indicators to use - ensure these match columns in the dataframe
     tech_indicator_list = [
         'rsi', 'macd', 'macd_signal', 'macd_hist',
         'bb_upper', 'bb_middle', 'bb_lower', 'atr',
@@ -366,12 +366,16 @@ def create_finrl_env(df, args):
         'stoch_k', 'stoch_d'
     ]
     
-    # Count the actual features that will be included in the state space
-    # This includes: tech indicators + price + shares held + cash + net worth
-    # The extra +1 accounts for the additional feature that was causing the dimension mismatch
-    state_space_dim = len(tech_indicator_list) + 3  # +3 for price, shares, and portfolio value
+    # The state space must account for:
+    # 1. Technical indicators for each stock
+    # 2. Price for each stock
+    # 3. Shares held for each stock  
+    # 4. Cash balance
+    # In StockTradingEnv, the state is structured as:
+    # [cash] + [stock_price_1, stock_num_shares_1, ...other stock features..., stock_price_n, stock_num_shares_n]
+    state_space_dim = len(tech_indicator_list) + 2  # +2 for price and shares held per stock
     
-    logger.info(f"Creating environment with state space dimension: {state_space_dim}")
+    logger.info(f"Creating environment with state space dimension: {state_space_dim}, num_stocks: {num_stocks}")
     
     # Create environment configuration
     env_config = {
@@ -383,7 +387,7 @@ def create_finrl_env(df, args):
         'sell_cost_pct': [0.001] * num_stocks,  # 0.1% transaction cost for selling (per stock)
         'reward_scaling': 1e-4,  # Scale rewards to avoid large numbers
         'num_stock_shares': num_stock_shares,
-        'state_space': state_space_dim,
+        'state_space': state_space_dim * num_stocks + 1,  # Total state space: indicators per stock + cash
         'action_space': 3,  # buy, hold, sell
         'tech_indicator_list': tech_indicator_list,
         'print_verbosity': 1
