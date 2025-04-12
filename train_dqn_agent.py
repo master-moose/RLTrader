@@ -457,12 +457,27 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
     
     # Ensure we have a proper index
     if not isinstance(df.index, pd.DatetimeIndex):
-        # First find the minimum index value
-        min_idx = df.index.min()
-        # Convert indices to relative timestamps to avoid potential overflow
-        relative_idx = df.index - min_idx
-        # Convert to datetime (will be within valid range since we're using relative values)
-        df.index = pd.to_datetime('1970-01-01') + pd.to_timedelta(relative_idx, unit='ms')
+        logger.info(f"Converting numeric index to DatetimeIndex, original index range: {df.index.min()} - {df.index.max()}")
+        
+        # Instead of converting directly to datetime (which can cause overflow),
+        # use a simple integer index and track original index in a separate column
+        df['original_index'] = df.index
+        df.reset_index(drop=True, inplace=True)
+        
+        # Create simple datetime index using integer position
+        start_date = pd.Timestamp('2010-01-01')
+        if primary_timeframe == '15m':
+            freq = '15min'
+        elif primary_timeframe == '1h':
+            freq = '1H'
+        elif primary_timeframe == '4h':
+            freq = '4H'
+        else:  # default to daily
+            freq = '1D'
+        
+        # Generate datetime index that matches the length of the dataframe
+        df.index = pd.date_range(start=start_date, periods=len(df), freq=freq)
+        logger.info(f"Created synthetic DatetimeIndex with range: {df.index.min()} - {df.index.max()}")
     
     # Add ticker column (default to BTC as this is crypto data)
     df['tic'] = 'BTC'
