@@ -35,6 +35,7 @@ import h5py
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import ta
+from stable_baselines3.common.monitor import Monitor
 
 # Add project root to path
 project_root = str(Path(__file__).parent)
@@ -239,6 +240,9 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
             logger.info(f"Wrapped Gymnasium environment with observation space: {self.observation_space}")
+        
+        # Store the actual observation dimension for comparison
+        self.actual_state_space = None
     
     def reset(self, **kwargs):
         """Reset the environment, with compatibility for both gym and gymnasium APIs."""
@@ -253,38 +257,22 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # Log the observation content for debugging
         if isinstance(obs, np.ndarray):
-            logger.info(f"Reset observation shape: {obs.shape}, expected: {self.observation_space.shape}")
-            if len(obs) != self.observation_space.shape[0]:
-                logger.info(f"Observation dimension mismatch: got {len(obs)}, expected {self.observation_space.shape[0]}")
-                logger.info(f"First few values of observation: {obs[:5]}")
+            if self.actual_state_space is None:
+                self.actual_state_space = len(obs)
+                logger.info(f"First reset - detected actual observation dimension: {self.actual_state_space}")
                 
-                # If we have state in the environment, log that too for comparison
-                if hasattr(self.env, 'state'):
-                    logger.info(f"Environment state length: {len(self.env.state)}")
-                    logger.info(f"Environment state first few elements: {self.env.state[:5]}")
-                
-                # Check for specific known issues
-                if len(obs) == self.observation_space.shape[0] + 1:
-                    logger.info(f"Observation is exactly 1 dimension larger than expected - this could be an additional feature.")
-                    logger.info(f"Last value in observation: {obs[-1]}")
-                    
-                    # This is likely the correct fix - just truncate the observation
-                    logger.info(f"Truncating observation from {len(obs)} to {self.observation_space.shape[0]}")
-                    obs = obs[:self.observation_space.shape[0]]
-                    
-            # Check if observation needs adjustment
-            if len(obs) > self.observation_space.shape[0]:
-                logger.warning(f"Truncating observation from shape {obs.shape} to {self.observation_space.shape}")
-                obs = obs[:self.observation_space.shape[0]]
-            # Pad with zeros if too small
-            elif len(obs) < self.observation_space.shape[0]:
-                logger.warning(f"Padding observation from shape {obs.shape} to {self.observation_space.shape}")
-                obs_padded = np.zeros(self.observation_space.shape[0], dtype=np.float32)
-                obs_padded[:len(obs)] = obs
-                obs = obs_padded
+                # Update observation space if needed to match the actual dimension
+                if self.actual_state_space != self.observation_space.shape[0]:
+                    logger.info(f"Updating observation space from shape {self.observation_space.shape} to ({self.actual_state_space},)")
+                    self.observation_space = gymnasium.spaces.Box(
+                        low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
+                    )
+            
+            logger.info(f"Reset observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
+            
+            # No need to reshape the observation, just clip it to the bounds
+            obs = np.clip(obs, -10.0, 10.0)
         
-        # Clip observation to be within bounds for SB3 compatibility
-        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
         return obs, reset_info
     
     def step(self, action):
@@ -302,27 +290,11 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
             self.step_counter = getattr(self, 'step_counter', 0) + 1
             if self.step_counter % 100 == 0:  # Log only every 100 steps
-                logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, expected: {self.observation_space.shape}")
-                if len(obs) != self.observation_space.shape[0]:
-                    logger.info(f"Step observation mismatch: got {len(obs)}, expected {self.observation_space.shape[0]}")
+                logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
         
-        # Handle dimension mismatch
-        if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
-            # Special case for observation that's exactly 1 dimension too large
-            if len(obs) == self.observation_space.shape[0] + 1:
-                # Simply truncate to match expected dimensions
-                obs = obs[:self.observation_space.shape[0]]
-            # Truncate if too large
-            elif len(obs) > self.observation_space.shape[0]:
-                obs = obs[:self.observation_space.shape[0]]
-            # Pad with zeros if too small
-            elif len(obs) < self.observation_space.shape[0]:
-                obs_padded = np.zeros(self.observation_space.shape[0], dtype=np.float32)
-                obs_padded[:len(obs)] = obs
-                obs = obs_padded
-        
-        # Clip observation to be within bounds for SB3 compatibility
-        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
+        # Just clip the observation to the bounds without reshaping
+        if isinstance(obs, np.ndarray):
+            obs = np.clip(obs, -10.0, 10.0)
         
         # Return in gymnasium format
         return obs, reward, terminated, truncated, info
@@ -336,98 +308,77 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         return [seed]
 
 # Now modify the create_finrl_env function to use this wrapper
-def create_finrl_env(df, args):
+def create_finrl_env(
+    start_date, end_date, symbols, data_source="binance", initial_balance=1000000.0,
+    lookback=5, state_space=16, include_cash=False, initial_stocks=None, window_size=None
+):
     """
-    Create a FinRL environment for cryptocurrency trading.
+    Create a FinRL-compatible environment for cryptocurrency trading.
     
     Args:
-        df: Processed dataframe in FinRL format
-        args: Command line arguments
-        
+        start_date: The start date for the environment
+        end_date: The end date for the environment
+        symbols: The list of cryptocurrency symbols to trade
+        data_source: The data source to use (default: "binance")
+        initial_balance: The initial balance for the environment
+        lookback: The number of time steps to look back for features
+        state_space: Initial expected dimension of state space (will be updated based on actual observation)
+        include_cash: Whether to include cash in the state
+        initial_stocks: The initial stocks for the environment
+        window_size: The window size for the environment
+    
     Returns:
-        FinRL environment compatible with Stable-Baselines3
+        A StockTradingEnvWrapper instance that is compatible with stable-baselines3
     """
-    # Get unique tickers
-    unique_tickers = df['tic'].unique()
-    num_stocks = len(unique_tickers)
-    stock_dim = num_stocks
+    # Use CryptocurrencyTradingEnv and import it here to avoid circular imports
+    logger.info(f"Using StockTradingEnv as CryptocurrencyTradingEnv - this may be deprecated")
+    from finrl.meta.env_cryptocurrency_trading.env_crypto import CryptocurrencyTradingEnv as StockTradingEnv
     
-    # Initialize stock shares to 0
-    num_stock_shares = [0] * num_stocks
+    logger.info(f"Creating FinRL environment with state_space={state_space}, lookback={lookback}")
+    logger.info(f"Date range: {start_date} to {end_date}")
+    logger.info(f"Symbols: {symbols}")
     
-    # Create list of technical indicators
-    tech_indicator_list = ['rsi', 'macd', 'macd_signal', 'macd_hist', 
-                          'bb_upper', 'bb_middle', 'bb_lower', 'atr',
-                          'sma_7', 'sma_25', 'ema_9', 'ema_21',
-                          'stoch_k', 'stoch_d']
+    # Create the actual environment
+    env = StockTradingEnv(
+        df=None,  # Will download data
+        symbols=symbols,
+        data_source=data_source,
+        start_date=start_date,
+        end_date=end_date,
+        initial_amount=initial_balance,
+        lookback=lookback,
+        random_start=False,  # Not randomizing start time
+        include_cash=include_cash,
+        initial_stocks=initial_stocks,
+        cache_indicator_data=True,
+        buy_cost_pct=0.001,  # Transaction cost of 0.1% for buying
+        sell_cost_pct=0.001,  # Transaction cost of 0.1% for selling
+        state_space=state_space,
+        stock_dim=len(symbols),
+        hmax=100,  # Maximum number of shares to trade
+        reward_scaling=1e-4
+    )
     
-    # Calculate state space dimension
-    # For StockTradingEnv, the observation has:
-    # - Account balance (1)
-    # - Asset price (1)
-    # - Asset shares (1)
-    # - Technical indicators (len(tech_indicator_list))
-    # In this case, the state space is 16, as shown in the logs
-    state_space = 16
+    # Ensure we get the correct state dimension by doing a test reset
+    # We'll then create a proper wrapper with the correct dimension
+    test_obs = env.reset()
+    actual_dim = len(test_obs) if isinstance(test_obs, np.ndarray) else state_space
     
-    # Set action space - Buy, Hold, Sell
-    action_space = 3
-    
-    # Log environment configuration
-    logger.info(f"Creating environment with state_space={state_space}, "
-                f"action_space={action_space}, num_stocks={num_stocks}")
-    
-    # Environment parameters
-    initial_amount = getattr(args, 'initial_balance', 1000000)
-    transaction_cost_pct = getattr(args, 'transaction_fee', 0.001)
-    reward_scaling = getattr(args, 'reward_scaling', 1e-4)
-    hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
-    
-    logger.info(f"Environment config: initial_amount={initial_amount}, "
-                f"transaction_cost_pct={transaction_cost_pct}, "
-                f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
-    
-    try:
-        # Create the StockTradingEnv
-        env = StockTradingEnv(
-            df=df,
-            stock_dim=stock_dim,
-            hmax=hmax,
-            num_stock_shares=num_stock_shares,
-            state_space=state_space,
-            action_space=action_space,
-            tech_indicator_list=tech_indicator_list,
-            initial_amount=initial_amount,
-            buy_cost_pct=transaction_cost_pct,
-            sell_cost_pct=transaction_cost_pct,
-            reward_scaling=reward_scaling,
-            print_verbosity=1
-        )
+    logger.info(f"Detected actual observation dimension: {actual_dim}")
+    if actual_dim != state_space:
+        logger.info(f"Updating state_space from {state_space} to {actual_dim}")
+        state_space = actual_dim
         
-        # Test observation shape from a reset
-        try:
-            test_obs = env.reset()
-            if isinstance(test_obs, np.ndarray):
-                logger.info(f"Test reset observation shape from env: {test_obs.shape}")
-                # Print first few values of the observation to help debug
-                logger.info(f"First few values of observation: {test_obs[:5]}")
-                # Check state details
-                if hasattr(env, 'state'):
-                    logger.info(f"Environment state length: {len(env.state)}")
-                    logger.info(f"Environment state first few elements: {env.state[:5]}")
-        except Exception as e:
-            logger.error(f"Error testing environment reset: {e}")
-        
-        # Wrap the environment with our gymnasium-compatible wrapper
-        wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
-        
-        # Return the wrapped environment directly
-        return wrapped_env
-        
-    except Exception as e:
-        logger.error(f"Error creating environment: {e}")
-        logger.error(traceback.format_exc())
-        raise
+    # We need to reset the env again
+    env.reset()
+    
+    # Then wrap it for gymnasium compatibility
+    wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
+    
+    logger.info(f"Environment created with observation space: {wrapped_env.observation_space}")
+    logger.info(f"Action space: {wrapped_env.action_space}")
+    
+    return wrapped_env
 
 class CustomDummyVecEnv:
     """
@@ -1038,292 +989,167 @@ class CustomDRLAgent(OriginalDRLAgent):
         return model
 
 
-def train_with_finrl(args, market_data, device):
-    """
-    Train a cryptocurrency trading agent using the FinRL framework.
+def train_with_finrl(args):
+    """Train a model using FinRL's DRL library"""
+    logger.info("Training with FinRL")
     
-    Args:
-        args: Command line arguments
-        market_data: Dictionary of market data dataframes
-        device: Device to train on
-        
-    Returns:
-        Trained agent and environment
-    """
-    # Prepare data in FinRL format
-    df = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
+    # Use consistent paths
+    model_dir = os.path.join("models", "finrl", args.finrl_model)
+    os.makedirs(model_dir, exist_ok=True)
     
-    # Create a single environment directly - avoid all custom wrappers
-    logger.info("Creating a single environment directly (bypassing all vectorization)")
+    # Set up start and end dates from args or defaults
+    start_date = getattr(args, 'start_date', '2018-01-01')
+    end_date = getattr(args, 'end_date', '2021-12-31')
     
-    # Create environment
-    env = create_finrl_env(df, args)
+    # Get cryptocurrency symbols from args or default
+    symbols = getattr(args, 'tickers', ["BTC", "ETH", "LTC"]) 
+    if not isinstance(symbols, list):
+        # Split comma-separated string into a list
+        symbols = [s.strip() for s in symbols.split(',')]
     
-    # Set random seeds for reproducibility
-    if args.seed is not None:
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        
-        # Seed the environment - handle both gym and gymnasium APIs
-        try:
-            # Try the gymnasium API first (returns None)
-            env.reset(seed=args.seed)
-            logger.info(f"Set environment seed to {args.seed} using gymnasium API")
-        except (TypeError, ValueError):
-            # Fall back to the older gym API
-            env.seed(args.seed)
-            logger.info(f"Set environment seed to {args.seed} using gym API")
+    # Update user with settings
+    logger.info(f"Training {args.finrl_model} model with DRL on symbols: {symbols}")
+    logger.info(f"Data range: {start_date} to {end_date}")
     
-    # Log environment information
-    logger.info(f"Environment observation space: {env.observation_space}")
-    logger.info(f"Environment action space: {env.action_space}")
+    # Create the environment without data loading first (data will be loaded in the env)
+    logger.info("Creating single environment for initial testing...")
     
-    # Test reset to validate - handle both gym and gymnasium APIs
-    try:
-        obs_and_info = env.reset()
-        # Check if obs_and_info is a tuple (gymnasium API)
-        if isinstance(obs_and_info, tuple) and len(obs_and_info) == 2:
-            obs = obs_and_info[0]  # In gymnasium, reset returns (obs, info)
-        else:
-            obs = obs_and_info  # In gym, reset only returns obs
-            
-        if isinstance(obs, np.ndarray):
-            logger.info(f"Test observation shape: {obs.shape}, dtype: {obs.dtype}")
-    except Exception as e:
-        logger.error(f"Error during test reset: {e}")
-        logger.error(traceback.format_exc())
+    # Define common environment parameters
+    lookback = getattr(args, 'lookback', 5)
+    initial_balance = getattr(args, 'initial_balance', 1000000.0)
+    include_cash = getattr(args, 'include_cash', False)
     
-    # Network architecture for models
-    net_arch = [256, 256]
-    logger.info(f"Using network architecture: {net_arch}")
+    # Create a test environment to validate configuration
+    test_env = create_finrl_env(
+        start_date=start_date,
+        end_date=end_date,
+        symbols=symbols,
+        data_source="binance",
+        initial_balance=initial_balance,
+        lookback=lookback,
+        include_cash=include_cash
+    )
     
-    # Define model kwargs - parameters for the model
-    model_kwargs = {
-        'batch_size': getattr(args, 'batch_size', 64),
-        'buffer_size': getattr(args, 'buffer_size', 100000),
-        'learning_rate': getattr(args, 'learning_rate', 1e-4),
-        'learning_starts': getattr(args, 'learning_starts', 100)
-    }
+    # Create multiple environments for parallel training if num_workers > 1
+    num_workers = getattr(args, 'num_workers', 1)
+    logger.info(f"Creating {num_workers} parallel environments with DummyVecEnv due to compatibility issues")
     
-    # Add specific model parameters based on model type
-    if args.finrl_model.lower() == 'sac':
-        # For SAC, add entropy coefficient
-        model_kwargs['ent_coef'] = getattr(args, 'ent_coef', 'auto_0.1')
-        logger.info("Training with SAC model")
-        
-        # Try creating SAC model directly from stable_baselines3
-        try:
-            # Import directly from stable_baselines3 
-            from stable_baselines3 import SAC
-            
-            # Update model kwargs for SB3 SAC
-            model_kwargs.update({
-                "env": env,
-                "verbose": 1 if args.verbose else 0,
-                "policy": "MlpPolicy",
-                "policy_kwargs": {"net_arch": net_arch},
-                "device": device
-            })
-            
-            # Create model
-            logger.info(f"Creating SAC model directly with kwargs: {model_kwargs}")
-            model = SAC(**model_kwargs)
-            
-            # Train model
-            logger.info("Starting model training...")
-            total_timesteps = getattr(args, 'total_timesteps', 100000)
-            logger.info(f"Training for {total_timesteps} timesteps")
-            
-            # Define a custom callback to log training progress
-            from stable_baselines3.common.callbacks import BaseCallback
-            
-            class LoggingCallback(BaseCallback):
-                def __init__(self, verbose=0):
-                    super().__init__(verbose)
-                    self.step_count = 0
-                    self.episode_count = 0
-                    self.episode_rewards = []
-                    self.current_episode_reward = 0
-                    
-                def _on_step(self):
-                    self.step_count += 1
-                    
-                    # If episode is done, log the episode stats
-                    if self.locals.get("dones", False):
-                        self.episode_count += 1
-                        reward = self.locals.get("rewards", [0])[0]
-                        self.current_episode_reward += reward
-                        self.episode_rewards.append(self.current_episode_reward)
-                        self.current_episode_reward = 0
-                        
-                        logger.info(f"Episode {self.episode_count} completed with reward: {self.episode_rewards[-1]:.4f}")
-                    else:
-                        # Add reward to current episode total
-                        reward = self.locals.get("rewards", [0])[0]
-                        self.current_episode_reward += reward
-                    
-                    # Log every 100 steps
-                    if self.step_count % 100 == 0:
-                        logger.info(f"Training step {self.step_count}")
-                        
-                        # For SAC, log the entropy coefficient
-                        if hasattr(self.model, 'ent_coef_tensor') and self.model.ent_coef_tensor is not None:
-                            ent_coef = self.model.ent_coef_tensor.item()
-                            logger.info(f"Current entropy coefficient: {ent_coef:.6f}")
-                        
-                        # For SAC, log the actor and critic losses
-                        if hasattr(self.model, 'actor_loss') and hasattr(self.model, 'critic_loss'):
-                            if self.model.actor_loss is not None and self.model.critic_loss is not None:
-                                actor_loss = self.model.actor_loss.item() if hasattr(self.model.actor_loss, 'item') else self.model.actor_loss
-                                critic_loss = self.model.critic_loss.item() if hasattr(self.model.critic_loss, 'item') else self.model.critic_loss
-                                logger.info(f"Actor loss: {actor_loss:.6f}, Critic loss: {critic_loss:.6f}")
-                    
-                    return True
-            
-            # Create the callback
-            callback = LoggingCallback()
-            
-            # Train the model with the callback
-            model.learn(total_timesteps=total_timesteps, callback=callback)
-            
-            # Save model
-            if args.save_dir:
-                model_save_path = os.path.join(args.save_dir, f"finrl_{args.finrl_model.lower()}_model")
-                logger.info(f"Saving model to {model_save_path}")
-                model.save(model_save_path)
-            
-            return model, env
-            
-        except Exception as e:
-            logger.error(f"Error using direct SB3 SAC implementation: {e}")
-            logger.info("Falling back to FinRL approach")
+    # Create a list of environment creation functions
+    env_fns = []
+    for i in range(num_workers):
+        def make_env(idx=i):
+            # Each environment gets the same configuration but will sample differently
+            env = create_finrl_env(
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                data_source="binance",
+                initial_balance=initial_balance,
+                lookback=lookback,
+                include_cash=include_cash
+            )
+            # Add unique identification to the environment
+            env = Monitor(env, os.path.join(model_dir, f'monitor_{idx}'))
+            return env
+        env_fns.append(make_env)
     
-    # Set up FinRL agent with the environment directly - use our custom agent class
-    agent = CustomDRLAgent(env=env)
+    # Always use DummyVecEnv for compatibility
+    env = DummyVecEnv(env_fns)
+    logger.info(f"Using DummyVecEnv for environment vectorization due to gym compatibility issues")
     
-    # Explicitly set net_arch on the agent instance
-    agent.net_arch = net_arch
+    # Create the DRL agent
+    model_name = args.finrl_model.upper()
     
-    # Initialize model_kwargs dictionary based on model type
-    # IMPORTANT: Don't include 'verbose', 'policy', or 'policy_kwargs'
-    # as these are added by the FinRL wrapper
-    is_verbose = 1 if args.verbose else 0
-    logger.info(f"Setting verbosity level: {is_verbose}")
+    logger.info(f"Setting up CustomDRLAgent with model: {model_name}")
+    # Get observation and action dimensions from the environment
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
     
-    # Get the appropriate model
-    # Note: agent.get_model will add 'policy', 'verbose', and 'policy_kwargs',
-    # so we don't include them in model_kwargs
-    model = agent.get_model(model_name=args.finrl_model.lower(), model_kwargs=model_kwargs)
+    logger.info(f"State dimension: {state_dim}, Action dimension: {action_dim}")
     
-    # Train model
+    # Set up appropriate network architecture based on model type
+    if model_name in ["SAC", "TD3", "DDPG"]:
+        # For continuous action space models
+        # Actor and critic networks
+        actor_network_layers = [256, 256]
+        critic_network_layers = [256, 256]
+        logger.info(f"Using actor network: {actor_network_layers}, critic network: {critic_network_layers}")
+    else:
+        # For PPO with policy network
+        network_layers = [256, 256]  
+        logger.info(f"Using network: {network_layers}")
+    
+    # Get model parameters based on the chosen model
+    if model_name == "SAC":
+        model_params = {
+            "batch_size": 256,
+            "buffer_size": 1000000,
+            "learning_rate": 0.0003,
+            "learning_starts": 100,
+            "ent_coef": "auto_0.1",
+            "verbose": args.verbose,
+        }
+    elif model_name == "TD3":
+        model_params = {
+            "batch_size": 100,
+            "buffer_size": 1000000,
+            "learning_rate": 0.0003,
+            "learning_starts": 100,
+            "verbose": args.verbose,
+        }
+    elif model_name == "DDPG":
+        model_params = {
+            "batch_size": 128,
+            "buffer_size": 50000,
+            "learning_rate": 0.001,
+            "verbose": args.verbose,
+        }
+    elif model_name == "PPO":
+        model_params = {
+            "batch_size": 128,
+            "n_steps": 2048,
+            "ent_coef": 0.01,
+            "learning_rate": 0.00025,
+            "verbose": args.verbose,
+        }
+    else:
+        raise ValueError(f"Model {model_name} not supported. Choose from SAC, TD3, DDPG, PPO")
+    
+    logger.info(f"Model parameters: {model_params}")
+    
+    # Create DRL agent
+    agent = CustomDRLAgent(env=env, model_name=model_name)
+    
+    # Set up the training callback to log progress
+    log_dir = os.path.join(model_dir, 'tb_logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    callback = TrainingLoggingCallback(
+        check_freq=1000,  # Check progress every 1000 steps
+        save_path=model_dir,
+        verbose=args.verbose,
+        save_freq=5000,  # Save every 5000 steps
+        log_dir=log_dir
+    )
+    
+    # Train the model
     logger.info("Starting model training...")
-    total_timesteps = getattr(args, 'total_timesteps', 100000)
-    logger.info(f"Training for {total_timesteps} timesteps")
+    model_path = os.path.join(model_dir, f"{model_name.lower()}_model")
+    model = agent.get_model(model_name, model_kwargs=model_params)
     
-    # Define a custom callback to log training progress
-    from stable_baselines3.common.callbacks import BaseCallback
+    # Train for the specified number of timesteps
+    timesteps = getattr(args, 'timesteps', 50000)
+    logger.info(f"Training for {timesteps} timesteps")
     
-    class LoggingCallback(BaseCallback):
-        def __init__(self, verbose=0):
-            super().__init__(verbose)
-            self.step_count = 0
-            self.episode_count = 0
-            self.episode_rewards = []
-            self.current_episode_reward = 0
-            
-        def _on_step(self):
-            self.step_count += 1
-            
-            # If episode is done, log the episode stats
-            if self.locals.get("dones", False):
-                self.episode_count += 1
-                reward = self.locals.get("rewards", [0])[0]
-                self.current_episode_reward += reward
-                self.episode_rewards.append(self.current_episode_reward)
-                self.current_episode_reward = 0
-                
-                logger.info(f"Episode {self.episode_count} completed with reward: {self.episode_rewards[-1]:.4f}")
-            else:
-                # Add reward to current episode total
-                reward = self.locals.get("rewards", [0])[0]
-                self.current_episode_reward += reward
-            
-            # Log every 100 steps
-            if self.step_count % 100 == 0:
-                logger.info(f"Training step {self.step_count}")
-                
-                # For SAC, log the entropy coefficient
-                if hasattr(self.model, 'ent_coef_tensor') and self.model.ent_coef_tensor is not None:
-                    ent_coef = self.model.ent_coef_tensor.item()
-                    logger.info(f"Current entropy coefficient: {ent_coef:.6f}")
-                
-                # For SAC, log the actor and critic losses
-                if hasattr(self.model, 'actor_loss') and hasattr(self.model, 'critic_loss'):
-                    if self.model.actor_loss is not None and self.model.critic_loss is not None:
-                        actor_loss = self.model.actor_loss.item() if hasattr(self.model.actor_loss, 'item') else self.model.actor_loss
-                        critic_loss = self.model.critic_loss.item() if hasattr(self.model.critic_loss, 'item') else self.model.critic_loss
-                        logger.info(f"Actor loss: {actor_loss:.6f}, Critic loss: {critic_loss:.6f}")
-            
-            return True
+    # Train the model
+    model = agent.train_model(model=model, tb_log_name=model_name.lower(), total_timesteps=timesteps, callback=callback)
     
-    # Create the callback
-    callback = LoggingCallback()
+    # Save the trained model
+    logger.info(f"Saving model to {model_path}")
+    model.save(model_path)
     
-    # Train the model with the callback
-    try:
-        # Try with the standard API first
-        trained_model = agent.train_model(
-            model=model,
-            tb_log_name=f"{args.finrl_model.lower()}",
-            total_timesteps=total_timesteps,
-            callback=callback
-        )
-    except TypeError as e:
-        logger.warning(f"Error using standard train_model API: {e}")
-        logger.info("Trying alternative train_model API signature...")
-        
-        # Some FinRL versions have different API for train_model
-        try:
-            from inspect import signature
-            train_sig = signature(agent.train_model)
-            logger.info(f"Detected train_model signature: {train_sig}")
-            
-            # Common parameter variations to try
-            if 'total_timesteps' in str(train_sig):
-                trained_model = agent.train_model(
-                    model=model,
-                    tb_log_name=f"{args.finrl_model.lower()}",
-                    total_timesteps=total_timesteps
-                )
-            elif 'n_timesteps' in str(train_sig):
-                trained_model = agent.train_model(
-                    model=model,
-                    tb_log_name=f"{args.finrl_model.lower()}",
-                    n_timesteps=total_timesteps
-                )
-            else:
-                # Last resort, try with just the model
-                trained_model = agent.train_model(model=model)
-                
-        except Exception as inner_e:
-            logger.error(f"Failed to train model with alternative API: {inner_e}")
-            logger.info("Using the untrained model as fallback")
-            trained_model = model
-    
-    # Handle potential API changes in FinRL versions
-    if trained_model is None:
-        logger.warning("train_model returned None, this may indicate an API change in FinRL")
-        # In newer FinRL versions, the model may be modified in-place
-        trained_model = model
-        logger.info("Using the original model object as the trained model")
-    
-    # Save model
-    if args.save_dir:
-        model_save_path = os.path.join(args.save_dir, f"finrl_{args.finrl_model.lower()}_model")
-        logger.info(f"Saving model to {model_save_path}")
-        trained_model.save(model_save_path)
-    
-    return trained_model, env
+    logger.info("Training completed successfully!")
+    return model
 
 def train_with_custom_dqn(args, market_data, data_length, device):
     """
@@ -2194,11 +2020,48 @@ def train_dqn_agent(args):
     # Choose between FinRL and custom implementation
     if args.use_finrl:
         logger.info("Using FinRL framework for training")
-        return train_with_finrl(args, market_data, device)
+        return train_with_finrl(args)
     else:
         logger.info("Using custom DQN implementation for training")
         return train_with_custom_dqn(args, market_data, data_length, device)
 
-if __name__ == "__main__":
+def main():
+    """Main function for training the DQN agent."""
+    start_time = time.time()
+    
+    # Set up logging (if not already configured)
+    setup_logging()
+    
+    # Parse arguments
     args = parse_args()
-    train_dqn_agent(args) 
+    
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith('cuda') else 'cpu')
+    logger.info(f"Using device: {device}")
+    
+    # Check if using FinRL framework
+    if args.use_finrl:
+        logger.info("Using FinRL framework")
+        # No need to load data - environment handles it
+        model = train_with_finrl(args)
+        
+        # Record training duration
+        training_duration = time.time() - start_time
+        logger.info(f"Training completed in {training_duration:.2f} seconds")
+        
+        return model
+    
+    # For custom DQN, load data
+    market_data, data_length = load_and_preprocess_market_data(args)
+    
+    # Train the agent
+    agent = train_with_custom_dqn(args, market_data, data_length, device)
+    
+    # Record training duration
+    training_duration = time.time() - start_time
+    logger.info(f"Training completed in {training_duration:.2f} seconds")
+    
+    return agent
+
+if __name__ == "__main__":
+    main() 
