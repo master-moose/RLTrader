@@ -15,3 +15,17 @@ __pycache__
 *.pyd
 *.pyw
 *.pyz
+data/
+*.log
+*.log.*
+*.log.*.*
+*.log.*.*.*
+*.log.*.*.*.*
+*.log.*.*.*.*.*
+models/
+*.pkl
+*.pth
+*.pt
+*.ptl
+*.pthl
+*.pth.tar

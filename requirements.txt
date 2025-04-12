@@ -76,3 +76,4 @@ exchange-calendars>=4.2.6
 alpaca-trade-api>=3.0.0
 ccxt>=2.6.36
 wrds>=3.1.6 
+shimmy>=2.0
