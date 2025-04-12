@@ -589,15 +589,30 @@ class CustomDummyVecEnv:
         self.envs = [fn() for fn in env_fns]
         self.num_envs = len(env_fns)
         
-        # Get observation and action spaces from first environment
+        # Use observation/action space from first environment
         self.observation_space = self.envs[0].observation_space
         self.action_space = self.envs[0].action_space
         
-        # Initialize buffers for observations
-        obs_shape = self.observation_space.shape
-        self.buf_obs = np.zeros((self.num_envs,) + obs_shape, dtype=np.float32)
+        # For compatibility with stable-baselines3, add attributes that are expected
+        # by the library's wrapper functions
+        self.metadata = getattr(self.envs[0], 'metadata', {'render_modes': []})
         
-        # Track done states
+        # Needed to avoid patching in stable-baselines3
+        self.spec = getattr(self.envs[0], 'spec', None)
+        self.env_is_wrapped = True  # Tell SB3 that this env is already wrapped
+        self.is_vector_env = True  # Indicate it's a vector env
+        self.render_mode = None
+        
+        # Add unwrapped property for compatibility
+        # Just use self since we're the wrapper
+        self.unwrapped = self
+        
+        # Buffer to store observations
+        obs_shape = self.observation_space.shape
+        expected_shape = (self.num_envs,) + obs_shape
+        self.buf_obs = np.zeros(expected_shape, dtype=self.observation_space.dtype)
+        
+        # Track episode termination
         self.dones = np.array([False] * self.num_envs)
         
         logger.info(f"Created CustomDummyVecEnv with {self.num_envs} environments")
@@ -605,68 +620,117 @@ class CustomDummyVecEnv:
     
     def reset(self):
         """
-        Reset all environments and return initial observations
+        Reset all environments and return a batch of initial observations.
+        
+        Returns:
+            A batch of observations from each environment
         """
         for i in range(self.num_envs):
-            obs = self.envs[i].reset()
-            self._save_obs(i, obs)
-        
-        # Reset done states
-        self.dones = np.array([False] * self.num_envs)
+            try:
+                # Attempt to reset with gymnasium API (returns tuple)
+                reset_result = self.envs[i].reset()
+                
+                # Handle various return types
+                if isinstance(reset_result, tuple):
+                    # Unpack tuple (obs, info)
+                    obs = reset_result[0]
+                    # Store info if needed later
+                else:
+                    # Old Gym API
+                    obs = reset_result
+                
+                # Save the observation
+                self._save_obs(i, obs)
+            except Exception as e:
+                logger.error(f"Error resetting environment {i}: {e}")
+                logger.error(traceback.format_exc())
+                # Default to zeros as a fallback
+                self.buf_obs[i] = np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
         
         return self.buf_obs.copy()
     
     def step(self, actions):
         """
-        Step all environments with the given actions
+        Step all environments with respective actions.
         
-        Arguments:
-        actions: Actions to take in each environment
-        
+        Args:
+            actions: Actions to take in each environment
+            
         Returns:
-        observations, rewards, dones, infos
+            observations, rewards, dones, infos
         """
-        rewards = np.zeros(self.num_envs, dtype=np.float32)
-        dones = np.array([False] * self.num_envs)
-        infos = [{} for _ in range(self.num_envs)]
+        obs, rewards, dones, infos = [], [], [], []
         
         for i in range(self.num_envs):
-            if not self.dones[i]:
-                # Convert scalar actions to the correct type
+            try:
+                # Determine action for this environment
                 if isinstance(actions, np.ndarray) and actions.ndim > 1:
                     action = actions[i]
                 else:
                     action = actions[i] if isinstance(actions, list) else actions
                 
-                obs, rewards[i], dones[i], infos[i] = self.envs[i].step(action)
+                result = self.envs[i].step(action)
+                
+                # Handle various return formats
+                if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
+                    ob, reward, terminated, truncated, info = result
+                    done = terminated or truncated
+                    # Add result to lists
+                    obs.append(ob)
+                    rewards.append(reward)
+                    dones.append(done)
+                    infos.append(info)
+                else:  # Old Gym API
+                    ob, reward, done, info = result
+                    # Add result to lists
+                    obs.append(ob)
+                    rewards.append(reward)
+                    dones.append(done)
+                    infos.append(info)
+                
                 if dones[i]:
                     # For environments that automatically reset on done
                     if infos[i].get("terminal_observation") is None and hasattr(self.envs[i], "reset"):
-                        terminal_obs = obs
-                        if isinstance(obs, np.ndarray):
-                            terminal_obs = obs.copy()
+                        terminal_obs = ob
+                        if isinstance(ob, np.ndarray):
+                            terminal_obs = ob.copy()
                         infos[i]["terminal_observation"] = terminal_obs
-                        obs = self.envs[i].reset()
+                        
+                        # Auto-reset environment
+                        reset_result = self.envs[i].reset()
+                        if isinstance(reset_result, tuple):
+                            new_obs = reset_result[0]
+                        else:
+                            new_obs = reset_result
+                        # Store new observation
+                        self._save_obs(i, new_obs)
+                    else:
+                        # If the environment doesn't automatically reset, we store the last observation
+                        self._save_obs(i, ob)
+                else:
+                    # Regular case - just store the observation
+                    self._save_obs(i, ob)
+            except Exception as e:
+                logger.error(f"Error stepping environment {i}: {e}")
+                logger.error(traceback.format_exc())
+                # Default values in case of error
+                obs.append(np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype))
+                rewards.append(0.0)
+                dones.append(True)
+                infos.append({"error": str(e)})
                 
-                self._save_obs(i, obs)
+        # Convert to numpy arrays
+        rewards = np.array(rewards)
+        dones = np.array(dones)
         
-        # Update done states
-        self.dones = dones.copy()
-        
+        # Return observations from buffer
         return self.buf_obs.copy(), rewards, dones, infos
     
     def _save_obs(self, idx, obs):
-        """
-        Save observation for the idx-th environment
-        
-        Handle different types of observations:
-        - numpy arrays: direct shape verification
-        - tuples: extract the first element if it's array-like
-        - other types: try to convert to numpy array
-        """
+        """Save observation for the given environment index."""
         expected_shape = self.observation_space.shape
         
-        # Handle tuple observations (common in recent gym versions)
+        # Convert various observation formats to numpy arrays
         if isinstance(obs, tuple):
             logger.info(f"Received tuple observation with length {len(obs)}")
             
@@ -680,10 +744,10 @@ class CustomDummyVecEnv:
                 elif isinstance(first_elem, (list, tuple)) and len(first_elem) > 0:
                     # Try to convert lists to numpy arrays
                     try:
-                        logger.info(f"Converting first element of tuple (list/tuple) to numpy array")
+                        logger.info("Converting first element of tuple (list/tuple) to numpy array")
                         obs = np.array(first_elem, dtype=np.float32)
                     except (ValueError, TypeError):
-                        logger.warning(f"Could not convert first element of tuple observation to array")
+                        logger.warning("Could not convert first element of tuple observation to array")
                         # Default to zeros as a fallback
                         self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
                         return
@@ -707,34 +771,81 @@ class CustomDummyVecEnv:
                 else:
                     self.buf_obs[idx] = obs
             else:
+                # Normal case - observation matches expected shape
                 self.buf_obs[idx] = obs
-        elif isinstance(obs, (list, float, int)):
-            # Try to convert to numpy array if it's a list, float, or int
+        elif isinstance(obs, list):
+            # Convert list to numpy array
             try:
                 arr_obs = np.array(obs, dtype=np.float32)
                 if arr_obs.shape != expected_shape:
                     if len(arr_obs) > expected_shape[0]:
-                        arr_obs = arr_obs[:expected_shape[0]]
-                    elif len(arr_obs) < expected_shape[0]:
-                        temp = np.zeros(expected_shape, dtype=np.float32)
-                        temp[:len(arr_obs)] = arr_obs
-                        arr_obs = temp
-                self.buf_obs[idx] = arr_obs
+                        self.buf_obs[idx] = arr_obs[:expected_shape[0]]
+                    else:
+                        self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
+                        self.buf_obs[idx][:len(arr_obs)] = arr_obs
+                else:
+                    self.buf_obs[idx] = arr_obs
             except (ValueError, TypeError) as e:
                 logger.error(f"Error converting observation to numpy array: {e}")
                 self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
         else:
             logger.warning(f"Unexpected observation type: {type(obs)}")
-            # Use zeros as fallback
             self.buf_obs[idx] = np.zeros(expected_shape, dtype=np.float32)
     
     def close(self):
-        """
-        Close all environments
-        """
+        """Close all environments."""
         for env in self.envs:
-            if hasattr(env, "close"):
-                env.close()
+            env.close()
+    
+    def env_method(self, method_name, *method_args, **method_kwargs):
+        """Call instance methods of each environments."""
+        results = []
+        for env in self.envs:
+            if hasattr(env, method_name):
+                method = getattr(env, method_name)
+                results.append(method(*method_args, **method_kwargs))
+            else:
+                results.append(None)
+        return results
+    
+    def get_attr(self, attr_name):
+        """Get attribute from each environment."""
+        return [getattr(env, attr_name) for env in self.envs]
+    
+    def set_attr(self, attr_name, values):
+        """Set attribute for each environment."""
+        for env, value in zip(self.envs, values):
+            setattr(env, attr_name, value)
+    
+    def env_is_wrapped(self, wrapper_class, indices=None):
+        """Check if environments are wrapped with a given wrapper."""
+        indices = indices or range(self.num_envs)
+        return [wrapper_class in self.get_wrapper_class(i) for i in indices]
+    
+    def get_wrapper_class(self, index):
+        """Get the wrapped classes for a given environment."""
+        env = self.envs[index]
+        wrapper_classes = []
+        while hasattr(env, "env"):
+            wrapper_classes.append(type(env))
+            env = env.env
+        return wrapper_classes
+    
+    def seed(self, seed=None):
+        """Set random seed for all environments."""
+        seeds = []
+        for i, env in enumerate(self.envs):
+            if seed is not None:
+                curr_seed = seed + i
+            else:
+                curr_seed = None
+            if hasattr(env, 'seed'):
+                seeds.append(env.seed(curr_seed))
+        return seeds
+    
+    def render(self, mode=None):
+        """Render the environments."""
+        return [env.render(mode=mode) for env in self.envs]
 
 # Now modify the create_parallel_finrl_envs function
 def create_parallel_finrl_envs(df, args, num_workers=4):
