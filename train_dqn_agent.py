@@ -168,8 +168,8 @@ class BaseStockTradingEnv(gym.Env):
             np.random.seed(seed)
         return [seed]
 
-# Use FinRL's StockTradingEnv if available, otherwise use placeholder
-StockTradingEnv = StockTradingEnv if StockTradingEnv else BaseStockTradingEnv
+# Use BaseStockTradingEnv as our StockTradingEnv
+StockTradingEnv = BaseStockTradingEnv
 
 # Create alias for CryptocurrencyTradingEnv
 CryptocurrencyTradingEnv = StockTradingEnv
@@ -1017,7 +1017,7 @@ def setup_finrl_import():
 OriginalDRLAgent = setup_finrl_import()
 
 # Create our own derived DRLAgent class to bypass patching
-class CustomDRLAgent(OriginalDRLAgent):
+class CustomDRLAgent:
     """
     A custom DRLAgent that bypasses the patching mechanism in Stable-Baselines3.
     This avoids the gym.spaces.Sequence compatibility issue.
@@ -1030,20 +1030,25 @@ class CustomDRLAgent(OriginalDRLAgent):
             env: The environment to use
             verbose: Verbosity level
         """
+        # Check if OriginalDRLAgent was successfully imported
+        if OriginalDRLAgent is None:
+            logger.error("Cannot initialize CustomDRLAgent - FinRL's DRLAgent not found")
+            raise ImportError("FinRL's DRLAgent could not be imported. Please install FinRL first.")
+            
         # Set default net_arch attribute that might be missing from parent class
         self.net_arch = [256, 256]
+        self.env = env
+        self.verbose = verbose
         
-        # Check if parent class accepts verbose parameter
+        # Initialize the original agent
         try:
             # Try with verbose parameter first
-            super().__init__(env=env, verbose=verbose)
-            self.verbose = verbose
+            self.agent = OriginalDRLAgent(env=env, verbose=verbose)
         except TypeError:
             # Fall back to just env if verbose is not accepted
-            super().__init__(env=env)
-            self.verbose = verbose
+            self.agent = OriginalDRLAgent(env=env)
             logger.info("DRLAgent parent class doesn't accept verbose parameter, using default initialization")
-        
+    
     def get_model(self, model_name, model_kwargs=None):
         """
         Create model without applying any patching to the environment.
@@ -1058,6 +1063,20 @@ class CustomDRLAgent(OriginalDRLAgent):
         if model_kwargs is None:
             model_kwargs = {}
             
+        # If we have the original agent, delegate to it with our wrapped methods
+        if hasattr(self, 'agent') and self.agent is not None:
+            try:
+                logger.info(f"Delegating model creation to original DRLAgent for {model_name}")
+                # Patch get_model to avoid patching
+                original_get_model = self.agent.get_model
+                
+                # Try to get the model from the original agent
+                model = original_get_model(model_name, model_kwargs)
+                return model
+            except Exception as e:
+                logger.warning(f"Error delegating to original agent: {e}")
+                # Fall through to our manual implementation
+        
         # Import MODELS dictionary from finrl with better error handling
         try:
             # Try the main path first
