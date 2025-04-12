@@ -40,6 +40,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import BaseCallback
 import matplotlib.pyplot as plt  # Add matplotlib
 import psutil  # Add psutil
+import inspect
 
 # Add project root to path
 project_root = str(Path(__file__).parent)
@@ -334,55 +335,114 @@ def create_finrl_env(
     Returns:
         A StockTradingEnvWrapper instance that is compatible with stable-baselines3
     """
-    # Use CryptocurrencyTradingEnv and import it here to avoid circular imports
-    logger.info(f"Using StockTradingEnv as CryptocurrencyTradingEnv - this may be deprecated")
-    from finrl.meta.env_cryptocurrency_trading.env_crypto import CryptocurrencyTradingEnv as StockTradingEnv
+    # Try different import paths for StockTradingEnv, falling back as needed
+    logger.info("Attempting to import StockTradingEnv for cryptocurrency trading")
+    
+    StockTradingEnvClass = None
+    
+    # Try multiple import paths in order of preference
+    try:
+        # Try the cryptocurrency-specific environment first
+        from finrl.meta.env_cryptocurrency_trading.env_crypto import CryptocurrencyTradingEnv
+        logger.info("Successfully imported CryptocurrencyTradingEnv")
+        StockTradingEnvClass = CryptocurrencyTradingEnv
+    except ImportError:
+        logger.warning("Could not import CryptocurrencyTradingEnv, trying alternative paths")
+        try:
+            # Try the standard stock trading environment as fallback
+            from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+            logger.info("Using standard StockTradingEnv as fallback")
+            StockTradingEnvClass = StockTradingEnv
+        except ImportError:
+            try:
+                # Try newer import path (FinRL has changed paths multiple times)
+                from finrl.applications.env.crypto import CryptocurrencyTradingEnv
+                logger.info("Successfully imported CryptocurrencyTradingEnv from applications.env")
+                StockTradingEnvClass = CryptocurrencyTradingEnv
+            except ImportError:
+                try:
+                    # Try newer import path for stock trading environment
+                    from finrl.applications.env.stock import StockTradingEnv
+                    logger.info("Using StockTradingEnv from applications.env as fallback")
+                    StockTradingEnvClass = StockTradingEnv
+                except ImportError:
+                    # Final fallback - use our base class
+                    logger.warning("Could not import any trading environment from FinRL, using base implementation")
+                    StockTradingEnvClass = BaseStockTradingEnv
+    
+    if StockTradingEnvClass is None:
+        raise ImportError("Failed to import any suitable trading environment")
     
     logger.info(f"Creating FinRL environment with state_space={state_space}, lookback={lookback}")
     logger.info(f"Date range: {start_date} to {end_date}")
     logger.info(f"Symbols: {symbols}")
     
-    # Create the actual environment
-    env = StockTradingEnv(
-        df=None,  # Will download data
-        symbols=symbols,
-        data_source=data_source,
-        start_date=start_date,
-        end_date=end_date,
-        initial_amount=initial_balance,
-        lookback=lookback,
-        random_start=False,  # Not randomizing start time
-        include_cash=include_cash,
-        initial_stocks=initial_stocks,
-        cache_indicator_data=True,
-        buy_cost_pct=0.001,  # Transaction cost of 0.1% for buying
-        sell_cost_pct=0.001,  # Transaction cost of 0.1% for selling
-        state_space=state_space,
-        stock_dim=len(symbols),
-        hmax=100,  # Maximum number of shares to trade
-        reward_scaling=1e-4
-    )
+    # Create a dictionary of all parameters for the environment
+    env_params = {
+        'df': None,  # Will download data if None
+        'state_space': state_space,
+        'initial_amount': initial_balance,
+        'buy_cost_pct': 0.001,
+        'sell_cost_pct': 0.001,
+        'reward_scaling': 1e-4,
+        'hmax': 100,  # Maximum number of shares to trade
+    }
     
-    # Ensure we get the correct state dimension by doing a test reset
-    # We'll then create a proper wrapper with the correct dimension
-    test_obs = env.reset()
-    actual_dim = len(test_obs) if isinstance(test_obs, np.ndarray) else state_space
+    # Add parameters that are specific to cryptocurrency environments
+    if 'symbols' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['symbols'] = symbols
+    if 'data_source' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['data_source'] = data_source
+    if 'start_date' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['start_date'] = start_date
+    if 'end_date' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['end_date'] = end_date
+    if 'lookback' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['lookback'] = lookback
+    if 'include_cash' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['include_cash'] = include_cash
+    if 'initial_stocks' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['initial_stocks'] = initial_stocks
+    if 'stock_dim' in inspect.signature(StockTradingEnvClass.__init__).parameters:
+        env_params['stock_dim'] = len(symbols)
     
-    logger.info(f"Detected actual observation dimension: {actual_dim}")
-    if actual_dim != state_space:
-        logger.info(f"Updating state_space from {state_space} to {actual_dim}")
-        state_space = actual_dim
+    # Create environment with appropriate parameters
+    try:
+        # Log what we're doing
+        logger.info(f"Creating environment with params: {env_params}")
         
-    # We need to reset the env again
-    env.reset()
+        # Create the environment
+        env = StockTradingEnvClass(**env_params)
+        
+        # Ensure we get the correct state dimension by doing a test reset
+        # We'll then create a proper wrapper with the correct dimension
+        try:
+            test_obs = env.reset()
+            actual_dim = len(test_obs) if isinstance(test_obs, np.ndarray) else state_space
+            
+            logger.info(f"Detected actual observation dimension: {actual_dim}")
+            if actual_dim != state_space:
+                logger.info(f"Updating state_space from {state_space} to {actual_dim}")
+                state_space = actual_dim
+            
+            # We need to reset the env again
+            env.reset()
+        except Exception as e:
+            logger.error(f"Error during test reset: {e}")
+            logger.error(traceback.format_exc())
+        
+        # Then wrap it for gymnasium compatibility
+        wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
+        
+        logger.info(f"Environment created with observation space: {wrapped_env.observation_space}")
+        logger.info(f"Action space: {wrapped_env.action_space}")
+        
+        return wrapped_env
     
-    # Then wrap it for gymnasium compatibility
-    wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
-    
-    logger.info(f"Environment created with observation space: {wrapped_env.observation_space}")
-    logger.info(f"Action space: {wrapped_env.action_space}")
-    
-    return wrapped_env
+    except Exception as e:
+        logger.error(f"Error creating environment: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 class CustomDummyVecEnv:
     """
@@ -553,13 +613,45 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     Create multiple FinRL environments for parallel training.
     
     Args:
-        df: Processed dataframe in FinRL format
-        args: Command line arguments
+        df: DataFrame with FinRL formatted data
+        args: Command-line arguments
         num_workers: Number of parallel environments to create
         
     Returns:
-        Vectorized environment with multiple workers
+        A vectorized environment with multiple environment instances
     """
+    # Try to import the most appropriate environment class
+    try:
+        # Try different import paths for the environment
+        StockTradingEnvClass = None
+        env_import_paths = [
+            # Try cryptocurrency specific environments first
+            'finrl.meta.env_cryptocurrency_trading.env_crypto.CryptocurrencyTradingEnv',
+            'finrl.applications.env.crypto.CryptocurrencyTradingEnv',
+            # Then fall back to stock trading environments
+            'finrl.meta.env_stock_trading.env_stocktrading.StockTradingEnv',
+            'finrl.applications.env.stock.StockTradingEnv',
+        ]
+        
+        for import_path in env_import_paths:
+            try:
+                module_path, class_name = import_path.rsplit('.', 1)
+                module = __import__(module_path, fromlist=[class_name])
+                StockTradingEnvClass = getattr(module, class_name)
+                logger.info(f"Successfully imported {class_name} from {module_path}")
+                break
+            except (ImportError, AttributeError) as e:
+                logger.debug(f"Could not import {import_path}: {e}")
+                
+        if StockTradingEnvClass is None:
+            logger.warning("Could not import any trading environment from FinRL, using base implementation")
+            StockTradingEnvClass = BaseStockTradingEnv
+    except Exception as e:
+        logger.error(f"Error importing environment classes: {e}")
+        logger.error(traceback.format_exc())
+        # Fallback to our base implementation
+        StockTradingEnvClass = BaseStockTradingEnv
+    
     # Get unique tickers
     unique_tickers = df['tic'].unique()
     num_stocks = len(unique_tickers)
@@ -580,14 +672,14 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     # - Asset price (1)
     # - Asset shares (1)
     # - Technical indicators (len(tech_indicator_list))
-    # In this case, the state space is 16, as shown in the logs
-    state_space = 16
+    state_space = 1 + 1 + 1 + len(tech_indicator_list)
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
     
-    logger.info(f"Creating {num_workers} parallel environments with "
-                f"state_space={state_space}, action_space={action_space}")
+    # Log environment configuration
+    logger.info(f"Creating parallel environment with state_space={state_space}, "
+                f"action_space={action_space}, num_stocks={num_stocks}")
     
     # Environment parameters
     initial_amount = getattr(args, 'initial_balance', 1000000)
@@ -600,23 +692,23 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
     
     # Create a test environment to debug the observation space
-    test_env = StockTradingEnv(
-        df=df,
-        stock_dim=stock_dim,
-        hmax=hmax,
-        num_stock_shares=num_stock_shares.copy(),
-        state_space=state_space,
-        action_space=action_space,
-        tech_indicator_list=tech_indicator_list,
-        initial_amount=initial_amount,
-        buy_cost_pct=transaction_cost_pct,
-        sell_cost_pct=transaction_cost_pct,
-        reward_scaling=reward_scaling,
-        print_verbosity=1
-    )
-    
-    # Test reset to see the observation shape
     try:
+        test_env = StockTradingEnvClass(
+            df=df,
+            stock_dim=stock_dim,
+            hmax=hmax,
+            num_stock_shares=num_stock_shares.copy(),
+            state_space=state_space,
+            action_space=action_space,
+            tech_indicator_list=tech_indicator_list,
+            initial_amount=initial_amount,
+            buy_cost_pct=transaction_cost_pct,
+            sell_cost_pct=transaction_cost_pct,
+            reward_scaling=reward_scaling,
+            print_verbosity=1
+        )
+        
+        # Test the environment to see if observation shape matches state_space
         test_obs = test_env.reset()
         if isinstance(test_obs, np.ndarray):
             logger.info(f"Test environment observation shape: {test_obs.shape}")
@@ -632,29 +724,42 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     state_space = len(test_obs)
     except Exception as e:
         logger.error(f"Error testing environment: {e}")
-    
-    # Create a list to hold our environment creation functions
+        logger.error(traceback.format_exc())
+        
+    # Create a list of environment creation functions
     env_list = []
     
     for i in range(num_workers):
         # Define a function that creates a new environment instance each time it's called
         def make_env(idx=i):
-            base_env = StockTradingEnv(
-                df=df,
-                stock_dim=stock_dim,
-                hmax=hmax,
-                num_stock_shares=num_stock_shares.copy(),  # Use a copy to avoid sharing state
-                state_space=state_space,
-                action_space=action_space,
-                tech_indicator_list=tech_indicator_list,
-                initial_amount=initial_amount,
-                buy_cost_pct=transaction_cost_pct,
-                sell_cost_pct=transaction_cost_pct,
-                reward_scaling=reward_scaling,
-                print_verbosity=1 if idx == 0 else 0  # Only print verbose output for the first env
-            )
-            # Wrap the environment to ensure consistent observation shape
-            return StockTradingEnvWrapper(base_env, state_space=state_space)
+            try:
+                # Create basic environment parameters
+                env_params = {
+                    'df': df,
+                    'state_space': state_space,
+                    'stock_dim': stock_dim,
+                    'hmax': hmax,
+                    'num_stock_shares': num_stock_shares.copy(),  # Use a copy to avoid sharing state
+                    'action_space': action_space,
+                    'tech_indicator_list': tech_indicator_list,
+                    'initial_amount': initial_amount,
+                    'buy_cost_pct': transaction_cost_pct,
+                    'sell_cost_pct': transaction_cost_pct,
+                    'reward_scaling': reward_scaling,
+                    'print_verbosity': 1 if idx == 0 else 0  # Only print verbose output for the first env
+                }
+                
+                # Create the environment
+                base_env = StockTradingEnvClass(**env_params)
+                
+                # Wrap the environment to ensure consistent observation shape
+                return StockTradingEnvWrapper(base_env, state_space=state_space)
+            except Exception as e:
+                logger.error(f"Error creating environment {idx}: {e}")
+                logger.error(traceback.format_exc())
+                # Provide a fallback environment if creation fails
+                base_env = BaseStockTradingEnv(df, state_space=state_space)
+                return StockTradingEnvWrapper(base_env, state_space=state_space)
         
         # Add the environment creation function to the list with proper closure handling
         env_fn = lambda idx=i: make_env(idx)
