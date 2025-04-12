@@ -1927,16 +1927,86 @@ def main():
         if args.lstm_model_path:
             try:
                 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
+                from crypto_trading_model.data_processing.preprocessing import TimeSeriesDataProcessor
+                import torch
+                
                 logger.info(f"Loading LSTM model from {args.lstm_model_path}")
-                # Just log that we would use the model but don't actually load it
-                # since we're not actually going to be using FinRL
-                logger.info("LSTM model will be used for market predictions")
+                
+                # Actually load the LSTM model
+                try:
+                    lstm_model = MultiTimeframeModel.load_model(args.lstm_model_path)
+                    lstm_model.eval()  # Set to evaluation mode
+                    logger.info(f"Successfully loaded LSTM model: {lstm_model}")
+                    
+                    # Create data processor for LSTM
+                    lstm_processor = TimeSeriesDataProcessor(
+                        sequence_length=10,  # Use same as model training
+                        prediction_horizon=5  # Predict 5 steps ahead
+                    )
+                    
+                    logger.info("LSTM model will be used for market predictions")
+                except Exception as e:
+                    logger.error(f"Failed to load LSTM model: {e}")
+                    lstm_model = None
             except ImportError as e:
                 logger.error(f"Error importing required modules for LSTM: {e}")
-        
+                
         # Create synthetic data for training
         df = create_synthetic_data(tickers, start_date, end_date)
         logger.info(f"Created synthetic data with shape {df.shape}")
+        
+        # If we have a loaded LSTM model, add price predictions to data
+        if lstm_model is not None and lstm_processor is not None:
+            try:
+                logger.info("Adding LSTM price predictions to training data")
+                
+                # Prepare data for LSTM prediction
+                price_data = df[['open', 'high', 'low', 'close', 'volume']].values
+                
+                # Normalize the data
+                price_mean = price_data.mean(axis=0)
+                price_std = price_data.std(axis=0)
+                normalized_data = (price_data - price_mean) / price_std
+                
+                # Create sequences
+                sequences = []
+                for i in range(len(normalized_data) - lstm_processor.sequence_length):
+                    seq = normalized_data[i:i+lstm_processor.sequence_length]
+                    sequences.append(seq)
+                
+                # Convert to tensor for batch prediction
+                if sequences:
+                    tensor_sequences = torch.FloatTensor(sequences).to(device)
+                    
+                    # Run prediction
+                    with torch.no_grad():
+                        price_predictions = lstm_model(tensor_sequences).cpu().numpy()
+                    
+                    # Denormalize predictions
+                    denorm_predictions = price_predictions * price_std[3] + price_mean[3]  # For close price
+                    
+                    # Add predictions to dataframe
+                    for i in range(lstm_processor.prediction_horizon):
+                        pred_col = f'lstm_pred_{i+1}'
+                        df[pred_col] = 0.0  # Initialize column
+                        
+                        # Fill with predictions (offset by sequence_length due to first sequences)
+                        for j in range(len(denorm_predictions)):
+                            if j + lstm_processor.sequence_length + i < len(df):
+                                df.loc[j + lstm_processor.sequence_length + i, pred_col] = denorm_predictions[j][i]
+                    
+                    # Add prediction columns to technical indicators
+                    for i in range(lstm_processor.prediction_horizon):
+                        pred_col = f'lstm_pred_{i+1}'
+                        if pred_col not in tech_indicators:
+                            tech_indicators.append(pred_col)
+                    
+                    logger.info(f"Added LSTM predictions for {lstm_processor.prediction_horizon} steps ahead")
+                else:
+                    logger.warning("Could not create sequences for LSTM prediction")
+            except Exception as e:
+                logger.error(f"Error generating LSTM predictions: {e}")
+                logger.error(traceback.format_exc())
         
         # Define necessary technical indicators
         tech_indicators = [
