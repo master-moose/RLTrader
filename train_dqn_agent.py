@@ -619,10 +619,7 @@ def train_with_finrl(args, market_data, device):
     if net_arch:
         if args.finrl_model == 'sac':
             # For SAC, we need to specify separate networks for policy and Q-function
-            model_params = {
-                'learning_rate': args.learning_rate,
-                'device': device,
-                'action_noise': 'normal' if action_noise else None,
+            model_params['policy_kwargs'] = {
                 'net_arch': {
                     'pi': net_arch,  # Policy network
                     'qf': net_arch   # Q-function network
@@ -630,7 +627,9 @@ def train_with_finrl(args, market_data, device):
             }
         else:
             # For other models, simpler net_arch specification
-            model_params['net_arch'] = net_arch
+            model_params['policy_kwargs'] = {
+                'net_arch': net_arch
+            }
 
     # Create and train the model
     try:
