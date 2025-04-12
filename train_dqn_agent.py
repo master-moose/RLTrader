@@ -1949,48 +1949,74 @@ def main():
         vec_env = create_dummy_vectorized_env(lambda: wrap_env_with_monitor(CryptocurrencyTradingEnv(**env_params)), 
                                              n_envs=num_workers)
         
-        # Train model based on specified FinRL model type
-        if args.finrl_model.lower() == 'sac':
-            logger.info("Training with SAC model")
-            # Use stable-baselines3 SAC directly
-            model = SAC(
-                'MlpPolicy', 
-                vec_env,
-                learning_rate=getattr(args, 'learning_rate', 0.0003),
-                gamma=getattr(args, 'gamma', 0.99),
-                verbose=1 if args.verbose else 0,
-                tensorboard_log="./tensorboard_logs"
-            )
-        elif args.finrl_model.lower() == 'ppo':
-            logger.info("Training with PPO model")
-            model = PPO(
-                'MlpPolicy', 
-                vec_env,
-                learning_rate=getattr(args, 'learning_rate', 0.0003),
-                gamma=getattr(args, 'gamma', 0.99),
-                verbose=1 if args.verbose else 0,
-                tensorboard_log="./tensorboard_logs"
-            )
-        elif args.finrl_model.lower() == 'ddpg':
-            logger.info("Training with DDPG model")
-            model = DDPG(
-                'MlpPolicy', 
-                vec_env,
-                learning_rate=getattr(args, 'learning_rate', 0.0003),
-                gamma=getattr(args, 'gamma', 0.99),
-                verbose=1 if args.verbose else 0,
-                tensorboard_log="./tensorboard_logs"
-            )
+        # Check the action space type and use appropriate algorithm
+        if isinstance(vec_env.action_space, gym.spaces.Discrete) or isinstance(vec_env.action_space, gymnasium.spaces.Discrete):
+            # For discrete action spaces, use algorithms that support them
+            if args.finrl_model.lower() == 'ppo':
+                logger.info("Training with PPO model (supports discrete actions)")
+                model = PPO(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0003),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
+            else:
+                # Default to DQN for discrete action spaces
+                from stable_baselines3 import DQN
+                logger.info("Using DQN model for discrete action space")
+                model = DQN(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0001),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
         else:
-            logger.info("Using default TD3 model")
-            model = TD3(
-                'MlpPolicy', 
-                vec_env,
-                learning_rate=getattr(args, 'learning_rate', 0.0003),
-                gamma=getattr(args, 'gamma', 0.99),
-                verbose=1 if args.verbose else 0,
-                tensorboard_log="./tensorboard_logs"
-            )
+            # For continuous action spaces, use algorithms that support them
+            if args.finrl_model.lower() == 'sac':
+                logger.info("Training with SAC model")
+                # Use stable-baselines3 SAC directly
+                model = SAC(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0003),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
+            elif args.finrl_model.lower() == 'ppo':
+                logger.info("Training with PPO model")
+                model = PPO(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0003),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
+            elif args.finrl_model.lower() == 'ddpg':
+                logger.info("Training with DDPG model")
+                model = DDPG(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0003),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
+            else:
+                logger.info("Using default TD3 model")
+                model = TD3(
+                    'MlpPolicy', 
+                    vec_env,
+                    learning_rate=getattr(args, 'learning_rate', 0.0003),
+                    gamma=getattr(args, 'gamma', 0.99),
+                    verbose=1 if args.verbose else 0,
+                    tensorboard_log="./tensorboard_logs"
+                )
         
         # Train the model
         total_timesteps = getattr(args, 'timesteps', 50000)
