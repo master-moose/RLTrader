@@ -1894,6 +1894,9 @@ def main():
     # Record start time
     start_time = time.time()
     
+    # Import torch at the beginning of main to ensure it's available
+    import torch
+    
     # Configure logging
     global logger
     logger = setup_logging()
