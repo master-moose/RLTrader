@@ -353,9 +353,7 @@ def create_finrl_env(df, args):
         'action_space': 3,  # buy, hold, sell
         'tech_indicator_list': INDICATORS,
         'print_verbosity': 1,
-        'config': {
-            'transaction_cost_pct': getattr(args, 'transaction_cost_pct', 0.001)
-        }
+        'transaction_cost_pct': getattr(args, 'transaction_cost_pct', 0.001)
     }
     
     # Create environment
