@@ -822,6 +822,9 @@ class CustomDRLAgent(OriginalDRLAgent):
             env: The environment to use
             verbose: Verbosity level
         """
+        # Set default net_arch attribute that might be missing from parent class
+        self.net_arch = [256, 256]
+        
         # Check if parent class accepts verbose parameter
         try:
             # Try with verbose parameter first
@@ -847,8 +850,23 @@ class CustomDRLAgent(OriginalDRLAgent):
         if model_kwargs is None:
             model_kwargs = {}
             
-        # Import MODELS dictionary from finrl
-        from finrl.agents.stablebaselines3.models import MODELS
+        # Import MODELS dictionary from finrl with better error handling
+        try:
+            # Try the main path first
+            from finrl.agents.stablebaselines3.models import MODELS
+            logger.info("Imported MODELS dictionary from finrl.agents.stablebaselines3.models")
+        except ImportError:
+            try:
+                # Try alternate path (newer versions)
+                from finrl.applications.agents.stablebaselines3.models import MODELS
+                logger.info("Imported MODELS dictionary from finrl.applications.agents.stablebaselines3.models")
+            except ImportError:
+                try:
+                    # Last resort for very old versions
+                    from finrl.model.models import MODELS
+                    logger.info("Imported MODELS dictionary from finrl.model.models")
+                except ImportError:
+                    raise ImportError("Could not import MODELS dictionary from any known FinRL paths")
             
         # Use the environment directly without patching
         env = self.env
@@ -863,27 +881,40 @@ class CustomDRLAgent(OriginalDRLAgent):
         
         # Get the model class
         if model_name not in MODELS:
-            raise NotImplementedError(f"Model {model_name} not supported")
+            raise NotImplementedError(f"Model {model_name} not supported. Available models: {list(MODELS.keys())}")
             
         # Create model instance with original init method but with special handling for env
         model_class = MODELS[model_name]
         
         # Monkey patch the _wrap_env method to disable patching
-        original_wrap_env = model_class._wrap_env
+        original_wrap_env = model_class._wrap_env if hasattr(model_class, '_wrap_env') else None
         
-        def no_patch_wrap_env(self, env, verbose=0, monitor_wrapper=True):
-            """Do not apply any patching to the environment"""
-            # Skip the patching completely - return env directly
-            return env
-            
-        # Apply monkey patch
-        model_class._wrap_env = no_patch_wrap_env
+        if original_wrap_env:
+            def no_patch_wrap_env(self, env, verbose=0, monitor_wrapper=True):
+                """Do not apply any patching to the environment"""
+                # Skip the patching completely - return env directly
+                return env
+                
+            # Apply monkey patch
+            model_class._wrap_env = no_patch_wrap_env
         
         # Create model
-        model = model_class(**model_kwargs)
+        try:
+            model = model_class(**model_kwargs)
+        except Exception as e:
+            logger.error(f"Error creating {model_name} model: {e}")
+            # Log the model parameters and expected signature
+            try:
+                from inspect import signature
+                logger.info(f"Expected signature: {signature(model_class.__init__)}")
+                logger.info(f"Model kwargs: {model_kwargs}")
+            except Exception:
+                pass
+            raise
         
         # Restore original method
-        model_class._wrap_env = original_wrap_env
+        if original_wrap_env:
+            model_class._wrap_env = original_wrap_env
         
         return model
 
@@ -936,6 +967,9 @@ def train_with_finrl(args, market_data, device):
     # Network architecture for models
     net_arch = [256, 256]
     logger.info(f"Using network architecture: {net_arch}")
+    
+    # Explicitly set net_arch on the agent instance
+    agent.net_arch = net_arch
     
     # Initialize model_kwargs dictionary based on model type
     # IMPORTANT: Don't include 'verbose', 'policy', or 'policy_kwargs'
