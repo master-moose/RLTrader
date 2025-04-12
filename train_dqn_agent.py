@@ -599,14 +599,13 @@ def train_with_finrl(args, market_data, device):
     # Parse net_arch from string
     try:
         net_arch = eval(args.net_arch)  # Convert string to list
-    except:
+    except Exception:
         logger.warning(f"Could not parse net_arch: {args.net_arch}, using default [256, 256]")
         net_arch = [256, 256]
     
     # Create model parameters
     model_params = {
         'learning_rate': args.learning_rate,
-        'verbose': 1 if args.verbose else 0,
         'policy': 'MlpPolicy',
         'device': device
     }
