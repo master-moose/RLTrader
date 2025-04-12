@@ -26,6 +26,20 @@ project_root = str(Path(__file__).parent)
 sys.path.append(project_root)
 
 from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
+from crypto_trading_model.dqn_agent import DQNAgent
+from crypto_trading_model.data.data_loader import load_crypto_data
+from crypto_trading_model.utils.logging import setup_logging
+
+# Setup logging
+logger = setup_logging()
+
+# FinRL imports
+from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from finrl.agents.stablebaselines3.models import DRLAgent
+from finrl.meta.data_processor import DataProcessor
+
+# Original imports
 from lstm_dqn_agent import LSTMDQNAgent
 from utils.data_utils import prepare_data, load_data
 import pandas as pd
@@ -40,24 +54,6 @@ from concurrent.futures import ThreadPoolExecutor
 import psutil
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-
-# Import FinRL components if available
-try:
-    from finrl.meta.env_stock_trading.env_stocktrading import (
-        StockTradingEnv as FinRLStockTradingEnv
-    )
-    from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-    from finrl.agents.stablebaselines3.models import DRLAgent
-    HAS_FINRL = True
-except ImportError:
-    HAS_FINRL = False
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Define a fallback for INDICATORS in case we can't import it
 INDICATORS = ['macd', 'rsi', 'cci', 'dx']
@@ -80,14 +76,13 @@ class BaseStockTradingEnv(gym.Env):
 
 
 # Use FinRL's StockTradingEnv if available, otherwise use placeholder
-StockTradingEnv = FinRLStockTradingEnv if HAS_FINRL else BaseStockTradingEnv
+StockTradingEnv = StockTradingEnv if StockTradingEnv else BaseStockTradingEnv
 
 # Create alias for CryptocurrencyTradingEnv
 CryptocurrencyTradingEnv = StockTradingEnv
 logger.info("Using StockTradingEnv as CryptocurrencyTradingEnv")
 
 # Original imports
-from crypto_trading_model.dqn_agent import DQNAgent
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.utils import set_seeds
