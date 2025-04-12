@@ -618,10 +618,7 @@ def train_with_finrl(args, market_data, device):
     
     # Add action noise for continuous models
     if args.finrl_model in ['sac', 'td3', 'ddpg'] and action_noise:
-        model_params['action_noise'] = NormalActionNoise(
-            mean=np.zeros(3),  # Assuming 3 actions
-            sigma=np.ones(3) * 0.1
-        )
+        model_params['action_noise'] = 'normal'  # Use string identifier instead of object
     
     # For SAC models, we need to set policy_kwargs with appropriate network architecture
     if args.finrl_model == 'sac':
