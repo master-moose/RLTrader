@@ -47,7 +47,17 @@ from crypto_trading_model.utils import set_seeds
 # Import FinRL components
 from finrl.meta.preprocessor.preprocessors import FeatureEngineer
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
-from finrl.agents.drl_agent import DRLAgent
+# Update the import path for DRLAgent for FinRL 0.3.7
+try:
+    # Try the new import path first (FinRL 0.3.7+)
+    from finrl.applications.agents.drl_agents import DRLAgent
+except ImportError:
+    try:
+        # Try alternative path
+        from finrl.agents.stablebaselines3.models import DRLAgent
+    except ImportError:
+        # Fall back to older path (FinRL <= 0.3.5)
+        from finrl.agents.drl_agent import DRLAgent
 from finrl.config import INDICATORS
 
 # Setup logging
