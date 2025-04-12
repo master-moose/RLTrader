@@ -203,6 +203,65 @@ StockTradingEnv = BaseStockTradingEnv
 CryptocurrencyTradingEnv = StockTradingEnv
 logger.info("Using StockTradingEnv as CryptocurrencyTradingEnv")
 
+# Add a custom patched version of StockTradingEnv that fixes common issues
+class PatchedStockTradingEnv(BaseStockTradingEnv):
+    """
+    A patched version of the StockTradingEnv that fixes common issues with the FinRL implementation,
+    specifically the 'values' attribute error on numpy scalars.
+    """
+    
+    def __init__(self, df=None, state_space=16, stock_dim=1, action_space=3, **kwargs):
+        """Initialize with enhanced error handling."""
+        super().__init__(df, state_space, stock_dim, action_space, **kwargs)
+        logger.info("Using PatchedStockTradingEnv to prevent numpy.float64 attribute errors")
+    
+    def _initiate_state(self):
+        """
+        Initialize state with protection against the 'values' attribute error.
+        This is a replacement for the problematic method in FinRL's implementation.
+        """
+        # Start with basic state (cash + owned stocks)
+        state = [self.initial_amount] + self.num_stock_shares
+        
+        # Add current price data safely
+        if self.df is not None and self.day < len(self.df):
+            # Get current day data
+            data = self.df.iloc[self.day]
+            
+            # Add price for each stock, avoiding the 'values' attribute issue
+            for i in range(self.stock_dim):
+                # For multiple stocks, use column index, for single stock use 'close'
+                if self.stock_dim > 1 and i < len(data):
+                    state.append(float(data.iloc[i]['close']) if hasattr(data, 'iloc') else float(data['close']))
+                else:
+                    state.append(float(data['close']) if 'close' in data else 0.0)
+            
+            # Add technical indicators
+            for indicator in self.tech_indicator_list:
+                if indicator in data:
+                    # Safely extract indicator value
+                    value = data[indicator]
+                    if hasattr(value, 'values') and len(value.values) > 0:
+                        state.append(float(value.values[0]))
+                    elif isinstance(value, (float, int, np.number)):
+                        state.append(float(value))
+                    else:
+                        # Default value if we can't extract safely
+                        state.append(0.0)
+                else:
+                    state.append(0.0)
+        
+        # Ensure the state has the correct dimension
+        state_np = np.array(state)
+        if len(state_np) > self.state_space:
+            state_np = state_np[:self.state_space]
+        elif len(state_np) < self.state_space:
+            # Pad with zeros
+            padding = np.zeros(self.state_space - len(state_np))
+            state_np = np.concatenate([state_np, padding])
+        
+        return state_np.astype(np.float32)
+
 # Original imports
 from crypto_trading_model.trading_environment import TradingEnvironment
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
@@ -523,10 +582,8 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         # Clip observation values to reasonable range
         obs = np.clip(obs, -10.0, 10.0)
         
-        if len(result) == 5:  # gymnasium API
-            return obs, reward, terminated, truncated, info
-        else:  # gym API
-            return obs, reward, done, info
+        # Always return in gymnasium format (5-tuple)
+        return obs, reward, terminated, truncated, info
     
     def seed(self, seed=None):
         """Set the random seed."""
@@ -757,7 +814,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     Returns:
         Vectorized environment
     """
-    # Extract arguments
+    logger.info(f"Creating parallel environments with {num_workers} workers")
+    
+    # Environment parameters
     num_envs_per_worker = getattr(args, 'num_envs_per_worker', 4)
     use_subproc = getattr(args, 'use_subproc_vecenv', False)
     
@@ -769,37 +828,11 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     logger.info(f"Creating vectorized environment with {num_workers} workers and {num_envs_per_worker} envs per worker")
     logger.info(f"Using {'SubprocVecEnv' if use_subproc else 'DummyVecEnv'} for environment vectorization")
     
-    # First, try to import the environment class
-    try:
-        StockTradingEnvClass = None
-        env_import_paths = [
-            # Try cryptocurrency specific environments first
-            'finrl.meta.env_cryptocurrency_trading.env_crypto.CryptocurrencyTradingEnv',
-            'finrl.applications.env.crypto.CryptocurrencyTradingEnv',
-            # Then fall back to stock trading environments
-            'finrl.meta.env_stock_trading.env_stocktrading.StockTradingEnv',
-            'finrl.env.env_stocktrading.StockTradingEnv'
-        ]
-        
-        for import_path in env_import_paths:
-            try:
-                module_path, class_name = import_path.rsplit('.', 1)
-                module = __import__(module_path, fromlist=[class_name])
-                StockTradingEnvClass = getattr(module, class_name)
-                logger.info(f"Successfully imported {class_name} from {module_path}")
-                break
-            except (ImportError, AttributeError) as e:
-                logger.debug(f"Could not import {import_path}: {e}")
-                
-        if StockTradingEnvClass is None:
-            logger.warning("Could not import any trading environment from FinRL, using base implementation")
-            StockTradingEnvClass = BaseStockTradingEnv
-    except Exception as e:
-        logger.error(f"Error importing environment classes: {e}")
-        logger.error(traceback.format_exc())
-        StockTradingEnvClass = BaseStockTradingEnv
+    # Use our patched environment instead of importing from FinRL
+    logger.info("Using PatchedStockTradingEnv to prevent numpy.float64 attribute errors")
+    StockTradingEnvClass = PatchedStockTradingEnv
     
-    # Define potential technical indicators to look for in the dataframe
+    # Define potential technical indicators
     potential_indicators = [
         'macd', 'rsi_14', 'rsi', 
         'stoch_k', 'stoch_d',
@@ -809,7 +842,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         'volatility_30', 'volume_change', 'volume_norm'
     ]
     
-    # Find indicators that actually exist in the dataframe
+    # Check which indicators are available in the dataframe
     tech_indicator_list = []
     for indicator in potential_indicators:
         if indicator in df.columns:
@@ -831,10 +864,11 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     stock_dim = 1  # Assuming single-asset trading for simplicity
     num_stocks = len(df['tic'].unique()) if 'tic' in df.columns else 1
     
-    # Determine action space size
-    include_cash = getattr(args, 'include_cash', False)
-    if include_cash:
-        action_space = num_stocks + 1  # +1 for cash
+    # Action space is either:
+    # 1. Discrete(3) for sell/hold/buy
+    # 2. Discrete(2*stock_dim+1) for more complex actions
+    if hasattr(args, 'action_space') and args.action_space is not None:
+        action_space = args.action_space
     else:
         action_space = 3  # Sell, hold, buy
     
@@ -2043,8 +2077,21 @@ def wrap_env_with_monitor(env):
         env = StockTradingEnvWrapper(env)
         logger.info("Wrapped environment with StockTradingEnvWrapper for gymnasium compatibility")
     
-    # Wrap environment with Monitor
-    return Monitor(env, monitor_dir)
+    # Custom monitor wrapper that ensures compatibility with both gym and gymnasium APIs
+    class CompatibleMonitor(Monitor):
+        def step(self, action):
+            """Step the environment with compatibility for both APIs."""
+            result = super().step(action)
+            
+            # If we get a 4-tuple result (old gym API), convert to 5-tuple (gymnasium API)
+            if isinstance(result, tuple) and len(result) == 4:
+                obs, reward, done, info = result
+                return obs, reward, done, False, info  # Add truncated=False
+            
+            return result
+    
+    # Use our compatible monitor wrapper
+    return CompatibleMonitor(env, monitor_dir)
 
 def main():
     """Main entry point for the script."""
