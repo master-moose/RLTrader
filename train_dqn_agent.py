@@ -598,8 +598,13 @@ class CustomDummyVecEnv(gymnasium.vector.VectorEnv):
         # by the library's wrapper functions
         self.metadata = getattr(self.envs[0], 'metadata', {'render_modes': []})
         
-        # Needed for Gymnasium compatibility
-        super().__init__(self.observation_space, self.action_space, self.num_envs)
+        # Initialize the parent class correctly - VectorEnv requires these attributes to be set first
+        gymnasium.vector.VectorEnv.__init__(
+            self,
+            observation_space=self.observation_space,
+            action_space=self.action_space,
+            num_envs=self.num_envs
+        )
         
         # Buffer to store observations
         obs_shape = self.observation_space.shape
