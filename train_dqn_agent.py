@@ -96,6 +96,9 @@ class BaseStockTradingEnv(gym.Env):
             action_space: Size of the action space
             **kwargs: Additional arguments for compatibility with FinRL
         """
+        # Import spaces directly from gym
+        from gym import spaces
+        
         self.df = df
         self.state_space = state_space
         self.stock_dim = stock_dim
@@ -133,7 +136,7 @@ class BaseStockTradingEnv(gym.Env):
         self.state = np.zeros(state_space)
         self.terminal = False
         self.day = 0
-        self.data = self.df.iloc[self.day]
+        self.data = self.df.iloc[self.day] if self.df is not None and len(self.df) > 0 else None
         
     def reset(self):
         """Reset the environment."""
@@ -788,11 +791,39 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     # Initialize stock shares to 0
     num_stock_shares = [0] * num_stocks
     
-    # Create list of technical indicators
-    tech_indicator_list = ['rsi', 'macd', 'macd_signal', 'macd_hist', 
-                          'bb_upper', 'bb_middle', 'bb_lower', 'atr',
-                          'sma_7', 'sma_25', 'ema_9', 'ema_21',
-                          'stoch_k', 'stoch_d']
+    # Create list of technical indicators - match existing column names
+    # Need to make sure these columns actually exist in the dataframe
+    column_set = set(df.columns)
+    
+    # First check which columns actually exist in the dataframe
+    tech_indicator_list = []
+    potential_indicators = [
+        'rsi_14', 'macd', 'macd_signal', 'macd_hist', 
+        'bb_upper', 'bb_middle', 'bb_lower', 'atr',
+        'sma_7', 'sma_25', 'ema_9', 'ema_21',
+        'stoch_k', 'stoch_d',
+        'cci_30', 'dx_30',
+        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
+        'close_5_ema', 'close_10_ema', 'close_20_ema', 'close_60_ema', 'close_120_ema',
+        'volatility_30', 'volume_change', 'volume_norm'
+    ]
+    
+    for indicator in potential_indicators:
+        if indicator in column_set:
+            tech_indicator_list.append(indicator)
+    
+    logger.info(f"Using technical indicators found in dataframe: {tech_indicator_list}")
+    
+    # If no indicators were found, add basic ones
+    if not tech_indicator_list:
+        logger.warning("No valid technical indicators found in dataframe. Adding basic indicators.")
+        df = ensure_technical_indicators(df, potential_indicators)
+        # Check again after ensuring indicators
+        for indicator in potential_indicators:
+            if indicator in df.columns:
+                tech_indicator_list.append(indicator)
+        
+        logger.info(f"Added indicators and found: {tech_indicator_list}")
     
     # Calculate state space dimension
     # For StockTradingEnv, the observation has:
@@ -827,6 +858,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     
     # Create a test environment to debug the observation space
     try:
+        logger.info(f"Creating test environment with indicators: {tech_indicator_list}")
         test_env = StockTradingEnvClass(
             df=df,
             stock_dim=stock_dim,
