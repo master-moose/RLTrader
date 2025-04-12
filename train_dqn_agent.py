@@ -101,6 +101,31 @@ from crypto_trading_model.utils import set_seeds
 GOOD_TRADE_THRESHOLD = 0.001  # 0.1% profit threshold for a good trade
 BAD_TRADE_THRESHOLD = -0.001  # -0.1% loss threshold for a bad trade
 
+# Add this new class after the import statements but before the main functions
+class DimensionAdjustingVecEnv(DummyVecEnv):
+    """
+    A VecEnv that adjusts observation dimensions to match the observation space.
+    Specifically designed to handle the case where environments return
+    observations with more dimensions than specified in the observation space.
+    """
+    def _save_obs(self, env_idx, obs):
+        """
+        Override the parent _save_obs method to adjust observation dimensions
+        """
+        for key in self.keys:
+            if key is None:
+                # Special handling for non-dict observations
+                if isinstance(obs, np.ndarray) and len(obs) > self.buf_obs[key].shape[1]:
+                    # If observation has more dimensions than expected, truncate it
+                    logger.warning(f"Truncating observation from shape {obs.shape} to match {self.buf_obs[key][env_idx].shape}")
+                    self.buf_obs[key][env_idx] = obs[:self.buf_obs[key].shape[1]]
+                else:
+                    self.buf_obs[key][env_idx] = obs
+            else:
+                # Handle dict observations if needed
+                if isinstance(obs, dict):
+                    self.buf_obs[key][env_idx] = obs[key]
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -468,8 +493,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         # Add the environment creation function to the list
         env_list.append(make_env)
     
-    # Vectorize the environments
-    vec_env = DummyVecEnv(env_list)
+    # Vectorize the environments using our custom DimensionAdjustingVecEnv
+    vec_env = DimensionAdjustingVecEnv(env_list)
+    logger.info("Using DimensionAdjustingVecEnv to handle observation shape mismatches")
     return vec_env
 
 def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
@@ -617,7 +643,9 @@ def train_with_finrl(args, market_data, device):
         # Create single environment
         logger.info("Creating single environment for training")
         env = create_finrl_env(df, args)
-        env = DummyVecEnv([lambda: env])
+        # Wrap in our custom vec env instead of standard DummyVecEnv
+        env = DimensionAdjustingVecEnv([lambda: env])
+        logger.info("Using DimensionAdjustingVecEnv to handle observation shape mismatches")
     
     # Set random seeds for reproducibility
     if args.seed is not None:
