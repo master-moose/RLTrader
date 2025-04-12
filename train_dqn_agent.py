@@ -1617,7 +1617,7 @@ def load_and_preprocess_market_data(args):
     market_data = {}
     for timeframe in ['1h', '4h', '1d']:
         # Create a DataFrame with basic OHLCV data
-        data_length = 1000  # Number of candlesticks
+        data_length = 50000  # Number of candlesticks
         
         df = pd.DataFrame({
             'open': np.random.normal(1000, 100, data_length),
