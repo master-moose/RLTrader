@@ -210,9 +210,10 @@ class StockTradingEnvWrapper(gym.Wrapper):
         """
         super().__init__(env)
         
-        # Define expected observation space
+        # Define expected observation space with FINITE bounds
+        # This is critical for SB3 compatibility which doesn't support infinite bounds
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(state_space,), dtype=np.float32
+            low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
         )
         
         # Add attributes needed by Stable-Baselines3
@@ -236,6 +237,8 @@ class StockTradingEnvWrapper(gym.Wrapper):
                 obs_padded[:len(obs)] = obs
                 obs = obs_padded
         
+        # Clip observation to be within bounds for SB3 compatibility
+        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
         return obs
     
     def step(self, action):
@@ -252,6 +255,8 @@ class StockTradingEnvWrapper(gym.Wrapper):
                 obs_padded[:len(obs)] = obs
                 obs = obs_padded
         
+        # Clip observation to be within bounds for SB3 compatibility
+        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
         return obs, reward, done, info
     
     def seed(self, seed=None):
@@ -354,25 +359,11 @@ def create_finrl_env(df, args):
         # Wrap the environment to ensure consistent observation shape
         wrapped_env = StockTradingEnvWrapper(env, state_space=state_space)
         
-        # Add additional Stable-Baselines3 compatibility
-        if not hasattr(wrapped_env, 'get_original_obs'):
-            wrapped_env.get_original_obs = lambda: wrapped_env.reset()
+        # Wrap with SB3's Monitor for proper tracking, but disable file writing
+        from stable_baselines3.common.monitor import Monitor
+        monitored_env = Monitor(wrapped_env, None, allow_early_resets=True)
         
-        # Add any missing methods needed by SB3
-        if not hasattr(wrapped_env, 'get_attr'):
-            wrapped_env.get_attr = lambda attr_name, indices=None: getattr(wrapped_env, attr_name)
-        
-        if not hasattr(wrapped_env, 'env_is_wrapped'):
-            wrapped_env.env_is_wrapped = lambda wrapper_class, indices=None: isinstance(wrapped_env, wrapper_class)
-            
-        if not hasattr(wrapped_env, 'env_method'):
-            wrapped_env.env_method = lambda method_name, *args, indices=None, **kwargs: getattr(wrapped_env, method_name)(*args, **kwargs)
-        
-        # Add unwrapped for SB3 to access the underlying env
-        if not hasattr(wrapped_env, 'unwrapped'):
-            wrapped_env.unwrapped = env
-        
-        return wrapped_env
+        return monitored_env
         
     except Exception as e:
         logger.error(f"Error creating environment: {e}")
@@ -1009,9 +1000,6 @@ def train_with_finrl(args, market_data, device):
     # Create environment
     env = create_finrl_env(df, args)
     
-    # Don't use Monitor wrapper as it's not compatible with our gym-based environments
-    logger.info("Using direct environment without Monitor wrapper for compatibility")
-    
     # Set random seeds for reproducibility
     if args.seed is not None:
         torch.manual_seed(args.seed)
@@ -1050,6 +1038,7 @@ def train_with_finrl(args, market_data, device):
         
         # Try creating SAC model directly from stable_baselines3
         try:
+            # Import directly from stable_baselines3 
             from stable_baselines3 import SAC
             
             # Update model kwargs for SB3 SAC
@@ -1133,24 +1122,6 @@ def train_with_finrl(args, market_data, device):
         except Exception as e:
             logger.error(f"Error using direct SB3 SAC implementation: {e}")
             logger.info("Falling back to FinRL approach")
-            
-    elif args.finrl_model.lower() == 'td3':
-        # For TD3, add policy noise and noise clip
-        model_kwargs['policy_noise'] = getattr(args, 'policy_noise', 0.2)
-        model_kwargs['noise_clip'] = getattr(args, 'noise_clip', 0.5)
-        logger.info("Training with TD3 model")
-    elif args.finrl_model.lower() == 'ddpg':
-        # DDPG doesn't require special parameters
-        logger.info("Training with DDPG model")
-    elif args.finrl_model.lower() == 'ppo':
-        # For PPO, add specific parameters
-        model_kwargs['n_steps'] = getattr(args, 'n_steps', 2048)
-        model_kwargs['gae_lambda'] = getattr(args, 'gae_lambda', 0.95)
-        model_kwargs['clip_range'] = getattr(args, 'clip_range', 0.2)
-        logger.info("Training with PPO model")
-    
-    logger.info(f"Model kwargs: {model_kwargs}")
-    print(model_kwargs)
     
     # Set up FinRL agent with the environment directly - use our custom agent class
     agent = CustomDRLAgent(env=env)
