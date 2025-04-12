@@ -14,11 +14,18 @@ import traceback
 import numpy as np
 import torch
 import gym
+import sys
+from pathlib import Path
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
 )
 from stable_baselines3.common.utils import set_random_seed
-from cryptocurrency_trading_env import CryptocurrencyTradingEnv
+
+# Add project root to path
+project_root = str(Path(__file__).parent)
+sys.path.append(project_root)
+
+from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
 from lstm_dqn_agent import LSTMDQNAgent
 from utils.data_utils import prepare_data, load_data
 import pandas as pd
@@ -28,21 +35,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
-import sys
-from pathlib import Path
-
-# Add project root to path
-project_root = str(Path(__file__).parent)
-sys.path.append(project_root)
-
-from crypto_trading_model.models.lstm import LSTMModel
-from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
-from crypto_trading_model.data.data_loader import load_crypto_data
-from crypto_trading_model.utils.logging import setup_logging
-from crypto_trading_model.training.train_dqn_agent import (
-    prepare_crypto_data_for_finrl,
-    train_with_finrl
-)
+import h5py
+from concurrent.futures import ThreadPoolExecutor
+import psutil
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 # Import FinRL components if available
 try:
