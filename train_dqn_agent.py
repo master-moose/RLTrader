@@ -1178,6 +1178,9 @@ def train_with_finrl(
     initial_balance = 1000000.0
     include_cash = False
     
+    # Get state dimension from args or use default
+    state_dim = getattr(args, 'state_dim', 16)  # Default to 16 if not specified
+    
     # Generate synthetic data or format the real data properly
     try:
         logger.info("Creating synthetic data with multi-index format for FinRL...")
@@ -1245,7 +1248,7 @@ def train_with_finrl(
             data_source=data_source,
             initial_balance=initial_balance,
             lookback=lookback,
-            state_space=args.state_dim,
+            state_space=state_dim,  # Use state_dim instead of args.state_dim
             include_cash=include_cash,
             df=df  # Pass the formatted DataFrame
         )
@@ -1259,14 +1262,18 @@ def train_with_finrl(
     
     vec_env = DummyVecEnv(envs)
     
+    # Set up model parameters
+    # Default hidden dimension for network architecture
+    hidden_dim = getattr(args, 'hidden_dim', 256)
+    
     # Set up the model parameters
     if args.finrl_model.lower() == "sac":
         model_class = SAC
         policy_kwargs = dict(
             activation_fn=nn.ReLU,
             net_arch=dict(
-                pi=[args.hidden_dim, args.hidden_dim], 
-                qf=[args.hidden_dim, args.hidden_dim]
+                pi=[hidden_dim, hidden_dim], 
+                qf=[hidden_dim, hidden_dim]
             )
         )
     elif args.finrl_model.lower() == "td3":
@@ -1274,8 +1281,8 @@ def train_with_finrl(
         policy_kwargs = dict(
             activation_fn=nn.ReLU,
             net_arch=dict(
-                pi=[args.hidden_dim, args.hidden_dim], 
-                qf=[args.hidden_dim, args.hidden_dim]
+                pi=[hidden_dim, hidden_dim], 
+                qf=[hidden_dim, hidden_dim]
             )
         )
     elif args.finrl_model.lower() == "ddpg":
@@ -1283,8 +1290,8 @@ def train_with_finrl(
         policy_kwargs = dict(
             activation_fn=nn.ReLU,
             net_arch=dict(
-                pi=[args.hidden_dim, args.hidden_dim], 
-                qf=[args.hidden_dim, args.hidden_dim]
+                pi=[hidden_dim, hidden_dim], 
+                qf=[hidden_dim, hidden_dim]
             )
         )
     elif args.finrl_model.lower() == "ppo":
@@ -1292,8 +1299,8 @@ def train_with_finrl(
         policy_kwargs = dict(
             activation_fn=nn.Tanh,
             net_arch=[dict(
-                pi=[args.hidden_dim, args.hidden_dim],
-                vf=[args.hidden_dim, args.hidden_dim]
+                pi=[hidden_dim, hidden_dim],
+                vf=[hidden_dim, hidden_dim]
             )]
         )
     else:
@@ -1373,7 +1380,7 @@ def train_with_finrl(
     )
     
     # Train the model with callback
-    total_timesteps = args.timesteps
+    total_timesteps = getattr(args, 'timesteps', 50000)  # Default to 50000 if not specified
     logger.info(f"Training model for {total_timesteps} timesteps")
     model.learn(
         total_timesteps=total_timesteps,
@@ -1381,7 +1388,8 @@ def train_with_finrl(
     )
     
     # Save the model
-    if args.save_model:
+    save_model = getattr(args, 'save_model', True)  # Default to True if not specified
+    if save_model:
         model_path = f"./models/finrl_{args.finrl_model}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         model.save(model_path)
         logger.info(f"Saved model to {model_path}")
