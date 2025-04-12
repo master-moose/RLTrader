@@ -377,18 +377,27 @@ def create_finrl_env(df, args):
     
     logger.info(f"Creating environment with state space dimension: {state_space_dim}, num_stocks: {num_stocks}")
     
+    # For SAC, the action space needs to be compatible with the way the environment handles indices
+    # In the StockTradingEnv, it accesses actions[index] where index is the stock index
+    action_dim = num_stocks
+    
+    # In the StockTradingEnv, transaction costs are accessed as self.buy_cost_pct[index]
+    # The indexing must match how the environment accesses them when buying/selling
+    # Use larger arrays to prevent index out of bounds
+    cost_arrays_size = max(num_stocks, 10)  # Ensure arrays are big enough
+    
     # Create environment configuration
     env_config = {
         'df': df,
         'stock_dim': num_stocks,
         'hmax': 100,  # Maximum number of shares to trade
         'initial_amount': 1000000,  # Initial capital
-        'buy_cost_pct': [0.001] * num_stocks,  # 0.1% transaction cost for buying (per stock)
-        'sell_cost_pct': [0.001] * num_stocks,  # 0.1% transaction cost for selling (per stock)
+        'buy_cost_pct': [0.001] * cost_arrays_size,  # 0.1% transaction cost for buying (per stock)
+        'sell_cost_pct': [0.001] * cost_arrays_size,  # 0.1% transaction cost for selling (per stock)
         'reward_scaling': 1e-4,  # Scale rewards to avoid large numbers
         'num_stock_shares': num_stock_shares,
         'state_space': state_space_dim * num_stocks + 1,  # Total state space: indicators per stock + cash
-        'action_space': 3,  # buy, hold, sell
+        'action_space': action_dim,  # action space dimensionality matches the number of stocks
         'tech_indicator_list': tech_indicator_list,
         'print_verbosity': 1
     }
