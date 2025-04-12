@@ -623,14 +623,16 @@ def train_with_finrl(args, market_data, device):
                 'learning_rate': args.learning_rate,
                 'device': device,
                 'action_noise': 'normal' if action_noise else None,
-                'net_arch': {
-                    'pi': net_arch,  # Policy network
-                    'qf': net_arch   # Q-function network
+                'policy_kwargs': {
+                    'net_arch': {
+                        'pi': net_arch,  # Policy network
+                        'qf': net_arch   # Q-function network
+                    }
                 }
             }
         else:
             # For other models, simpler net_arch specification
-            model_params['net_arch'] = net_arch
+            model_params['policy_kwargs'] = {'net_arch': net_arch}
 
     # Create and train the model
     try:
