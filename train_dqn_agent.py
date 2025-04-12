@@ -90,44 +90,59 @@ class BaseStockTradingEnv(gym.Env):
         Initialize the environment.
         
         Args:
-            df: DataFrame with stock data
-            state_space: Dimension of the state space
-            stock_dim: Number of stocks
-            action_space: Dimension of the action space
-            **kwargs: Additional arguments
+            df: DataFrame with market data
+            state_space: Size of the state space
+            stock_dim: Number of assets
+            action_space: Size of the action space
+            **kwargs: Additional arguments for compatibility with FinRL
         """
         self.df = df
         self.state_space = state_space
         self.stock_dim = stock_dim
-        self.action_dim = action_space
-        self.current_step = 0
-        self.max_steps = len(df) if df is not None else 1000
         
-        # Store any additional kwargs
-        for key, value in kwargs.items():
-            setattr(self, key, value)
+        # Store other optional arguments needed for compatibility
+        self.initial_amount = kwargs.get('initial_amount', 1000000.0)
+        self.hmax = kwargs.get('hmax', 100)
+        self.print_verbosity = kwargs.get('print_verbosity', 0)
+        self.num_stock_shares = kwargs.get('num_stock_shares', [0] * stock_dim)
+        self.tech_indicator_list = kwargs.get('tech_indicator_list', [])
         
-        # Set up observation and action spaces
-        self.observation_space = gym.spaces.Box(
+        # Handle transaction costs - convert to lists if passed as floats
+        buy_cost_pct = kwargs.get('buy_cost_pct', 0.001)
+        sell_cost_pct = kwargs.get('sell_cost_pct', 0.001)
+        
+        if isinstance(buy_cost_pct, (int, float)):
+            self.buy_cost_pct = [buy_cost_pct] * stock_dim
+        else:
+            self.buy_cost_pct = buy_cost_pct
+            
+        if isinstance(sell_cost_pct, (int, float)):
+            self.sell_cost_pct = [sell_cost_pct] * stock_dim
+        else:
+            self.sell_cost_pct = sell_cost_pct
+            
+        self.reward_scaling = kwargs.get('reward_scaling', 1e-4)
+        
+        # Define spaces
+        self.action_space = spaces.Discrete(action_space)
+        self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(state_space,), dtype=np.float32
-        )
-        
-        # Action space: -1 (sell), 0 (hold), 1 (buy) for each stock
-        self.action_space = gym.spaces.Box(
-            low=-1, high=1, shape=(stock_dim,), dtype=np.float32
         )
         
         # Initialize state
         self.state = np.zeros(state_space)
+        self.terminal = False
+        self.day = 0
+        self.data = self.df.iloc[self.day]
         
     def reset(self):
-        """Reset the environment to initial state."""
-        self.current_step = 0
+        """Reset the environment."""
         self.state = np.zeros(self.state_space)
-        
-        # Generate a simple observation with random values
-        obs = np.random.normal(0, 1, size=self.state_space)
-        return obs
+        self.terminal = False
+        self.day = 0
+        if self.df is not None:
+            self.data = self.df.iloc[self.day]
+        return self.state
         
     def step(self, action):
         """
@@ -137,31 +152,31 @@ class BaseStockTradingEnv(gym.Env):
             action: Action to take
             
         Returns:
-            Tuple of (next_state, reward, done, info)
+            tuple of (observation, reward, done, info)
         """
-        self.current_step += 1
+        # Simple dummy implementation
+        self.day += 1
+        done = self.day >= len(self.df) if self.df is not None else False
         
-        # Simple reward: random for demonstration
-        reward = np.random.normal(0, 0.1)
+        # Simple reward
+        reward = 0
         
-        # Update state: random for demonstration
-        self.state = np.random.normal(0, 1, size=self.state_space)
+        # Update state (simple implementation)
+        if self.df is not None and self.day < len(self.df):
+            self.data = self.df.iloc[self.day]
+            # In a real implementation, we would update the state based on the action and new data
         
-        # Check if episode is done
-        done = self.current_step >= self.max_steps
+        # For now, just return zeros as the state
+        return self.state, reward, done, {"terminal_observation": self.state if done else None}
         
-        # Info dictionary
-        info = {'current_step': self.current_step}
-        
-        return self.state, reward, done, info
-    
     def render(self, mode='human'):
         """Render the environment."""
         pass
-    
+        
     def seed(self, seed=None):
-        """Set random seed."""
-        np.random.seed(seed)
+        """Set the random seed."""
+        if seed is not None:
+            np.random.seed(seed)
         return [seed]
 
 # Use FinRL's StockTradingEnv if available, otherwise use placeholder
@@ -279,39 +294,49 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
     A wrapper for StockTradingEnv that ensures consistent observation shapes
     and is compatible with Gymnasium API used by Stable-Baselines3.
     """
+    
     def __init__(self, env, state_space=16):
         """
-        Initialize the wrapper with the given environment.
+        Initialize the wrapper.
         
         Args:
-            env: The environment to wrap
-            state_space: The expected dimension of the observation space
+            env: Environment to wrap
+            state_space: Expected state space dimension
         """
-        # Convert to Gymnasium environment first if it's not already
-        if not isinstance(env, gymnasium.Env):
-            # Create a proper gymnasium-compatible observation space
-            self.observation_space = gymnasium.spaces.Box(
-                low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
-            )
-            self.action_space = env.action_space
-            if isinstance(self.action_space, gym.spaces.Box):
-                # Convert gym Box to gymnasium Box
-                self.action_space = gymnasium.spaces.Box(
-                    low=env.action_space.low,
-                    high=env.action_space.high,
-                    shape=env.action_space.shape,
-                    dtype=env.action_space.dtype
+        # Check if env is a gym environment rather than a gymnasium environment
+        if hasattr(env, 'observation_space') and not isinstance(env.observation_space, gymnasium.spaces.Space):
+            # Convert regular gym to gymnasium wrapper
+            logger.info("Converting gym environment to gymnasium compatible wrapper")
+            
+            # Create observation and action spaces
+            if hasattr(env, 'observation_space'):
+                obs_space = convert_gym_space(env.observation_space)
+            else:
+                # Default observation space if not available
+                obs_space = gymnasium.spaces.Box(
+                    low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
                 )
-            # We'll initialize the wrapper later
+                
+            if hasattr(env, 'action_space'):
+                act_space = convert_gym_space(env.action_space)
+            else:
+                # Default action space if not available
+                act_space = gymnasium.spaces.Discrete(3)  # Sell, Hold, Buy
+            
+            # We are wrapping the underlying gym env manually
             self.env = env
-            # Add num_envs attribute required by SB3
+            self.observation_space = obs_space
+            self.action_space = act_space
+            self.reward_range = env.reward_range if hasattr(env, 'reward_range') else (-float('inf'), float('inf'))
+            self.metadata = env.metadata if hasattr(env, 'metadata') else {'render_modes': []}
             self.num_envs = 1
             
             logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
         else:
             # If already a gymnasium environment, just wrap it directly
             super().__init__(env)
-            # Override the observation space to have finite bounds
+            
+            # Ensure observation space is properly defined
             self.observation_space = gymnasium.spaces.Box(
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
@@ -319,19 +344,28 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # Store the actual observation dimension for comparison
         self.actual_state_space = None
+        # Track step count for logging
+        self.step_counter = 0
     
     def reset(self, **kwargs):
         """Reset the environment, with compatibility for both gym and gymnasium APIs."""
         try:
             # Try gymnasium API first (for newer environments)
             obs, info = self.env.reset(**kwargs)
-            reset_info = info
+            # Older reset API
+            if isinstance(obs, tuple) and len(obs) == 2:
+                obs, info = obs[0], obs[1]
         except (ValueError, TypeError):
-            # Fall back to old gym API
-            obs = self.env.reset()
-            reset_info = {}
+            try:
+                # Fall back to gym API
+                obs = self.env.reset(**kwargs)
+                info = {}
+            except (ValueError, TypeError):
+                # Last resort - try without kwargs
+                obs = self.env.reset()
+                info = {}
         
-        # Log the observation content for debugging
+        # Check and update observation space if needed
         if isinstance(obs, np.ndarray):
             if self.actual_state_space is None:
                 self.actual_state_space = len(obs)
@@ -344,21 +378,29 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                         low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
                     )
             
-            logger.info(f"Reset observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
+            logger.info(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
             
             # No need to reshape the observation, just clip it to the bounds
             obs = np.clip(obs, -10.0, 10.0)
-        
-        return obs, reset_info
+            
+        else:
+            logger.warning(f"Reset returned non-numpy observation of type {type(obs)}")
+            
+        return obs, info
     
     def step(self, action):
-        """Take a step, with compatibility for both gym and gymnasium APIs."""
+        """Step the environment, with compatibility for both gym and gymnasium APIs."""
         try:
-            # Try with gymnasium API (5 values)
-            obs, reward, terminated, truncated, info = self.env.step(action)
-            done = terminated or truncated
-        except ValueError:
-            # Fall back to old gym API (4 values)
+            # Try gymnasium API first
+            result = self.env.step(action)
+            if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
+                obs, reward, terminated, truncated, info = result
+                done = terminated or truncated
+            else:  # gym API (obs, reward, done, info)
+                obs, reward, done, info = result
+                terminated, truncated = done, False
+        except (ValueError, TypeError):
+            # Fall back to gym API
             obs, reward, done, info = self.env.step(action)
             terminated, truncated = done, False
         
@@ -371,17 +413,51 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         # Just clip the observation to the bounds without reshaping
         if isinstance(obs, np.ndarray):
             obs = np.clip(obs, -10.0, 10.0)
+            
+            # Update observation space if needed
+            if self.actual_state_space is None or self.actual_state_space != len(obs):
+                self.actual_state_space = len(obs)
+                logger.info(f"Step returned observation with different dimension: {self.actual_state_space}")
+                self.observation_space = gymnasium.spaces.Box(
+                    low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
+                )
         
-        # Return in gymnasium format
         return obs, reward, terminated, truncated, info
     
     def seed(self, seed=None):
-        """Seed the environment if the underlying env supports it."""
+        """Set random seed."""
         if hasattr(self.env, 'seed'):
             return self.env.seed(seed)
-        # For gymnasium API, implement a basic seed method
-        np.random.seed(seed)
         return [seed]
+
+def convert_gym_space(space):
+    """
+    Convert a gym space to a gymnasium space.
+    
+    Args:
+        space: gym space to convert
+        
+    Returns:
+        Equivalent gymnasium space
+    """
+    import gym
+    
+    if isinstance(space, gym.spaces.Discrete):
+        return gymnasium.spaces.Discrete(space.n)
+    elif isinstance(space, gym.spaces.Box):
+        return gymnasium.spaces.Box(
+            low=space.low, high=space.high, 
+            shape=space.shape, dtype=space.dtype
+        )
+    elif isinstance(space, gym.spaces.MultiDiscrete):
+        return gymnasium.spaces.MultiDiscrete(space.nvec)
+    elif isinstance(space, gym.spaces.MultiBinary):
+        return gymnasium.spaces.MultiBinary(space.n)
+    else:
+        logger.warning(f"Unsupported space type: {type(space)}, using default Box space")
+        return gymnasium.spaces.Box(
+            low=-10.0, high=10.0, shape=(16,), dtype=np.float32
+        )
 
 # Now modify the create_finrl_env function to use this wrapper
 def create_finrl_env(
@@ -663,16 +739,17 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     Create multiple FinRL environments for parallel training.
     
     Args:
-        df: DataFrame with FinRL formatted data
-        args: Command-line arguments
-        num_workers: Number of parallel environments to create
+        df: DataFrame with market data
+        args: Command line arguments
+        num_workers: Number of parallel environments
         
     Returns:
-        A vectorized environment with multiple environment instances
+        VectorEnv with multiple environments
     """
-    # Try to import the most appropriate environment class
+    logger.info(f"Creating vectorized environment with {num_workers} workers")
+    
+    # First, try to import the environment class
     try:
-        # Try different import paths for the environment
         StockTradingEnvClass = None
         env_import_paths = [
             # Try cryptocurrency specific environments first
@@ -680,7 +757,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             'finrl.applications.env.crypto.CryptocurrencyTradingEnv',
             # Then fall back to stock trading environments
             'finrl.meta.env_stock_trading.env_stocktrading.StockTradingEnv',
-            'finrl.applications.env.stock.StockTradingEnv',
+            'finrl.env.env_stocktrading.StockTradingEnv',
+            'finrl.applications.env.stocktrading.StockTradingEnv'
         ]
         
         for import_path in env_import_paths:
@@ -737,6 +815,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
     hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
     
+    # Create per-asset transaction cost arrays
+    buy_cost_pct_list = [transaction_cost_pct] * stock_dim
+    sell_cost_pct_list = [transaction_cost_pct] * stock_dim
+    
     logger.info(f"Environment config: initial_amount={initial_amount}, "
                 f"transaction_cost_pct={transaction_cost_pct}, "
                 f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}")
@@ -752,8 +834,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             action_space=action_space,
             tech_indicator_list=tech_indicator_list,
             initial_amount=initial_amount,
-            buy_cost_pct=transaction_cost_pct,
-            sell_cost_pct=transaction_cost_pct,
+            buy_cost_pct=buy_cost_pct_list,  # Pass as list
+            sell_cost_pct=sell_cost_pct_list,  # Pass as list
             reward_scaling=reward_scaling,
             print_verbosity=1
         )
@@ -793,8 +875,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     'action_space': action_space,
                     'tech_indicator_list': tech_indicator_list,
                     'initial_amount': initial_amount,
-                    'buy_cost_pct': transaction_cost_pct,
-                    'sell_cost_pct': transaction_cost_pct,
+                    'buy_cost_pct': buy_cost_pct_list,  # Pass as list
+                    'sell_cost_pct': sell_cost_pct_list,  # Pass as list
                     'reward_scaling': reward_scaling,
                     'print_verbosity': 1 if idx == 0 else 0  # Only print verbose output for the first env
                 }
@@ -803,13 +885,17 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 base_env = StockTradingEnvClass(**env_params)
                 
                 # Wrap the environment to ensure consistent observation shape
-                return StockTradingEnvWrapper(base_env, state_space=state_space)
+                wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
+                
+                # Wrap with monitoring wrapper for metrics
+                return wrap_env_with_monitor(wrapped_env)
             except Exception as e:
                 logger.error(f"Error creating environment {idx}: {e}")
                 logger.error(traceback.format_exc())
                 # Provide a fallback environment if creation fails
                 base_env = BaseStockTradingEnv(df, state_space=state_space)
-                return StockTradingEnvWrapper(base_env, state_space=state_space)
+                wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
+                return wrap_env_with_monitor(wrapped_env)
         
         # Add the environment creation function to the list with proper closure handling
         env_fn = lambda idx=i: make_env(idx)
@@ -1154,29 +1240,31 @@ def train_with_finrl(
     lstm_model=None, lstm_processor=None
 ):
     """
-    Train a reinforcement learning model using FinRL.
+    Train a reinforcement learning agent using FinRL framework.
     
     Args:
         args: Command line arguments
         logger: Logger instance
-        start_date: Start date for data
-        end_date: End date for data
-        tickers: List of tickers to trade
+        start_date: Start date for training data
+        end_date: End date for training data
+        tickers: List of ticker symbols
         data_source: Source of data
         num_workers: Number of parallel environments
         use_lstm_predictions: Whether to use LSTM predictions
-        lstm_model: Trained LSTM model
+        lstm_model: LSTM model instance
         lstm_processor: LSTM data processor
         
     Returns:
-        Trained FinRL model
+        Trained model
     """
+    logger.info("Training with FinRL framework")
+    
     try:
         # Import stable-baselines3 and torch.nn
         from stable_baselines3 import PPO, DDPG, TD3, SAC
         import torch.nn as nn
         from stable_baselines3.common.callbacks import BaseCallback
-        import gym
+        import gymnasium
         import numpy as np
         import os
     except ImportError as e:
@@ -1184,7 +1272,7 @@ def train_with_finrl(
         raise
     
     # Extract arguments for training
-    model_name = args.finrl_model.lower()
+    finrl_model = args.finrl_model.lower()
     initial_balance = getattr(args, 'initial_balance', 1000000.0)
     lookback = getattr(args, 'lookback', 10)
     include_cash = getattr(args, 'include_cash', False)
@@ -1198,10 +1286,8 @@ def train_with_finrl(
         
         try:
             import pandas as pd
-            import tables
             
             # Load data from HDF5 file
-            df_dict = {}
             with pd.HDFStore(synthetic_data_path, mode='r') as store:
                 # Get all available timeframes from the HDF5 file
                 timeframes = [key[1:] for key in store.keys()]  # Remove leading '/'
@@ -1209,16 +1295,14 @@ def train_with_finrl(
                 
                 # Load primary timeframe (15m) to use for FinRL
                 if '15m' in timeframes:
-                    df = store['15m']
+                    df = store['/15m']
                     logger.info(f"Loaded 15m data with shape {df.shape}")
                     
                     # Reset index to make date a column if it's in the index
                     if isinstance(df.index, pd.DatetimeIndex):
                         df = df.reset_index()
-                
-                # Fallback to other timeframes if 15m not available
-                elif len(timeframes) > 0:
-                    # Use the first available timeframe
+                elif timeframes:
+                    # If 15m is not available, use the first available timeframe
                     tf = timeframes[0]
                     df = store[f'/{tf}']
                     logger.info(f"15m timeframe not available, using {tf} with shape {df.shape}")
@@ -1229,9 +1313,6 @@ def train_with_finrl(
                 else:
                     raise ValueError("No timeframe data found in the HDF5 file")
                 
-            # Ensure required columns exist
-            required_columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            
             # Check for timestamp column which might be named 'date' or be in the index
             if 'timestamp' not in df.columns:
                 if 'date' in df.columns:
@@ -1282,16 +1363,15 @@ def train_with_finrl(
                 
             # Final sort by day and tic
             if 'day' in df.columns and 'tic' in df.columns:
-                df = df.sort_values(['day', 'tic'])
+                df = df.sort_values(['day', 'tic']).reset_index(drop=True)
                 
             logger.info(f"Processed data shape: {df.shape}")
             logger.info(f"DataFrame columns: {df.columns}")
             logger.info(f"DataFrame index: {df.index.name or 'default'}")
             logger.info(f"Sample of prepared data:\n{df.head(3)}")
         except Exception as e:
-            logger.error(f"Error loading synthetic data: {e}")
+            logger.error(f"Error loading synthetic data: {str(e)}")
             logger.error(traceback.format_exc())
-            logger.warning("Falling back to generating new synthetic data")
             df = None
     else:
         logger.info(f"No existing synthetic data found at {synthetic_data_path}, generating new data...")
@@ -1310,16 +1390,18 @@ def train_with_finrl(
                 output_dir = os.path.join('data', 'synthetic')
                 os.makedirs(output_dir, exist_ok=True)
                 
-                # Generate fewer samples for quick training (can be adjusted)
-                num_samples = 100000  # ~1 year of 15-min data
-                
-                # Generate data with the same format as generate_data.py
+                # Generate data for all timeframes
                 dataset = generate_synthetic_data(
-                    num_samples=num_samples,
-                    output_dir=output_dir
+                    symbols=tickers,
+                    timeframes=['15m', '4h', '1d'],
+                    num_samples=100000,  # More samples for better training
+                    start_date=start_date,
+                    end_date=end_date,
+                    seed=42,
+                    output_path=os.path.join(output_dir, 'synthetic_dataset.h5')
                 )
                 
-                # Use the 15m timeframe data for FinRL
+                # Use the 15m timeframe for trading environment
                 df = dataset['15m'].copy()
                 df.reset_index(inplace=True)  # Convert index to column
                 df.rename(columns={'timestamp': 'date'}, inplace=True)  # Rename to match FinRL
@@ -1345,7 +1427,7 @@ def train_with_finrl(
                 if isinstance(df.index, pd.MultiIndex):
                     df = df.reset_index()
                     
-                # Ensure we have a day column with numeric indices
+                # Add day column with factorized dates
                 if 'day' not in df.columns and 'date' in df.columns:
                     df['day'] = df['date'].factorize()[0]
                     logger.info(f"Added day column with factorized dates: {df['day'].min()} - {df['day'].max()}")
@@ -1362,7 +1444,7 @@ def train_with_finrl(
             raise
     
     # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
-    logger.info(f"Using DummyVecEnv for environment vectorization due to compatibility issues")
+    logger.info("Using DummyVecEnv for environment vectorization due to compatibility issues")
     
     # Define the list of technical indicators needed
     tech_indicators = [
@@ -1372,46 +1454,20 @@ def train_with_finrl(
         'volatility_30', 'volume_change', 'volume_norm'
     ]
     
-    # Ensure all required technical indicators are present in the dataframe
+    # Make sure all required technical indicators are in the DataFrame
     logger.info("Ensuring all required technical indicators are available...")
     df = ensure_technical_indicators(df, tech_indicators)
     
-    # Create the environment functions for each worker
-    def make_env():
-        try:
-            # Use proper day column for FinRL indexing
-            env = create_finrl_env(
-                start_date=start_date,
-                end_date=end_date,
-                symbols=tickers,
-                data_source=data_source,
-                initial_balance=initial_balance,
-                lookback=lookback,
-                # Use detected state dimensions instead of fixed value
-                state_space=22,  # Update state_space to match what StockTradingEnv actually returns
-                include_cash=include_cash,
-                df=df
-            )
-            
-            # Wrap with monitor for logging metrics
-            env = wrap_env_with_monitor(env)
-            
-            return env
-        except Exception as e:
-            logger.error(f"Error creating environment: {e}")
-            logger.error(traceback.format_exc())
-            raise
-
-    # Create a list of environment creation functions
-    envs = [make_env for _ in range(num_workers)]
-    
-    # Create the vectorized environment using DummyVecEnv
+    # Create parallel environments
     logger.info(f"Creating vectorized environment with {num_workers} workers")
     try:
-        # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
-        vec_env = DummyVecEnv(envs)
+        vec_env = create_parallel_finrl_envs(
+            df=df,
+            args=args,
+            num_workers=num_workers
+        )
         
-        # Check if the observation space needs adjustment
+        # Test the observation shape to ensure it's compatible with the model
         test_obs = vec_env.reset()
         actual_obs_dim = test_obs.shape[1]
         logger.info(f"Vectorized environment observation shape: {test_obs.shape}")
@@ -1422,143 +1478,143 @@ def train_with_finrl(
             # Update state_dim to actual observation dimension
             state_dim = actual_obs_dim
     except Exception as e:
-        logger.error(f"Error creating vectorized environment: {e}")
+        logger.error(f"Error creating or initializing environments: {e}")
         logger.error(traceback.format_exc())
         raise
     
-    # Set up model parameters
-    # Default hidden dimension for network architecture
-    hidden_dim = getattr(args, 'hidden_dim', 256)
+    # Define policy network architecture
+    policy_kwargs = {
+        'activation_fn': nn.ReLU,
+        'net_arch': {
+            'pi': [256, 256],  # Actor network
+            'qf': [256, 256]   # Critic network
+        }
+    }
     
-    # Set up the model parameters
-    if args.finrl_model.lower() == "sac":
-        model_class = SAC
-        policy_kwargs = dict(
-            activation_fn=nn.ReLU,
-            net_arch=dict(
-                pi=[hidden_dim, hidden_dim], 
-                qf=[hidden_dim, hidden_dim]
-            )
-        )
-    elif args.finrl_model.lower() == "td3":
-        model_class = TD3
-        policy_kwargs = dict(
-            activation_fn=nn.ReLU,
-            net_arch=dict(
-                pi=[hidden_dim, hidden_dim], 
-                qf=[hidden_dim, hidden_dim]
-            )
-        )
-    elif args.finrl_model.lower() == "ddpg":
-        model_class = DDPG
-        policy_kwargs = dict(
-            activation_fn=nn.ReLU,
-            net_arch=dict(
-                pi=[hidden_dim, hidden_dim], 
-                qf=[hidden_dim, hidden_dim]
-            )
-        )
-    elif args.finrl_model.lower() == "ppo":
+    # Select model class based on finrl_model parameter
+    if finrl_model == 'ppo':
         model_class = PPO
-        policy_kwargs = dict(
-            activation_fn=nn.Tanh,
-            net_arch=[dict(
-                pi=[hidden_dim, hidden_dim],
-                vf=[hidden_dim, hidden_dim]
-            )]
-        )
-    else:
-        logger.error(f"Unsupported model: {args.finrl_model}")
-        raise ValueError(f"Unsupported model: {args.finrl_model}")
-    
-    # Create a callback for logging
+    elif finrl_model == 'ddpg':
+        model_class = DDPG
+    elif finrl_model == 'td3':
+        model_class = TD3
+    else:  # Default to SAC
+        model_class = SAC
+        
+    # Define callback to log metrics to tensorboard
     class TensorboardCallback(BaseCallback):
         def __init__(self, verbose=0):
-            super(TensorboardCallback, self).__init__(verbose)
+            super().__init__(verbose)
+            # Episode tracking
             self.episode_rewards = []
-            self.current_episode_reward = 0
             self.episode_lengths = []
+            self.current_episode_reward = 0
             self.current_episode_length = 0
+            
+            # Portfolio tracking
             self.portfolio_values = []
-            self.training_iteration = 0
             
         def _on_step(self):
-            # Track reward for current step
-            reward = self.locals['rewards'][0]
-            self.current_episode_reward += reward
-            self.current_episode_length += 1
-            
-            # Record current step reward
-            self.logger.record('train/step_reward', reward)
-            
-            # Record additional info from environment if available
-            if 'infos' in self.locals and len(self.locals['infos']) > 0:
-                info = self.locals['infos'][0]
-                if 'portfolio_value' in info:
-                    self.portfolio_values.append(info['portfolio_value'])
-                    self.logger.record('portfolio/value', info['portfolio_value'])
-                if 'position' in info:
-                    self.logger.record('portfolio/position', info['position'])
-                if 'trade_count' in info:
-                    self.logger.record('trades/count', info['trade_count'])
-                if 'profit_loss' in info:
-                    self.logger.record('trades/profit_loss', info['profit_loss'])
-            
-            # Check if episode is done
-            dones = self.locals.get('dones', [False])
-            if dones[0]:
-                # Record episode statistics
-                self.episode_rewards.append(self.current_episode_reward)
-                self.episode_lengths.append(self.current_episode_length)
+            # Track step reward
+            if hasattr(self, 'locals') and 'rewards' in self.locals:
+                rewards = self.locals['rewards']
+                for i, reward in enumerate(rewards):
+                    # Update the current episode rewards
+                    self.current_episode_reward += reward
+                    self.current_episode_length += 1
+                    
+                    # Log environment info if available
+                    if 'infos' in self.locals:
+                        info = self.locals['infos'][i]
+                        # Log portfolio value
+                        if 'portfolio_value' in info:
+                            self.portfolio_values.append(info['portfolio_value'])
+                            self.logger.record('portfolio/value', info['portfolio_value'])
+                        if 'position' in info:
+                            self.logger.record('portfolio/position', info['position'])
+                        if 'trade_count' in info:
+                            self.logger.record('trades/count', info['trade_count'])
+                        if 'profit_loss' in info:
+                            self.logger.record('trades/profit_loss', info['profit_loss'])
                 
-                # Log episode statistics
-                self.logger.record('episode/reward', self.current_episode_reward)
-                self.logger.record('episode/length', self.current_episode_length)
+                # Check if episode is done
+                dones = self.locals.get('dones', [False])
                 
-                # Calculate and log running statistics
-                if len(self.episode_rewards) > 0:
-                    self.logger.record('episode/mean_reward', np.mean(self.episode_rewards[-100:]))
-                    self.logger.record('episode/mean_length', np.mean(self.episode_lengths[-100:]))
+                for i, done in enumerate(dones):
+                    if done:
+                        # Add the episode statistics
+                        self.episode_rewards.append(self.current_episode_reward)
+                        self.episode_lengths.append(self.current_episode_length)
+                        
+                        # Log episode statistics
+                        self.logger.record('episode/reward', self.current_episode_reward)
+                        self.logger.record('episode/length', self.current_episode_length)
+                        
+                        # Calculate and log running statistics
+                        if len(self.episode_rewards) > 0:
+                            self.logger.record('episode/mean_reward', np.mean(self.episode_rewards[-100:]))
+                            self.logger.record('episode/mean_length', np.mean(self.episode_lengths[-100:]))
+                        
+                        if len(self.portfolio_values) > 0:
+                            self.logger.record('portfolio/final_value', self.portfolio_values[-1])
+                            self.logger.record('portfolio/mean_value', np.mean(self.portfolio_values[-100:]))
+                        
+                        # Reset episode tracking
+                        self.current_episode_reward = 0
+                        self.current_episode_length = 0
                 
-                if len(self.portfolio_values) > 0:
-                    self.logger.record('portfolio/final_value', self.portfolio_values[-1])
-                    self.logger.record('portfolio/mean_value', np.mean(self.portfolio_values[-100:]))
-                
-                # Reset episode tracking
-                self.current_episode_reward = 0
-                self.current_episode_length = 0
-                self.portfolio_values = []
-            
-            # Track learning progress
-            self.training_iteration += 1
             return True
     
     # Create the model
-    logger.info(f"Creating {args.finrl_model.upper()} model with policy_kwargs: {policy_kwargs}")
-    model = model_class(
-        "MlpPolicy", 
-        vec_env, 
-        verbose=1 if args.verbose else 0,
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=f"./tensorboard_logs/{args.finrl_model}/"
-    )
-    
-    # Train the model with callback
-    total_timesteps = getattr(args, 'timesteps', 50000)  # Default to 50000 if not specified
-    logger.info(f"Training model for {total_timesteps} timesteps")
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=TensorboardCallback()
-    )
-    
-    # Save the model
-    save_model = getattr(args, 'save_model', True)  # Default to True if not specified
-    if save_model:
-        model_path = f"./models/finrl_{args.finrl_model}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        model.save(model_path)
-        logger.info(f"Saved model to {model_path}")
-    
-    return model
+    logger.info(f"Creating {finrl_model.upper()} model with policy_kwargs: {policy_kwargs}")
+    try:
+        model = model_class(
+            "MlpPolicy", 
+            vec_env, 
+            learning_rate=getattr(args, 'learning_rate', 0.0003),
+            gamma=getattr(args, 'gamma', 0.99),
+            verbose=1,
+            policy_kwargs=policy_kwargs,
+            tensorboard_log="./tensorboard_logs"
+        )
+        
+        # Train the model with callback
+        total_timesteps = getattr(args, 'timesteps', 50000)  # Default to 50000 if not specified
+        logger.info(f"Training model for {total_timesteps} timesteps")
+        
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=TensorboardCallback(),
+            tb_log_name=finrl_model
+        )
+        
+        # Save the model
+        save_model = getattr(args, 'save_model', True)  # Default to True if not specified
+        if save_model:
+            model_path = f"./models/finrl_{finrl_model}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            model.save(model_path)
+            logger.info(f"Saved model to {model_path}")
+        
+        return model
+    except Exception as e:
+        logger.error(f"Error during model creation or training: {e}")
+        logger.error(traceback.format_exc())
+        
+        # Try to debug the problem
+        if "object is not subscriptable" in str(e):
+            logger.error("This is likely a problem with transaction costs in StockTradingEnv.")
+            logger.error("StockTradingEnv expects transaction costs as lists, not scalar values.")
+            
+            # Check for "index out of range" or AttributeError
+            if "list index out of range" in str(e) or "AttributeError" in str(e):
+                logger.error("This could be related to the observation space or state dimensions.")
+                logger.error("Check that the state dimensions match between wrapper and environment.")
+                
+        elif "space contains" in str(e) or "expected_shape" in str(e):
+            logger.error("This is an observation space mismatch error.")
+            logger.error("The environment is returning observations with a different shape than expected.")
+            
+        raise
 
 def setup_logging():
     """Configure and return a logger for the application."""
