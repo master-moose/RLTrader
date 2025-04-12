@@ -9,7 +9,7 @@ __pycache__/*.ckpt
 *.pthl
 *.pth.tar
 *.pth.tar.gz
-__pycache__
+__pycache__/
 *.pyc
 *.pyo
 *.pyd

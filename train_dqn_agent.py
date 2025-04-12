@@ -582,9 +582,9 @@ class CustomDummyVecEnv(gymnasium.vector.VectorEnv):
         
         # Call the parent class constructor with the required parameters
         super().__init__(
+            num_envs=self.num_envs,
             observation_space=observation_space,
-            action_space=action_space,
-            num_envs=self.num_envs
+            action_space=action_space
         )
         
         # Set up the observation and action buffers
