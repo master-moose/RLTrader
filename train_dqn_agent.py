@@ -622,6 +622,17 @@ def train_with_finrl(args, market_data, device):
             mean=np.zeros(3),  # Assuming 3 actions
             sigma=np.ones(3) * 0.1
         )
+    
+    # For SAC models, we need to set policy_kwargs with appropriate network architecture
+    if args.finrl_model == 'sac':
+        model_params['policy_kwargs'] = {
+            'net_arch': net_arch
+        }
+    else:
+        # For other models
+        model_params['policy_kwargs'] = {
+            'net_arch': net_arch
+        }
 
     # Create and train the model
     try:
@@ -629,22 +640,12 @@ def train_with_finrl(args, market_data, device):
         print(model_params)  # Print params for debugging
         agent = DRLAgent(env=env_train)
         
-        if args.finrl_model == 'sac':
-            # For SAC, create policy_kwargs directly inside the constructor
-            model = agent.get_model(
-                args.finrl_model,
-                model_kwargs=model_params,
-                policy_type="MlpPolicy",
-                net_arch=net_arch
-            )
-        else:
-            # For other models, let FinRL handle it
-            model = agent.get_model(
-                args.finrl_model,
-                model_kwargs=model_params,
-                policy_type="MlpPolicy",
-                net_arch=net_arch
-            )
+        # Create the model based on the model type
+        # For SAC and other models, pass parameters directly
+        model = agent.get_model(
+            args.finrl_model,
+            model_kwargs=model_params
+        )
         
         # Train the model
         logger.info(f"Training {args.finrl_model.upper()} model...")
