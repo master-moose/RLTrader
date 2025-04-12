@@ -1850,6 +1850,12 @@ def wrap_env_with_monitor(env):
     monitor_dir = './logs/monitor'
     os.makedirs(monitor_dir, exist_ok=True)
     
+    # Check if the environment is a gymnasium.Env
+    if not isinstance(env, gymnasium.Env):
+        # If not, wrap it with a gymnasium adapter
+        env = StockTradingEnvWrapper(env)
+        logger.info("Wrapped environment with StockTradingEnvWrapper for gymnasium compatibility")
+    
     # Wrap environment with Monitor
     return Monitor(env, monitor_dir)
 
