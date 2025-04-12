@@ -736,29 +736,31 @@ def train_with_finrl(args, market_data, device):
     # Set up FinRL agent
     agent = DRLAgent(env=env)
     
-    # Network architecture for models
+    # Network architecture for models - we'll define this but not pass it directly in model_kwargs
+    # as FinRL seems to want to handle this itself
     net_arch = [256, 256]
+    logger.info(f"Using network architecture: {net_arch}")
     
-    # Create policy_kwargs dictionary for all models
-    policy_kwargs = {
-        'net_arch': net_arch
-    }
-    
-    # Initialize model_kwargs dictionary based on model type - IMPORTANT: Don't include 'verbose' 
-    # or 'policy' as these are added by the FinRL wrapper
+    # Initialize model_kwargs dictionary based on model type - IMPORTANT: Don't include 'verbose', 
+    # 'policy', or 'policy_kwargs' as these are added by the FinRL wrapper
     is_verbose = 1 if args.verbose else 0
     logger.info(f"Setting verbosity level: {is_verbose}")
+    
+    # Important: FinRL's DRLAgent.get_model() method appears to be adding:
+    # 1. 'policy': 'MlpPolicy'
+    # 2. 'verbose': is_verbose
+    # 3. 'policy_kwargs': {'net_arch': [...]}
+    # So we should NOT include these in our model_kwargs
     
     if args.finrl_model.lower() == 'sac':
         logger.info("Training with SAC model")
         model_kwargs = {
-            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'batch_size': 64,
             'buffer_size': 100000,
             'learning_rate': 0.0001,
             'learning_starts': 100,
-            'ent_coef': 'auto_0.1',
-            'policy_kwargs': policy_kwargs
+            'ent_coef': 'auto_0.1'
+            # Removed policy_kwargs which is set by FinRL
         }
     elif args.finrl_model.lower() in ['ppo', 'a2c']:
         if args.finrl_model.lower() == 'ppo':
@@ -767,9 +769,8 @@ def train_with_finrl(args, market_data, device):
             logger.info("Training with A2C model")
         
         model_kwargs = {
-            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
-            'learning_rate': 0.0003,
-            'policy_kwargs': policy_kwargs
+            'learning_rate': 0.0003
+            # Removed policy_kwargs which is set by FinRL
         }
     elif args.finrl_model.lower() in ['ddpg', 'td3']:
         if args.finrl_model.lower() == 'ddpg':
@@ -784,21 +785,19 @@ def train_with_finrl(args, market_data, device):
             sigma=0.1 * np.ones(n_actions)
         )
         model_kwargs = {
-            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'buffer_size': 100000,
             'learning_rate': 0.0003,
-            'action_noise': action_noise,
-            'policy_kwargs': policy_kwargs
+            'action_noise': action_noise
+            # Removed policy_kwargs which is set by FinRL
         }
     else:  # Default to DQN
         logger.info("Training with DQN model")
         model_kwargs = {
-            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'learning_rate': 0.0003,
             'buffer_size': 50000,
             'exploration_final_eps': 0.1,
-            'exploration_fraction': 0.1,
-            'policy_kwargs': policy_kwargs
+            'exploration_fraction': 0.1
+            # Removed policy_kwargs which is set by FinRL
         }
     
     # Custom SAC callback to monitor reward calculation
@@ -827,7 +826,7 @@ def train_with_finrl(args, market_data, device):
     logger.info(f"Model kwargs: {model_kwargs}")
     
     # Get the appropriate model
-    # Note: agent.get_model will add 'policy' and 'verbose', so we don't include them in model_kwargs
+    # Note: agent.get_model will add 'policy', 'verbose', and 'policy_kwargs', so we don't include them in model_kwargs
     model = agent.get_model(model_name=args.finrl_model.lower(), model_kwargs=model_kwargs)
     
     # Train model
