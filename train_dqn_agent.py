@@ -122,8 +122,13 @@ class BaseStockTradingEnv(gym.Env):
         self.state = np.zeros(state_space)
         self.terminal = False
         self.day = 0
-        self.data = self.df.iloc[self.day] if self.df is not None and len(self.df) > 0 else None
         
+        # Initialize data as None first to avoid errors if df is None
+        self.data = None
+        if self.df is not None and len(self.df) > 0:
+            # Get the first row as a Series, not a scalar value
+            self.data = self.df.iloc[self.day]
+    
     def reset(self):
         """Reset the environment."""
         self.state = np.zeros(self.state_space)
@@ -313,7 +318,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         Args:
             env: Environment to wrap
-            state_space: Dimension of the state space
+            state_space: Size of the state space (observation dimension)
         """
         # Check if env is a gym environment rather than a gymnasium environment
         if hasattr(env, 'observation_space') and not isinstance(env.observation_space, gymnasium.spaces.Space):
@@ -323,7 +328,6 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # Create observation and action spaces
             if hasattr(env, 'observation_space'):
                 obs_space = convert_gym_space(env.observation_space)
-            else:
                 # Default observation space if not available
                 obs_space = gymnasium.spaces.Box(
                     low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
@@ -333,9 +337,8 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 act_space = convert_gym_space(env.action_space)
             else:
                 # Default action space if not available
-                act_space = gymnasium.spaces.Discrete(3)
+                act_space = gymnasium.spaces.Discrete(3)  # Sell, hold, buy
                 
-            # Store the unwrapped environment
             self.env = env
             self.observation_space = obs_space
             self.action_space = act_space
@@ -348,7 +351,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # If already a gymnasium environment, just wrap it directly
             super().__init__(env)
             
-            # Force set observation space to Box with state_space dimension
+            # Override the observation space to ensure consistent shape
             self.observation_space = gymnasium.spaces.Box(
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
@@ -357,17 +360,16 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         # Store the actual observation dimension for comparison
         self.actual_state_space = None
         
-        # Add _cached_spec attribute for compatibility with Monitor
-        self._cached_spec = None
-        # DO NOT set self.spec directly as it's a property in gymnasium.Wrapper
+        # For tracking step count
+        self.step_counter = 0
+        
+        # Store the state space size we want to enforce
+        self.state_space = state_space
     
     @property
     def spec(self):
-        """Return environment specification"""
-        if self._cached_spec is not None:
-            return self._cached_spec
-        # Otherwise, try to get spec from underlying environment
-        if hasattr(self.env, 'spec') and self.env.spec is not None:
+        """Return the environment spec."""
+        if hasattr(self.env, 'spec'):
             return self.env.spec
         return None
     
@@ -376,39 +378,58 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         try:
             # Try gymnasium API first (for newer environments)
             obs, info = self.env.reset(**kwargs)
-            # Older reset API
-            if isinstance(obs, tuple) and len(obs) == 2:
-                obs, info = obs[0], obs[1]
-        except (ValueError, TypeError):
+        except TypeError:
             try:
-                # Fall back to gym API
-                obs = self.env.reset(**kwargs)
-                info = {}
-            except (ValueError, TypeError):
-                # Last resort - try without kwargs
+                # Try gym API
                 obs = self.env.reset()
                 info = {}
+            except Exception as e:
+                logger.error(f"Error in reset: {e}")
+                # Return zeros as a fallback
+                obs = np.zeros(self.observation_space.shape)
+                info = {}
         
-        # Check and update observation space if needed
-        if isinstance(obs, np.ndarray):
-            if self.actual_state_space is None:
-                self.actual_state_space = len(obs)
-                logger.info(f"First reset - detected actual observation dimension: {self.actual_state_space}")
-                
-                # Update observation space if needed to match the actual dimension
-                if self.actual_state_space != self.observation_space.shape[0]:
-                    logger.info(f"Updating observation space from shape {self.observation_space.shape} to ({self.actual_state_space},)")
-                    self.observation_space = gymnasium.spaces.Box(
-                        low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
-                    )
-            
-            logger.info(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
-            
-            # No need to reshape the observation, just clip it to the bounds
-            obs = np.clip(obs, -10.0, 10.0)
-            
-        else:
+        # Ensure observation is a numpy array
+        if not isinstance(obs, np.ndarray):
             logger.warning(f"Reset returned non-numpy observation of type {type(obs)}")
+            # Try to convert to numpy array
+            try:
+                obs = np.array(obs, dtype=np.float32)
+            except Exception:
+                # If conversion fails, return zeros
+                obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+                
+        # Store the actual observation dimension if not already stored
+        if self.actual_state_space is None:
+            self.actual_state_space = len(obs)
+            logger.info(f"First reset - detected actual observation dimension: {self.actual_state_space}")
+                
+            # Update observation space if needed to match the actual dimension
+            if self.actual_state_space != self.observation_space.shape[0]:
+                logger.info(f"Updating observation space from shape {self.observation_space.shape} to ({self.actual_state_space},)")
+                self.observation_space = gymnasium.spaces.Box(
+                    low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
+                )
+        
+        logger.info(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
+            
+        # Ensure observation has the right shape
+        if len(obs) != self.state_space:
+            logger.warning(f"Observation shape mismatch: got {len(obs)}, expected {self.state_space}")
+            # Pad or truncate the observation to match the expected shape
+            if len(obs) < self.state_space:
+                # Pad with zeros if observation is too short
+                padded_obs = np.zeros(self.state_space, dtype=np.float32)
+                padded_obs[:len(obs)] = obs
+                obs = padded_obs
+                logger.info(f"Padded observation from shape {obs.shape} to {self.state_space}")
+            else:
+                # Truncate if observation is too long
+                obs = obs[:self.state_space]
+                logger.info(f"Truncated observation from shape {len(obs)} to {self.state_space}")
+            
+        # Clip observation values to reasonable range
+        obs = np.clip(obs, -10.0, 10.0)
             
         return obs, info
     
@@ -423,9 +444,13 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             else:  # gym API (obs, reward, done, info)
                 obs, reward, done, info = result
                 terminated, truncated = done, False
-        except (ValueError, TypeError):
-            # Fall back to gym API
-            obs, reward, done, info = self.env.step(action)
+        except Exception as e:
+            logger.error(f"Error in step: {e}")
+            # Return zeros as a fallback
+            obs = np.zeros(self.observation_space.shape)
+            reward = 0.0
+            done = True
+            info = {}
             terminated, truncated = done, False
         
         # Log step observation for debugging (only on some steps to avoid excessive logging)
@@ -434,9 +459,27 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             if self.step_counter % 100 == 0:  # Log only every 100 steps
                 logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
         
-        # Just clip the observation to the bounds without reshaping
-        if isinstance(obs, np.ndarray):
-            obs = np.clip(obs, -10.0, 10.0)
+        # Ensure observation is a numpy array
+        if not isinstance(obs, np.ndarray):
+            logger.warning(f"Step returned non-numpy observation of type {type(obs)}")
+            # Try to convert to numpy array
+            try:
+                obs = np.array(obs, dtype=np.float32)
+            except Exception:
+                # If conversion fails, return zeros
+                obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+        
+        # Ensure observation has the right shape
+        if len(obs) != self.state_space:
+            # Pad or truncate the observation to match the expected shape
+            if len(obs) < self.state_space:
+                # Pad with zeros if observation is too short
+                padded_obs = np.zeros(self.state_space, dtype=np.float32)
+                padded_obs[:len(obs)] = obs
+                obs = padded_obs
+            else:
+                # Truncate if observation is too long
+                obs = obs[:self.state_space]
             
             # Update observation space if needed
             if self.actual_state_space is None or self.actual_state_space != len(obs):
@@ -446,10 +489,13 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                     low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
                 )
         
+        # Clip observation values to reasonable range
+        obs = np.clip(obs, -10.0, 10.0)
+        
         return obs, reward, terminated, truncated, info
     
     def seed(self, seed=None):
-        """Set random seed."""
+        """Set the random seed."""
         if hasattr(self.env, 'seed'):
             return self.env.seed(seed)
         return [seed]
@@ -670,19 +716,17 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     Create multiple FinRL environments for parallel training.
     
     Args:
-        df: DataFrame with financial data
-        args: Arguments from command line
-        num_workers: Number of worker environments to create
+        df: DataFrame with market data
+        args: Command line arguments
+        num_workers: Number of parallel workers to use
         
     Returns:
         Vectorized environment
     """
-    env_list = []
-    StockTradingEnvClass = None
+    # Extract arguments
     num_envs_per_worker = getattr(args, 'num_envs_per_worker', 4)
     use_subproc = getattr(args, 'use_subproc_vecenv', False)
     
-    # Get device from args or default to CPU
     device = None
     if hasattr(args, 'device'):
         import torch
@@ -700,7 +744,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             'finrl.applications.env.crypto.CryptocurrencyTradingEnv',
             # Then fall back to stock trading environments
             'finrl.meta.env_stock_trading.env_stocktrading.StockTradingEnv',
-            'finrl.env.env_stocktrading.StockTradingEnv',
+            'finrl.env.env_stocktrading.StockTradingEnv'
         ]
         
         for import_path in env_import_paths:
@@ -718,13 +762,12 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             StockTradingEnvClass = BaseStockTradingEnv
     except Exception as e:
         logger.error(f"Error importing environment classes: {e}")
+        logger.error(traceback.format_exc())
         StockTradingEnvClass = BaseStockTradingEnv
     
-    # Extract technical indicators from the dataframe
-    tech_indicator_list = []
+    # Define potential technical indicators to look for in the dataframe
     potential_indicators = [
-        'rsi_14', 'macd', 'vwap', 'atr',
-        'sma_7', 'sma_25', 'ema_9', 'ema_21',
+        'macd', 'rsi_14', 'rsi', 
         'stoch_k', 'stoch_d',
         'cci_30', 'dx_30',
         'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
@@ -732,6 +775,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         'volatility_30', 'volume_change', 'volume_norm'
     ]
     
+    # Find indicators that actually exist in the dataframe
+    tech_indicator_list = []
     for indicator in potential_indicators:
         if indicator in df.columns:
             tech_indicator_list.append(indicator)
@@ -746,22 +791,19 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         for indicator in potential_indicators:
             if indicator in df.columns:
                 tech_indicator_list.append(indicator)
+                
+    # Calculate environment dimensions
+    state_space = getattr(args, 'state_dim', 16)  # Default state space size if not specified
+    stock_dim = 1  # Assuming single-asset trading for simplicity
+    num_stocks = len(df['tic'].unique()) if 'tic' in df.columns else 1
     
-    # Extract essential parameters
-    state_space = getattr(args, 'state_dim', 12)  # Default to 12
+    # Determine action space size
+    include_cash = getattr(args, 'include_cash', False)
+    if include_cash:
+        action_space = num_stocks + 1  # +1 for cash
+    else:
+        action_space = 3  # Sell, hold, buy
     
-    # Determining stock dimension and action space
-    stock_dim = 1  # Default to 1 (single asset)
-    action_space = 3  # Default to 3 (sell, hold, buy)
-    num_stocks = 1  # Number of different stocks
-    
-    # If we have a multi-stock dataframe, extract the number of unique tickers
-    if 'tic' in df.columns:
-        unique_tickers = df['tic'].unique()
-        num_stocks = len(unique_tickers)
-        stock_dim = num_stocks
-    
-    # Log environment configuration
     logger.info(f"Creating parallel environment with state_space={state_space}, "
                 f"action_space={action_space}, num_stocks={num_stocks}")
     
@@ -771,11 +813,12 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     transaction_cost_pct = 0.00075  # 0.075% as a decimal
     logger.info("Using hardcoded crypto exchange maker/taker fees: 0.075%")
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
-    hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
-    
-    # Create lists for transaction costs (required by FinRL)
-    buy_cost_pct_list = [transaction_cost_pct] * stock_dim
-    sell_cost_pct_list = [transaction_cost_pct] * stock_dim
+    # Set hmax (max shares per trade) based on average price
+    if 'close' in df.columns:
+        avg_price = df['close'].mean()
+        hmax = max(int(initial_amount * 0.1 / avg_price), 10)  # Allow up to 10% of balance per trade
+    else:
+        hmax = 100  # Default value
     
     logger.info(f"Environment config: initial_amount={initial_amount}, "
                 f"transaction_cost_pct={transaction_cost_pct}, "
@@ -783,7 +826,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     
     # Process the DataFrame to ensure it's correctly formatted for FinRL
     try:
-        logger.info("Reformatting DataFrame for FinRL compatibility")
+        logger.info("Validating DataFrame format for FinRL compatibility")
         
         # StockTradingEnv expects a DataFrame with a specific format:
         # 1. Each row represents a single day and stock
@@ -792,8 +835,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         # 4. A 'date' column (or index) for dates
         # 5. A 'day' column with integer values to represent the time steps
         
-        # First, check if we have required columns
-        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        # Check required columns
+        required_columns = ['open', 'high', 'low', 'close', 'volume', 'tic', 'day']
         for col in required_columns:
             if col not in df.columns:
                 logger.warning(f"Required column '{col}' not found in DataFrame")
@@ -803,44 +846,30 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     df[col] = 10000.0  # Dummy price
                 elif col == 'volume':
                     logger.info(f"Creating dummy '{col}' column")
-                    df[col] = 1000000.0  # Dummy volume
-        
-        # Ensure we have a 'tic' column for stock identification
-        if 'tic' not in df.columns:
-            logger.info("Adding 'tic' column with default value 'BTC'")
-            df['tic'] = 'BTC'
-        
-        # Ensure we have a 'date' column
-        if 'date' not in df.columns:
-            if isinstance(df.index, pd.DatetimeIndex):
-                logger.info("Converting index to 'date' column")
-                df['date'] = df.index
-                df = df.reset_index(drop=True)
-            else:
-                logger.info("Creating synthetic 'date' column")
-                df['date'] = pd.date_range(start='2018-01-01', periods=len(df))
-        
-        # Ensure we have a 'day' column which is integer-based
-        if 'day' not in df.columns:
-            logger.info("Creating 'day' column with integer values")
-            df['day'] = range(len(df))
+                    df['volume'] = 1000000.0  # Dummy volume
+                elif col == 'tic':
+                    logger.info(f"Creating dummy '{col}' column")
+                    df['tic'] = 'BTC'  # Default ticker
+                elif col == 'day':
+                    logger.info(f"Creating '{col}' column as integer index")
+                    if 'date' in df.columns:
+                        # If we have a date column, convert it to day integers
+                        df['day'] = pd.factorize(df['date'])[0]
+                    else:
+                        # Otherwise just use row index
+                        df['day'] = np.arange(len(df))
         
         # If 'day' column exists but is not numeric, convert it
         if pd.api.types.is_categorical_dtype(df['day']) or pd.api.types.is_object_dtype(df['day']):
             logger.info("Converting 'day' column to integer")
             df['day'] = df['day'].factorize()[0]
         
-        # Ensure the DataFrame is sorted by day and tic
-        if 'day' in df.columns and 'tic' in df.columns:
-            logger.info("Sorting DataFrame by day and tic")
-            df = df.sort_values(['day', 'tic']).reset_index(drop=True)
-        
-        # FinRL's StockTradingEnv expects data.column.values.tolist() to work
-        # This means each stock/day combination needs to have a single row,
-        # not a scalar value or series
-        
-        logger.info(f"Prepared DataFrame shape: {df.shape}")
-        logger.info(f"Sample: {df.head(1).to_dict('records')}")
+        # Ensure all numeric columns have finite values
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if np.any(~np.isfinite(df[col])):
+                logger.warning(f"Column '{col}' contains non-finite values. Replacing with zeros.")
+                df[col] = df[col].replace([np.inf, -np.inf, np.nan], 0)
         
         # Create a test environment to see if the format is correct
         logger.info(f"Creating test environment with indicators: {tech_indicator_list}")
@@ -848,38 +877,46 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         # Select the first day's data for testing
         first_day = df['day'].min()
         test_df = df[df['day'] == first_day].copy()
-        logger.info(f"Test data shape: {test_df.shape}")
         
-        # Create test parameters that match expected parameters
+        # Parameters for the test environment
+        buy_cost_pct_list = [transaction_cost_pct] * stock_dim 
+        sell_cost_pct_list = [transaction_cost_pct] * stock_dim
+        
         test_params = {
             'df': test_df,
             'stock_dim': stock_dim,
             'hmax': hmax,
-            'num_stock_shares': [0] * stock_dim,  # Required parameter
+            'num_stock_shares': [0] * stock_dim,
+            'action_space': action_space,  # Make sure this is included!
+            'tech_indicator_list': tech_indicator_list,
             'initial_amount': initial_amount,
             'buy_cost_pct': buy_cost_pct_list,
             'sell_cost_pct': sell_cost_pct_list,
             'reward_scaling': reward_scaling,
             'state_space': state_space,
-            'tech_indicator_list': tech_indicator_list,
             'print_verbosity': 0
         }
         
-        test_env = StockTradingEnvClass(**test_params)
-        test_obs = test_env.reset()
-        
-        if isinstance(test_obs, np.ndarray):
-            logger.info(f"Test environment observation shape: {test_obs.shape}")
-            logger.info(f"Test environment observation space: {test_env.observation_space}")
-            if hasattr(test_env, 'state'):
-                logger.info(f"Test environment state size: {len(test_env.state)}")
-                
-            # If observation shape doesn't match state_space, adjust state_space
-            if len(test_obs) != state_space:
-                logger.warning(f"Test observation shape {len(test_obs)} doesn't match state_space {state_space}")
-                if len(test_obs) > state_space:
-                    logger.info(f"Adjusting state_space to match test observation shape: {len(test_obs)}")
-                    state_space = len(test_obs)
+        # Wrap the test in try-except to catch detailed error info
+        try:
+            test_env = StockTradingEnvClass(**test_params)
+            test_obs = test_env.reset()
+            
+            if isinstance(test_obs, np.ndarray):
+                logger.info(f"Test environment observation shape: {test_obs.shape}")
+                logger.info(f"Test environment observation space: {test_env.observation_space}")
+                if hasattr(test_env, 'state'):
+                    logger.info(f"Test environment state size: {len(test_env.state)}")
+                    
+                # If observation shape doesn't match state_space, adjust state_space
+                if len(test_obs) != state_space:
+                    logger.warning(f"Test observation shape {len(test_obs)} doesn't match state_space {state_space}")
+                    if len(test_obs) > state_space:
+                        logger.info(f"Adjusting state_space to match test observation shape: {len(test_obs)}")
+                        state_space = len(test_obs)
+        except Exception as e:
+            logger.error(f"Error creating test environment: {e}")
+            logger.error(traceback.format_exc())
     except Exception as e:
         logger.error(f"Error testing environment: {e}")
         logger.error(traceback.format_exc())
@@ -897,12 +934,12 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     'stock_dim': stock_dim,
                     'hmax': hmax,
                     'num_stock_shares': [0] * stock_dim,  # Start with no shares - REQUIRED parameter
-                    'action_space': action_space,
+                    'action_space': action_space,  # Make sure this is passed!
                     'tech_indicator_list': tech_indicator_list,
                     'initial_amount': initial_amount,
                     # 'transaction_cost_pct': transaction_cost_pct_list,  # Remove - not accepted by FinRL
-                    'buy_cost_pct': buy_cost_pct_list,  # Pass as list
-                    'sell_cost_pct': sell_cost_pct_list,  # Pass as list
+                    'buy_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
+                    'sell_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
                     'reward_scaling': reward_scaling,
                     'state_space': state_space,  # Add the missing state_space parameter
                     'print_verbosity': 1 if idx == 0 else 0  # Only print verbose output for the first env
@@ -921,7 +958,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 logger.error(traceback.format_exc())
                 
                 # Provide a fallback environment if creation fails
-                base_env = BaseStockTradingEnv(df, state_space=state_space)
+                base_env = BaseStockTradingEnv(df, state_space=state_space, action_space=action_space)
                 wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
                 return wrap_env_with_monitor(wrapped_env)
         
