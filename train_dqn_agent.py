@@ -753,37 +753,15 @@ def train_with_finrl(args, market_data, device):
     # Create environment
     env = create_finrl_env(df, args)
     
-    # Apply the Monitor wrapper from Stable-Baselines3 which is fully compatible
-    from stable_baselines3.common.monitor import Monitor
-    
-    # Define a simple logging function for monitoring
-    def logger_callback(log_dict):
-        """Callback for Monitor to log information"""
-        step = log_dict.get('total_steps', 0)
-        if step % 100 == 0:  # Log every 100 steps
-            reward = log_dict.get('reward', 0)
-            ep_len = log_dict.get('episode_length', 0)
-            logger.info(f"Step {step}: Reward: {reward:.4f}, Episode length: {ep_len}")
-    
-    # Create monitor directory
-    monitor_dir = os.path.join(args.save_dir, "monitor_logs") if args.save_dir else "./monitor_logs"
-    os.makedirs(monitor_dir, exist_ok=True)
-    
-    # Wrap environment in Monitor which is compatible with Stable-Baselines3
-    env = Monitor(
-        env,
-        monitor_dir,
-        allow_early_resets=True,
-        info_keywords=('portfolio_value', 'position', 'holdings'),
-    )
-    
-    logger.info("Environment wrapped with Stable-Baselines3 Monitor for compatibility")
+    # Don't use Monitor wrapper as it's not compatible with our gym-based environments
+    logger.info("Using direct environment without Monitor wrapper for compatibility")
     
     # Set random seeds for reproducibility
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
-        env.seed(args.seed)
+        if hasattr(env, 'seed'):
+            env.seed(args.seed)
         logger.info(f"Set random seed to {args.seed}")
     
     # Log environment information
@@ -856,9 +834,26 @@ def train_with_finrl(args, market_data, device):
         def __init__(self, verbose=0):
             super().__init__(verbose)
             self.step_count = 0
-        
+            self.episode_count = 0
+            self.episode_rewards = []
+            self.current_episode_reward = 0
+            
         def _on_step(self):
             self.step_count += 1
+            
+            # If episode is done, log the episode stats
+            if self.locals.get("dones", False):
+                self.episode_count += 1
+                reward = self.locals.get("rewards", [0])[0]
+                self.current_episode_reward += reward
+                self.episode_rewards.append(self.current_episode_reward)
+                self.current_episode_reward = 0
+                
+                logger.info(f"Episode {self.episode_count} completed with reward: {self.episode_rewards[-1]:.4f}")
+            else:
+                # Add reward to current episode total
+                reward = self.locals.get("rewards", [0])[0]
+                self.current_episode_reward += reward
             
             # Log every 100 steps
             if self.step_count % 100 == 0:
