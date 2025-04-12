@@ -318,7 +318,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         Args:
             env: Environment to wrap
-            state_space: Size of the state space (observation dimension)
+            state_space: Dimension of the state space
         """
         # Check if env is a gym environment rather than a gymnasium environment
         if hasattr(env, 'observation_space') and not isinstance(env.observation_space, gymnasium.spaces.Space):
@@ -328,6 +328,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # Create observation and action spaces
             if hasattr(env, 'observation_space'):
                 obs_space = convert_gym_space(env.observation_space)
+            else:
                 # Default observation space if not available
                 obs_space = gymnasium.spaces.Box(
                     low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
@@ -336,9 +337,10 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             if hasattr(env, 'action_space'):
                 act_space = convert_gym_space(env.action_space)
             else:
-                # Default action space if not available
-                act_space = gymnasium.spaces.Discrete(3)  # Sell, hold, buy
-                
+                # Default action space if not available (3 actions: sell, hold, buy)
+                act_space = gymnasium.spaces.Discrete(3)
+            
+            # Store the original environment and spaces
             self.env = env
             self.observation_space = obs_space
             self.action_space = act_space
@@ -350,8 +352,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         else:
             # If already a gymnasium environment, just wrap it directly
             super().__init__(env)
-            
-            # Override the observation space to ensure consistent shape
+            # But ensure the observation space is consistent
             self.observation_space = gymnasium.spaces.Box(
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
@@ -359,12 +360,12 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # Store the actual observation dimension for comparison
         self.actual_state_space = None
-        
-        # For tracking step count
-        self.step_counter = 0
-        
-        # Store the state space size we want to enforce
         self.state_space = state_space
+        self.step_counter = 0
+        self.env_id = getattr(env, 'env_id', 0)
+        
+        # Debug logging
+        logger.debug(f"Initialized StockTradingEnvWrapper with state_space={state_space}")
     
     @property
     def spec(self):
@@ -479,18 +480,19 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 info = {}
                 terminated, truncated = done, False
         except Exception as e:
-            logger.error(f"Error in step: {e}")
-            # Return zeros as a fallback
+            # If step fails for any reason, return a default observation
+            logger.error(f"Error in environment step: {e}")
             obs = np.zeros(self.observation_space.shape)
             reward = 0.0
             done = True
-            info = {}
+            info = {"error": str(e)}
             terminated, truncated = done, False
         
         # Log step observation for debugging (only on some steps to avoid excessive logging)
         if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
             self.step_counter = getattr(self, 'step_counter', 0) + 1
-            if self.step_counter % 100 == 0:  # Log only every 100 steps
+            # Only log every 10000 steps and only if env_id is 0 (first environment)
+            if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
                 logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
         
         # Ensure observation is a numpy array
@@ -499,23 +501,18 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # Try to convert to numpy array
             try:
                 obs = np.array(obs, dtype=np.float32)
-            except Exception:
-                # If conversion fails, return zeros
-                obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+            except Exception as e:
+                logger.error(f"Could not convert observation to numpy array: {e}")
+                # Use a default observation
+                obs = np.zeros(self.observation_space.shape)
         
-        # Ensure observation has the right shape
-        if len(obs) != self.state_space:
-            # Pad or truncate the observation to match the expected shape
-            if len(obs) < self.state_space:
-                # Pad with zeros if observation is too short
-                padded_obs = np.zeros(self.state_space, dtype=np.float32)
-                padded_obs[:len(obs)] = obs
-                obs = padded_obs
-            else:
-                # Truncate if observation is too long
-                obs = obs[:self.state_space]
+        # Ensure proper observation shape
+        if len(obs.shape) == 0:  # Scalar observation
+            obs = np.array([obs], dtype=np.float32)
             
-            # Update observation space if needed
+        # If observation dimension doesn't match our state space, update the dimension
+        if len(obs) != self.state_space:
+            # Only track this the first time it happens or when it changes
             if self.actual_state_space is None or self.actual_state_space != len(obs):
                 self.actual_state_space = len(obs)
                 logger.info(f"Step returned observation with different dimension: {self.actual_state_space}")
@@ -526,7 +523,10 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         # Clip observation values to reasonable range
         obs = np.clip(obs, -10.0, 10.0)
         
-        return obs, reward, terminated, truncated, info
+        if len(result) == 5:  # gymnasium API
+            return obs, reward, terminated, truncated, info
+        else:  # gym API
+            return obs, reward, done, info
     
     def seed(self, seed=None):
         """Set the random seed."""
@@ -982,6 +982,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 # Create the environment
                 base_env = StockTradingEnvClass(**env_params)
                 
+                # Set env_id attribute to identify each environment
+                base_env.env_id = idx
+                
                 # Wrap the environment to ensure consistent observation shape
                 wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
                 
@@ -993,6 +996,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 
                 # Provide a fallback environment if creation fails
                 base_env = BaseStockTradingEnv(df, state_space=state_space, action_space=action_space)
+                # Set env_id for the fallback environment too
+                base_env.env_id = idx 
                 wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
                 return wrap_env_with_monitor(wrapped_env)
         
