@@ -649,29 +649,6 @@ def train_with_finrl(args, market_data, device):
         print(model_params)  # Print params for debugging
         agent = DRLAgent(env=env_train)
         
-        # Define progress callback for monitoring training
-        class ProgressCallback:
-            def __init__(self, logger, total_timesteps, log_interval=1000):
-                self.logger = logger
-                self.total_timesteps = total_timesteps
-                self.log_interval = log_interval
-                self.last_time = time.time()
-                self.start_time = time.time()
-                self.last_timestep = 0
-                
-            def __call__(self, locals, globals):
-                current_step = locals['self'].num_timesteps
-                if current_step - self.last_timestep >= self.log_interval:
-                    elapsed = time.time() - self.last_time
-                    steps_per_sec = (current_step - self.last_timestep) / elapsed
-                    progress = current_step / self.total_timesteps * 100
-                    remaining = (self.total_timesteps - current_step) / steps_per_sec if steps_per_sec > 0 else 0
-                    self.logger.info(f"Training progress: {progress:.1f}% ({current_step}/{self.total_timesteps}) - "
-                                    f"Steps/sec: {steps_per_sec:.1f} - Remaining: {remaining/60:.1f} minutes")
-                    self.last_timestep = current_step
-                    self.last_time = time.time()
-                return True
-        
         # Create the model based on the model type
         # For SAC and other models, pass parameters directly
         logger.info("Initializing model - this may take a moment...")
@@ -684,13 +661,16 @@ def train_with_finrl(args, market_data, device):
         logger.info(f"Training {args.finrl_model.upper()} model...")
         
         total_timesteps = args.total_timesteps if hasattr(args, 'total_timesteps') else 100000
-        callback = ProgressCallback(logger, total_timesteps)
         
+        # Add progress monitoring without using callbacks
+        logger.info(f"Starting training for {total_timesteps} timesteps - this may take a while...")
+        logger.info(f"Check tensorboard logs for real-time progress monitoring")
+        
+        # FinRL doesn't support callback parameter, so we'll remove it
         trained_model = agent.train_model(
             model=model, 
             tb_log_name=f"{args.finrl_model}",
-            total_timesteps=total_timesteps,
-            callback=callback
+            total_timesteps=total_timesteps
         )
         
         # Save the trained model
