@@ -747,46 +747,12 @@ def train_with_finrl(args, market_data, device):
     # Prepare data in FinRL format
     df = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
     
-    # Using a different approach for environment creation to ensure compatibility
-    # with Stable Baselines3 models
+    # Create a single environment - we'll avoid using vectorized environments
+    # due to compatibility issues with gym version and Stable-Baselines3
+    logger.info("Creating a single environment (bypassing vectorization due to compatibility issues)")
+    env = create_finrl_env(df, args)
     
-    # First, create a single environment to test
-    logger.info("Creating a test environment for setup")
-    test_env = create_finrl_env(df, args)
-    
-    # Get environment parameters from test environment
-    obs_shape = test_env.observation_space.shape
-    logger.info(f"Observation space shape from test environment: {obs_shape}")
-    
-    # Create environment creation function that will be used by the vectorized environment
-    def make_env():
-        env = create_finrl_env(df, args)
-        return env
-    
-    # Number of workers for parallel environments
-    num_workers = args.num_workers if hasattr(args, 'num_workers') else 4
-    logger.info(f"Creating environment with {num_workers} workers")
-    
-    # Use DummyVecEnv which is compatible with Stable Baselines3
-    # We won't use SubprocVecEnv due to compatibility issues
-    env_fns = [make_env for _ in range(num_workers)]
-    env = DummyVecEnv(env_fns)
-    logger.info("Using standard DummyVecEnv for compatibility with Stable Baselines3")
-    
-    # Set random seeds for reproducibility
-    if args.seed is not None:
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-    
-    # Validate observation space
-    logger.info(f"Vector environment observation space: {env.observation_space}")
-    
-    # Test observation to ensure it works
-    test_obs = env.reset()
-    if isinstance(test_obs, np.ndarray):
-        logger.info(f"Test observation shape: {test_obs.shape}, dtype: {test_obs.dtype}")
-    
-    # Create a wrapper for reward monitoring - applied to all environments
+    # Create a wrapper for reward monitoring
     class RewardMonitorWrapper(gym.Wrapper):
         """Wrapper to monitor rewards and other metrics"""
         def __init__(self, env):
@@ -870,7 +836,7 @@ def train_with_finrl(args, market_data, device):
                     position = self.env.state[1+stock_dim] if len(self.env.state) > 1+stock_dim else 0
                     self.portfolio_values.append(portfolio_value)
                     self.positions.append(position)
-                except (AttributeError, IndexError) as e:
+                except (AttributeError, IndexError):
                     pass
             except Exception as e:
                 logger.error(f"Error capturing portfolio metrics: {e}")
@@ -909,13 +875,92 @@ def train_with_finrl(args, market_data, device):
                 
             return obs, reward, done, info
     
-    # Wrap the environment with our monitor for the first environment in the vectorized env
-    if hasattr(env, 'envs') and len(env.envs) > 0:
-        env.envs[0] = RewardMonitorWrapper(env.envs[0])
-        logger.info("Added reward monitoring for debugging")
+    # Wrap the environment with our monitor
+    env = RewardMonitorWrapper(env)
+    logger.info("Added reward monitoring wrapper to environment")
     
-    # Set up FinRL agent
-    agent = DRLAgent(env=env)
+    # Set random seeds for reproducibility
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+    
+    # Log environment information
+    logger.info(f"Environment observation space: {env.observation_space}")
+    
+    # Test reset to validate
+    test_obs = env.reset()
+    if isinstance(test_obs, np.ndarray):
+        logger.info(f"Test observation shape: {test_obs.shape}, dtype: {test_obs.dtype}")
+    
+    # Set up FinRL agent - we need to use a modified approach without vectorized environments
+    # Create a wrapper that makes a single environment appear like a vectorized environment
+    # This is a simpler version of DummyVecEnv that won't trigger the patching mechanism
+    class SingleEnvWrapper:
+        def __init__(self, env):
+            self.env = env
+            self.observation_space = env.observation_space
+            self.action_space = env.action_space
+            self.num_envs = 1
+            
+        def reset(self):
+            obs = self.env.reset()
+            # Add batch dimension
+            if isinstance(obs, np.ndarray):
+                return np.expand_dims(obs, axis=0)
+            else:
+                return [obs]
+                
+        def step(self, actions):
+            action = actions[0]
+            obs, reward, done, info = self.env.step(action)
+            
+            # Add batch dimensions
+            if isinstance(obs, np.ndarray):
+                obs = np.expand_dims(obs, axis=0)
+            else:
+                obs = [obs]
+                
+            return obs, np.array([reward]), np.array([done]), [info]
+            
+        def close(self):
+            return self.env.close()
+            
+        def render(self, mode='human'):
+            return self.env.render(mode)
+            
+        def get_attr(self, attr_name, indices=None):
+            if indices is None:
+                indices = [0]
+            if len(indices) > 1 or indices[0] != 0:
+                raise ValueError("This wrapper only supports a single environment")
+            return getattr(self.env, attr_name)
+                
+        def set_attr(self, attr_name, value, indices=None):
+            if indices is None:
+                indices = [0]
+            if len(indices) > 1 or indices[0] != 0:
+                raise ValueError("This wrapper only supports a single environment")
+            setattr(self.env, attr_name, value)
+                
+        def env_method(self, method_name, *args, indices=None, **kwargs):
+            if indices is None:
+                indices = [0]
+            if len(indices) > 1 or indices[0] != 0:
+                raise ValueError("This wrapper only supports a single environment")
+            method = getattr(self.env, method_name)
+            return [method(*args, **kwargs)]
+            
+        def seed(self, seed=None):
+            if hasattr(self.env, 'seed'):
+                return [self.env.seed(seed)]
+            return [None]
+    
+    # Wrap our environment with the compatibility wrapper
+    vec_env = SingleEnvWrapper(env)
+    logger.info("Created simplified vectorized environment wrapper for compatibility")
+    
+    # Setup agent with the wrapped environment
+    agent = DRLAgent(env=vec_env)
     
     # Network architecture for models
     net_arch = [256, 256]
@@ -958,31 +1003,6 @@ def train_with_finrl(args, market_data, device):
     logger.info(f"Model kwargs: {model_kwargs}")
     print(model_kwargs)
     
-    # Define callback for monitoring
-    class SACMonitorCallback:
-        def __init__(self):
-            self.step_counter = 0
-        
-        def __call__(self, locals_dict, globals_dict):
-            # Track steps
-            self.step_counter += 1
-            
-            # Log every 100 steps
-            if self.step_counter % 100 == 0:
-                if 'rewards' in locals_dict and len(locals_dict['rewards']) > 0:
-                    logger.info(f"SAC internal rewards: {locals_dict['rewards'].tolist()}")
-                
-                # Log actions if available
-                if 'actions' in locals_dict:
-                    actions = locals_dict['actions']
-                    if hasattr(actions, 'shape'):
-                        logger.info(f"SAC actions shape: {actions.shape}, sample: {actions[0] if actions.shape[0] > 0 else 'N/A'}")
-                    
-            return True
-    
-    # Add the callback if using SAC
-    callback = SACMonitorCallback() if args.finrl_model.lower() == 'sac' else None
-    
     # Get the appropriate model
     # Note: agent.get_model will add 'policy', 'verbose', and 'policy_kwargs',
     # so we don't include them in model_kwargs
@@ -990,10 +1010,14 @@ def train_with_finrl(args, market_data, device):
     
     # Train model
     logger.info("Starting model training...")
+    total_timesteps = getattr(args, 'total_timesteps', 100000)
+    logger.info(f"Training for {total_timesteps} timesteps")
+    
+    # Modify the training parameters to work with a single environment
     trained_model = agent.train_model(
         model=model,
         tb_log_name=f"{args.finrl_model.lower()}",
-        total_timesteps=getattr(args, 'total_timesteps', 100000)
+        total_timesteps=total_timesteps
     )
     
     # Save model
