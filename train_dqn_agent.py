@@ -21,6 +21,28 @@ from stable_baselines3.common.utils import set_random_seed
 from cryptocurrency_trading_env import CryptocurrencyTradingEnv
 from lstm_dqn_agent import LSTMDQNAgent
 from utils.data_utils import prepare_data, load_data
+import pandas as pd
+from typing import Dict
+from datetime import datetime, timedelta
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = str(Path(__file__).parent)
+sys.path.append(project_root)
+
+from crypto_trading_model.models.lstm import LSTMModel
+from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
+from crypto_trading_model.data.data_loader import load_crypto_data
+from crypto_trading_model.utils.logging import setup_logging
+from crypto_trading_model.training.train_dqn_agent import (
+    prepare_crypto_data_for_finrl,
+    train_with_finrl
+)
 
 # Import FinRL components if available
 try:
@@ -148,181 +170,6 @@ def load_lstm_model(model_path, device):
         logger.error(f"Error loading LSTM model: {str(e)}")
         logger.error(traceback.format_exc())
         raise
-
-def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
-    """
-    Convert crypto data to format that FinRL can use.
-    
-    Parameters:
-    -----------
-    market_data : dict
-        Dictionary containing market data for different timeframes
-    primary_timeframe : str, optional
-        Primary timeframe to use, defaults to '15m' if available, 
-        otherwise selects the shortest available timeframe
-        
-    Returns:
-    --------
-    df : pd.DataFrame
-        Processed data in FinRL format
-    """
-    # Default to 15m if available, otherwise use the first available timeframe
-    available_timeframes = list(market_data.keys())
-    logger.info(f"Available timeframes: {available_timeframes}")
-    
-    if primary_timeframe is None:
-        # Prefer 15m as base timeframe if available
-        if '15m' in available_timeframes:
-            primary_timeframe = '15m'
-            logger.info(f"Using '15m' as the primary timeframe")
-        else:
-            # Sort timeframes and use the shortest one as base
-            try:
-                # Try to sort by timeframe duration
-                timeframe_minutes = {}
-                for tf in available_timeframes:
-                    if tf.endswith('m'):
-                        timeframe_minutes[tf] = int(tf[:-1])
-                    elif tf.endswith('h'):
-                        timeframe_minutes[tf] = int(tf[:-1]) * 60
-                    elif tf.endswith('d'):
-                        timeframe_minutes[tf] = int(tf[:-1]) * 60 * 24
-                
-                # Sort by duration and get the shortest timeframe
-                primary_timeframe = sorted(timeframe_minutes.items(), key=lambda x: x[1])[0][0]
-            except:
-                # If sorting fails, just use the first timeframe
-                primary_timeframe = available_timeframes[0]
-            
-            logger.info(f"Using '{primary_timeframe}' as the primary timeframe")
-    
-    # Check if the requested timeframe exists, otherwise use a fallback
-    if primary_timeframe not in market_data:
-        logger.warning(f"Requested timeframe '{primary_timeframe}' not found in data.")
-        # Use the first available timeframe as fallback
-        primary_timeframe = available_timeframes[0]
-        logger.info(f"Using '{primary_timeframe}' as the fallback timeframe")
-    
-    # Get the primary timeframe data
-    df = market_data[primary_timeframe].copy()
-    
-    # Rename columns to match FinRL expectations
-    # Assuming the dataframe has price columns like 'open', 'high', 'low', 'close'
-    column_map = {
-        'open': 'open',
-        'high': 'high',
-        'low': 'low',
-        'close': 'close',
-        'volume': 'volume'
-    }
-    
-    df = df.rename(columns={old: new for old, new in column_map.items() if old in df.columns})
-    
-    # Add required columns for FinRL
-    if 'tic' not in df.columns:
-        df['tic'] = 'CRYPTO'
-    
-    # Check if we need to reset the index
-    if not isinstance(df.index, pd.DatetimeIndex):
-        # Reset the index to get the index as a column if it's not already a column
-        df = df.reset_index()
-    
-    # CRITICAL FIX: Make sure we have a date column before ANY processing
-    if 'date' not in df.columns:
-        # Create a date column from timestamp or index, or create a synthetic one
-        if 'timestamp' in df.columns:
-            df['date'] = pd.to_datetime(df['timestamp'])
-        elif 'index' in df.columns and pd.api.types.is_datetime64_any_dtype(df['index']):
-            df['date'] = pd.to_datetime(df['index'])
-        else:
-            # Create synthetic dates
-            logger.info("Creating synthetic dates for the data")
-            df['date'] = pd.date_range(start='2020-01-01', periods=len(df), freq='1h')
-    
-    # Always ensure date is a datetime type
-    df['date'] = pd.to_datetime(df['date'])
-    
-    # Manually add some technical indicators to avoid FinRL preprocessing errors
-    logger.info("Adding basic technical indicators manually")
-    # Calculate technical indicators on a safe copy to avoid SettingWithCopyWarning
-    df_safe = df.copy()
-    df_safe['macd'] = df_safe['close'].ewm(span=12).mean() - df_safe['close'].ewm(span=26).mean()
-    df_safe['rsi'] = 100 - (100 / (1 + (
-        df_safe['close'].diff().clip(lower=0).rolling(window=14).sum() / 
-        abs(df_safe['close'].diff().clip(upper=0)).rolling(window=14).sum()
-    )))
-    df_safe['cci'] = (
-        df_safe['close'] - df_safe['close'].rolling(window=20).mean()
-    ) / (0.015 * df_safe['close'].rolling(window=20).std())
-    df_safe['dx'] = abs(df_safe['close'].diff()) / df_safe['close'] * 100
-    
-    # Copy calculated indicators back to original dataframe
-    for col in ['macd', 'rsi', 'cci', 'dx']:
-        df[col] = df_safe[col]
-    
-    # Try to use FinRL's feature engineering
-    try:
-        # Create FeatureEngineer
-        fe = FeatureEngineer(
-            use_technical_indicator=True,
-            tech_indicator_list=INDICATORS,
-            use_vix=False,
-            use_turbulence=False,
-            user_defined_feature=False
-        )
-        
-        try:
-            logger.info("Attempting to preprocess data with FinRL's FeatureEngineer")
-            # CRITICAL: Ensure date column exists and is not an index
-            temp_df = df.copy()
-            if 'date' not in temp_df.columns:
-                # If date is in the index but not in columns, reset it properly
-                if temp_df.index.name == 'date':
-                    temp_df = temp_df.reset_index()
-                else:
-                    # Create a synthetic date column as last resort
-                    temp_df['date'] = pd.date_range(start='2020-01-01', periods=len(temp_df), freq='1h')
-            
-            # Log the columns to help with debugging
-            logger.info(f"Columns before FeatureEngineer: {temp_df.columns.tolist()}")
-            if 'date' not in temp_df.columns:
-                logger.error("Critical error: 'date' column still missing")
-                raise ValueError("Missing 'date' column - cannot proceed with FinRL preprocessing")
-                
-            processed = fe.preprocess_data(temp_df)
-            logger.info(f"Processed data with shape: {processed.shape}")
-            
-            # Ensure we have a date column
-            if 'date' not in processed.columns:
-                logger.warning("FinRL preprocessing removed date column, adding it back")
-                processed['date'] = df.index.values if isinstance(df.index, pd.DatetimeIndex) else df['date'].values
-                
-            return processed
-        except Exception as e:
-            logger.error(f"Error in FinRL preprocessing: {e}")
-            logger.error(traceback.format_exc())
-            
-            # Return our manually preprocessed dataframe
-            # Make sure date column exists after reset
-            df_result = df.copy()
-            if 'date' not in df_result.columns:
-                if df_result.index.name == 'date':
-                    df_result = df_result.reset_index()
-                else:
-                    df_result['date'] = pd.date_range(start='2020-01-01', periods=len(df_result), freq='1h')
-            return df_result
-    except Exception as e:
-        logger.error(f"Error setting up feature engineering: {e}")
-        # Return dataframe with added date and technical indicators
-        logger.info("Using basic dataframe with manual indicators")
-        # Reset the index and ensure we return a dataframe with a date column
-        result_df = df.copy()
-        if 'date' not in result_df.columns:
-            if result_df.index.name == 'date':
-                result_df = result_df.reset_index()
-            else:
-                result_df['date'] = pd.date_range(start='2020-01-01', periods=len(result_df), freq='1h')
-        return result_df
 
 def create_finrl_env(df, config):
     """Create a FinRL environment for cryptocurrency trading."""
