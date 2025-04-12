@@ -336,7 +336,17 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # Add _cached_spec attribute for compatibility with Monitor
         self._cached_spec = None
-        self.spec = None
+        # DO NOT set self.spec directly as it's a property in gymnasium.Wrapper
+    
+    @property
+    def spec(self):
+        """Return environment specification"""
+        if self._cached_spec is not None:
+            return self._cached_spec
+        # Otherwise, try to get spec from underlying environment
+        if hasattr(self.env, 'spec') and self.env.spec is not None:
+            return self.env.spec
+        return None
     
     def reset(self, **kwargs):
         """Reset the environment, with compatibility for both gym and gymnasium APIs."""
