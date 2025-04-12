@@ -482,6 +482,9 @@ def create_finrl_env(
     logger.info(f"Creating environment with params: {env_params}")
     
     try:
+        # Ensure all required technical indicators are present
+        df = ensure_technical_indicators(df, tech_indicators)
+        
         # Create the environment
         env = StockTradingEnvClass(**env_params)
         return env
@@ -1361,6 +1364,18 @@ def train_with_finrl(
     # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
     logger.info(f"Using DummyVecEnv for environment vectorization due to compatibility issues")
     
+    # Define the list of technical indicators needed
+    tech_indicators = [
+        'macd', 'rsi_14', 'cci_30', 'dx_30', 
+        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
+        'close_5_ema', 'close_10_ema', 'close_20_ema', 'close_60_ema', 'close_120_ema',
+        'volatility_30', 'volume_change', 'volume_norm'
+    ]
+    
+    # Ensure all required technical indicators are present in the dataframe
+    logger.info("Ensuring all required technical indicators are available...")
+    df = ensure_technical_indicators(df, tech_indicators)
+    
     # Create the environment functions for each worker
     def make_env():
         """Create a single environment for vectorization"""
@@ -1794,6 +1809,149 @@ def create_synthetic_data(tickers, start_date, end_date):
     print(f"Day range: {result_df['day'].min()} - {result_df['day'].max()}")
     
     return result_df
+
+def ensure_technical_indicators(df, tech_indicator_list):
+    """
+    Ensure all required technical indicators exist in the dataframe.
+    Adds any missing indicators to avoid KeyError when initializing StockTradingEnv.
+    
+    Args:
+        df: DataFrame containing OHLCV data
+        tech_indicator_list: List of technical indicators needed by the environment
+        
+    Returns:
+        DataFrame with all required technical indicators
+    """
+    logger.info(f"Checking for required technical indicators: {tech_indicator_list}")
+    
+    # Track missing indicators
+    missing_indicators = [ind for ind in tech_indicator_list if ind not in df.columns]
+    if missing_indicators:
+        logger.warning(f"Missing technical indicators: {missing_indicators}")
+        logger.info("Adding missing technical indicators...")
+        
+        # Import ta for technical analysis
+        try:
+            import ta
+        except ImportError:
+            logger.error("Technical analysis library 'ta' not installed. Using fallback methods.")
+            ta = None
+        
+        # Add each missing indicator
+        for indicator in missing_indicators:
+            if indicator == 'cci_30':
+                # Calculate CCI with period 30
+                if ta:
+                    # Use ta library if available
+                    cci = ta.trend.CCIIndicator(
+                        high=df['high'], low=df['low'], close=df['close'], window=30
+                    )
+                    df['cci_30'] = cci.cci()
+                else:
+                    # Fallback implementation
+                    tp = (df['high'] + df['low'] + df['close']) / 3
+                    ma = tp.rolling(window=30).mean()
+                    md = tp.rolling(window=30).apply(lambda x: abs(x - x.mean()).mean(), raw=True)
+                    df['cci_30'] = (tp - ma) / (0.015 * md)
+                logger.info("Added CCI-30 indicator")
+            
+            elif indicator == 'dx_30':
+                # Calculate DX with period 30
+                if ta:
+                    adx = ta.trend.ADXIndicator(
+                        high=df['high'], low=df['low'], close=df['close'], window=30
+                    )
+                    df['dx_30'] = adx.adx()
+                else:
+                    # Simplified DX calculation
+                    high_diff = df['high'].diff()
+                    low_diff = df['low'].diff()
+                    plus_dm = (high_diff > 0) & (high_diff > low_diff.abs())
+                    plus_dm = high_diff.where(plus_dm, 0)
+                    minus_dm = (low_diff < 0) & (low_diff.abs() > high_diff)
+                    minus_dm = low_diff.abs().where(minus_dm, 0)
+                    
+                    tr = pd.concat([
+                        df['high'] - df['low'],
+                        (df['high'] - df['close'].shift()).abs(),
+                        (df['low'] - df['close'].shift()).abs()
+                    ], axis=1).max(axis=1)
+                    
+                    plus_di = 100 * (plus_dm.rolling(30).sum() / tr.rolling(30).sum())
+                    minus_di = 100 * (minus_dm.rolling(30).sum() / tr.rolling(30).sum())
+                    df['dx_30'] = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di)).fillna(0)
+                logger.info("Added DX-30 indicator")
+            
+            elif 'close_' in indicator and '_sma' in indicator:
+                # Extract window size from indicator name (e.g., close_5_sma -> 5)
+                window = int(indicator.split('_')[1])
+                df[indicator] = df['close'].rolling(window=window, min_periods=1).mean()
+                logger.info(f"Added SMA indicator with window {window}")
+            
+            elif 'close_' in indicator and '_ema' in indicator:
+                # Extract window size from indicator name (e.g., close_5_ema -> 5)
+                window = int(indicator.split('_')[1])
+                df[indicator] = df['close'].ewm(span=window, adjust=False).mean()
+                logger.info(f"Added EMA indicator with window {window}")
+            
+            elif indicator == 'volatility_30':
+                df[indicator] = df['close'].pct_change().rolling(window=30).std()
+                logger.info("Added volatility indicator with window 30")
+            
+            elif indicator == 'volume_change':
+                df[indicator] = df['volume'].pct_change()
+                logger.info("Added volume change indicator")
+            
+            elif indicator == 'volume_norm':
+                min_vol = df['volume'].rolling(window=30, min_periods=1).min()
+                max_vol = df['volume'].rolling(window=30, min_periods=1).max()
+                df[indicator] = (df['volume'] - min_vol) / (max_vol - min_vol + 1e-10)
+                logger.info("Added normalized volume indicator")
+            
+            elif indicator == 'macd':
+                # Calculate MACD
+                ema_12 = df['close'].ewm(span=12, adjust=False).mean()
+                ema_26 = df['close'].ewm(span=26, adjust=False).mean()
+                df['macd'] = ema_12 - ema_26
+                logger.info("Added MACD indicator")
+                
+                # Also add signal and histogram if they're in the list
+                if 'macd_signal' in missing_indicators:
+                    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+                    logger.info("Added MACD signal line")
+                
+                if 'macd_hist' in missing_indicators:
+                    if 'macd_signal' not in df.columns:
+                        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+                    df['macd_hist'] = df['macd'] - df['macd_signal']
+                    logger.info("Added MACD histogram")
+            
+            elif indicator == 'rsi_14':
+                delta = df['close'].diff()
+                gain = delta.where(delta > 0, 0).fillna(0)
+                loss = -delta.where(delta < 0, 0).fillna(0)
+                avg_gain = gain.rolling(window=14, min_periods=1).mean()
+                avg_loss = loss.rolling(window=14, min_periods=1).mean()
+                rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
+                df['rsi_14'] = 100 - (100 / (1 + rs))
+                logger.info("Added RSI-14 indicator")
+            
+            else:
+                # For any other missing indicator, add a column of zeros as placeholder
+                logger.warning(f"Unknown indicator '{indicator}', adding zeros as placeholder")
+                df[indicator] = 0
+    
+    # Fill any NaN values that might have been introduced
+    df = df.fillna(0)
+    
+    # Verify all indicators are now present
+    still_missing = [ind for ind in tech_indicator_list if ind not in df.columns]
+    if still_missing:
+        logger.error(f"Still missing indicators after processing: {still_missing}")
+    else:
+        logger.info("All required technical indicators are present")
+    
+    return df
 
 def main():
     """Main entry point for the script."""
