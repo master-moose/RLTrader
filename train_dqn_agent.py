@@ -744,11 +744,15 @@ def train_with_finrl(args, market_data, device):
         'net_arch': net_arch
     }
     
-    # Initialize model_kwargs dictionary based on model type
+    # Initialize model_kwargs dictionary based on model type - IMPORTANT: Don't include 'verbose' 
+    # or 'policy' as these are added by the FinRL wrapper
+    is_verbose = 1 if args.verbose else 0
+    logger.info(f"Setting verbosity level: {is_verbose}")
+    
     if args.finrl_model.lower() == 'sac':
         logger.info("Training with SAC model")
         model_kwargs = {
-            'verbose': 1 if args.verbose else 0,
+            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'batch_size': 64,
             'buffer_size': 100000,
             'learning_rate': 0.0001,
@@ -763,7 +767,7 @@ def train_with_finrl(args, market_data, device):
             logger.info("Training with A2C model")
         
         model_kwargs = {
-            'verbose': 1 if args.verbose else 0,
+            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'learning_rate': 0.0003,
             'policy_kwargs': policy_kwargs
         }
@@ -780,7 +784,7 @@ def train_with_finrl(args, market_data, device):
             sigma=0.1 * np.ones(n_actions)
         )
         model_kwargs = {
-            'verbose': 1 if args.verbose else 0,
+            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'buffer_size': 100000,
             'learning_rate': 0.0003,
             'action_noise': action_noise,
@@ -789,7 +793,7 @@ def train_with_finrl(args, market_data, device):
     else:  # Default to DQN
         logger.info("Training with DQN model")
         model_kwargs = {
-            'verbose': 1 if args.verbose else 0,
+            # 'verbose': is_verbose,  # Remove verbose parameter to avoid duplicate
             'learning_rate': 0.0003,
             'buffer_size': 50000,
             'exploration_final_eps': 0.1,
@@ -823,7 +827,7 @@ def train_with_finrl(args, market_data, device):
     logger.info(f"Model kwargs: {model_kwargs}")
     
     # Get the appropriate model
-    # Note: The agent.get_model function will add the 'policy' parameter itself, so don't include it here
+    # Note: agent.get_model will add 'policy' and 'verbose', so we don't include them in model_kwargs
     model = agent.get_model(model_name=args.finrl_model.lower(), model_kwargs=model_kwargs)
     
     # Train model
