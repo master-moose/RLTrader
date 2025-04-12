@@ -675,9 +675,13 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         num_workers: Number of parallel environments
         
     Returns:
-        VectorEnv with multiple environments
+        VecEnv with multiple environments
     """
-    logger.info(f"Creating vectorized environment with {num_workers} workers")
+    num_envs_per_worker = getattr(args, 'num_envs_per_worker', 1)
+    use_subproc = getattr(args, 'use_subproc_vecenv', False)
+    
+    logger.info(f"Creating vectorized environment with {num_workers} workers and {num_envs_per_worker} envs per worker")
+    logger.info(f"Using {'SubprocVecEnv' if use_subproc else 'DummyVecEnv'} for environment vectorization")
     
     # First, try to import the environment class
     try:
@@ -823,7 +827,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     # Create a list of environment creation functions
     env_list = []
     
-    for i in range(num_workers):
+    for i in range(num_workers * num_envs_per_worker):
         # Define a function that creates a new environment instance each time it's called
         def make_env(idx=i):
             try:
@@ -860,14 +864,21 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 return wrap_env_with_monitor(wrapped_env)
         
         # Add the environment creation function to the list with proper closure handling
-        env_fn = lambda idx=i: make_env(idx)
+        def env_fn(idx=i):
+            return make_env(idx)
         env_list.append(env_fn)
     
-    # Use our custom DummyVecEnv implementation that avoids compatibility issues
-    logger.info("Using DummyVecEnv for environment vectorization")
-    # Import the DummyVecEnv from stable_baselines3
-    from stable_baselines3.common.vec_env import DummyVecEnv
-    vec_env = DummyVecEnv(env_list)
+    # Use SubprocVecEnv if specified, otherwise use DummyVecEnv
+    if use_subproc:
+        # Import the SubprocVecEnv from stable_baselines3
+        from stable_baselines3.common.vec_env import SubprocVecEnv
+        vec_env = SubprocVecEnv(env_list)
+        logger.info("Using SubprocVecEnv for parallel environment execution")
+    else:
+        # Import the DummyVecEnv from stable_baselines3
+        from stable_baselines3.common.vec_env import DummyVecEnv
+        vec_env = DummyVecEnv(env_list)
+        logger.info("Using DummyVecEnv for environment vectorization")
     
     return vec_env
 
@@ -1627,13 +1638,18 @@ def parse_args():
                        help='FinRL model to use')
     parser.add_argument('--lstm_model_path', type=str, help='Path to pretrained LSTM model')
     parser.add_argument('--timesteps', type=int, default=500000, help='Number of timesteps to train')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel environments')
+    parser.add_argument('--num_workers', type=int, default=8, help='Number of parallel environments')
+    parser.add_argument('--num_envs_per_worker', type=int, default=8, help='Number of envs per worker')
+    parser.add_argument('--use_subproc_vecenv', action='store_true', help='Use SubprocVecEnv instead of DummyVecEnv')
     
     # Hyperparameters
     parser.add_argument('--learning_rate', type=float, default=0.0003, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--initial_balance', type=float, default=1000000.0, help='Initial balance')
     parser.add_argument('--transaction_fee', type=float, default=0.001, help='Transaction fee')
+    parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps to collect before learning (PPO)')
+    parser.add_argument('--batch_size', type=int, default=64, help='Minibatch size for PPO updates')
+    parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs when optimizing the surrogate loss (PPO)')
     
     return parser.parse_args()
 
@@ -1922,7 +1938,10 @@ def main():
             tickers = tickers.split(',')
         
         # Set number of workers
-        num_workers = getattr(args, 'num_workers', 4)
+        num_workers = getattr(args, 'num_workers', 8)
+        num_envs_per_worker = getattr(args, 'num_envs_per_worker', 8)
+        total_envs = num_workers * num_envs_per_worker
+        logger.info(f"Creating {total_envs} total environments ({num_workers} workers × {num_envs_per_worker} envs each)")
         
         # Load LSTM model if specified
         lstm_model = None
@@ -2042,26 +2061,77 @@ def main():
         env = wrap_env_with_monitor(base_env)
         
         # Create vectorized environment
-        vec_env = create_dummy_vectorized_env(lambda: wrap_env_with_monitor(CryptocurrencyTradingEnv(**env_params)), 
-                                             n_envs=num_workers)
+        vec_env = create_parallel_finrl_envs(df, args, num_workers=num_workers)
         
         # Check the action space type and use appropriate algorithm
         if isinstance(vec_env.action_space, gym.spaces.Discrete) or isinstance(vec_env.action_space, gymnasium.spaces.Discrete):
             # For discrete action spaces, use algorithms that support them
             if args.finrl_model.lower() == 'ppo':
                 logger.info("Training with PPO model (supports discrete actions)")
+                
+                # Get PPO hyperparameters
+                n_steps = getattr(args, 'n_steps', 2048)
+                batch_size = getattr(args, 'batch_size', 64)
+                n_epochs = getattr(args, 'n_epochs', 10)
+                learning_rate = getattr(args, 'learning_rate', 0.0001)
+                
+                logger.info(f"PPO parameters: n_steps={n_steps}, batch_size={batch_size}, n_epochs={n_epochs}, lr={learning_rate}")
+                
+                # Create PPO model with enhanced GPU utilization
                 model = PPO(
                     'MlpPolicy', 
                     vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0001),  # Lower learning rate for stability
+                    learning_rate=learning_rate,
                     gamma=getattr(args, 'gamma', 0.99),
-                    n_steps=2048,  # Larger batch size
-                    batch_size=64,  # Smaller minibatch size
-                    n_epochs=100,  # More optimization epochs
-                    ent_coef=0.01,  # Slightly higher entropy for exploration
+                    n_steps=n_steps,       # Larger batch size for better GPU utilization
+                    batch_size=batch_size, # Minibatch size for updates
+                    n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
+                    ent_coef=0.01,         # Entropy coefficient for exploration
                     verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs"
+                    tensorboard_log="./tensorboard_logs",
+                    device=device
                 )
+                
+                # Log GPU memory usage before training
+                if torch.cuda.is_available():
+                    logger.info(f"GPU memory allocated before training: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+                    logger.info(f"GPU memory reserved before training: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
+                
+                # Train the model
+                total_timesteps = getattr(args, 'timesteps', 50000)
+                logger.info(f"Training for {total_timesteps} timesteps with {vec_env.num_envs} environments...")
+                
+                # Log GPU usage during training
+                class GPUMonitorCallback(BaseCallback):
+                    def __init__(self, verbose=0):
+                        super().__init__(verbose)
+                        self.step_count = 0
+                    
+                    def _on_step(self):
+                        self.step_count += 1
+                        if self.step_count % 1000 == 0 and torch.cuda.is_available():
+                            allocated = torch.cuda.memory_allocated() / 1024**2
+                            reserved = torch.cuda.memory_reserved() / 1024**2
+                            logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
+                        return True
+                
+                callbacks = [TensorboardCallback()]
+                if args.verbose and torch.cuda.is_available():
+                    callbacks.append(GPUMonitorCallback())
+                
+                model.learn(total_timesteps=total_timesteps, callback=callbacks)
+                
+                # Save the model
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                model_path = f"models/finrl_{finrl_model}_{timestamp}"
+                os.makedirs(model_path, exist_ok=True)
+                model.save(f"{model_path}/model")
+                logger.info(f"Model saved to {model_path}/model")
+                
+                # Save arguments used for training
+                with open(f"{model_path}/training_args.json", 'w') as f:
+                    json.dump(vars(args), f, indent=4)
+                logger.info(f"Training arguments saved to {model_path}/training_args.json")
             else:
                 # Default to DQN for discrete action spaces, regardless of what was specified for --finrl_model
                 # SAC specifically doesn't support discrete action spaces, so we'll use DQN instead
@@ -2121,12 +2191,31 @@ def main():
         
         # Train the model
         total_timesteps = getattr(args, 'timesteps', 50000)
-        logger.info(f"Training for {total_timesteps} timesteps...")
-        model.learn(total_timesteps=total_timesteps)
+        logger.info(f"Training for {total_timesteps} timesteps with {vec_env.num_envs} environments...")
+        
+        # Log GPU usage during training
+        class GPUMonitorCallback(BaseCallback):
+            def __init__(self, verbose=0):
+                super().__init__(verbose)
+                self.step_count = 0
+            
+            def _on_step(self):
+                self.step_count += 1
+                if self.step_count % 1000 == 0 and torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / 1024**2
+                    reserved = torch.cuda.memory_reserved() / 1024**2
+                    logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
+                return True
+        
+        callbacks = [TensorboardCallback()]
+        if args.verbose and torch.cuda.is_available():
+            callbacks.append(GPUMonitorCallback())
+        
+        model.learn(total_timesteps=total_timesteps, callback=callbacks)
         
         # Save the model
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        model_path = f"models/dqn/{timestamp}"
+        model_path = f"models/finrl_{finrl_model}_{timestamp}"
         os.makedirs(model_path, exist_ok=True)
         model.save(f"{model_path}/model")
         logger.info(f"Model saved to {model_path}/model")
