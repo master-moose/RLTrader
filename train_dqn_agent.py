@@ -620,17 +620,8 @@ def train_with_finrl(args, market_data, device):
     if args.finrl_model in ['sac', 'td3', 'ddpg'] and action_noise:
         model_params['action_noise'] = 'normal'  # Use string identifier instead of object
     
-    # For SAC models, we need to set policy_kwargs with appropriate network architecture
-    if args.finrl_model == 'sac':
-        model_params['policy_kwargs'] = {
-            'net_arch': net_arch
-        }
-    else:
-        # For other models
-        model_params['policy_kwargs'] = {
-            'net_arch': net_arch
-        }
-
+    # FinRL will handle the network architecture internally, do not pass policy_kwargs
+    
     # Create and train the model
     try:
         logger.info(f"Creating {args.finrl_model.upper()} model with FinRL")
