@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import gym
 import gymnasium
+from gymnasium.vector import VectorEnv
 import sys
 import time
 from pathlib import Path
@@ -573,12 +574,12 @@ def create_finrl_env(
         logger.error(traceback.format_exc())
         raise
 
-class CustomDummyVecEnv:
+class CustomDummyVecEnv(gymnasium.vector.VectorEnv):
     """
-    Custom implementation of DummyVecEnv that doesn't use the patching mechanism
-    which causes compatibility issues with gym.spaces.Sequence.
+    Custom implementation of VecEnv that works with the Gymnasium API
+    to avoid compatibility issues with stable-baselines3.
     
-    This is a simplified version that only implements the essential functionality
+    This is a simplified version that implements the essential functionality
     needed for our use case.
     """
     def __init__(self, env_fns):
@@ -597,15 +598,8 @@ class CustomDummyVecEnv:
         # by the library's wrapper functions
         self.metadata = getattr(self.envs[0], 'metadata', {'render_modes': []})
         
-        # Needed to avoid patching in stable-baselines3
-        self.spec = getattr(self.envs[0], 'spec', None)
-        self.env_is_wrapped = True  # Tell SB3 that this env is already wrapped
-        self.is_vector_env = True  # Indicate it's a vector env
-        self.render_mode = None
-        
-        # Add unwrapped property for compatibility
-        # Just use self since we're the wrapper
-        self.unwrapped = self
+        # Needed for Gymnasium compatibility
+        super().__init__(self.observation_space, self.action_space, self.num_envs)
         
         # Buffer to store observations
         obs_shape = self.observation_space.shape
@@ -618,36 +612,38 @@ class CustomDummyVecEnv:
         logger.info(f"Created CustomDummyVecEnv with {self.num_envs} environments")
         logger.info(f"Observation space: {self.observation_space}, Action space: {self.action_space}")
     
-    def reset(self):
+    def reset(self, seed=None):
         """
         Reset all environments and return a batch of initial observations.
         
         Returns:
-            A batch of observations from each environment
+            A batch of observations from each environment and empty dict for info
         """
+        obs_list = []
+        info_list = []
+        
         for i in range(self.num_envs):
             try:
-                # Attempt to reset with gymnasium API (returns tuple)
-                reset_result = self.envs[i].reset()
-                
-                # Handle various return types
-                if isinstance(reset_result, tuple):
-                    # Unpack tuple (obs, info)
-                    obs = reset_result[0]
-                    # Store info if needed later
+                # Use the newer Gymnasium API with seed parameter
+                if seed is not None:
+                    observation, info = self.envs[i].reset(seed=seed + i if seed is not None else None)
                 else:
-                    # Old Gym API
-                    obs = reset_result
+                    observation, info = self.envs[i].reset()
+                
+                obs_list.append(observation)
+                info_list.append(info)
                 
                 # Save the observation
-                self._save_obs(i, obs)
+                self._save_obs(i, observation)
             except Exception as e:
                 logger.error(f"Error resetting environment {i}: {e}")
                 logger.error(traceback.format_exc())
                 # Default to zeros as a fallback
                 self.buf_obs[i] = np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
+                obs_list.append(np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype))
+                info_list.append({})
         
-        return self.buf_obs.copy()
+        return self.buf_obs.copy(), {}
     
     def step(self, actions):
         """
@@ -657,9 +653,9 @@ class CustomDummyVecEnv:
             actions: Actions to take in each environment
             
         Returns:
-            observations, rewards, dones, infos
+            observations, rewards, terminations, truncations, infos
         """
-        obs, rewards, dones, infos = [], [], [], []
+        obs_list, rewards_list, terminated_list, truncated_list, info_list = [], [], [], [], []
         
         for i in range(self.num_envs):
             try:
@@ -671,30 +667,33 @@ class CustomDummyVecEnv:
                 
                 result = self.envs[i].step(action)
                 
-                # Handle various return formats
+                # Handle various return formats - SB3 needs the gymnasium format
                 if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
                     ob, reward, terminated, truncated, info = result
-                    done = terminated or truncated
-                    # Add result to lists
-                    obs.append(ob)
-                    rewards.append(reward)
-                    dones.append(done)
-                    infos.append(info)
-                else:  # Old Gym API
+                    obs_list.append(ob)
+                    rewards_list.append(reward)
+                    terminated_list.append(terminated)
+                    truncated_list.append(truncated)
+                    info_list.append(info)
+                else:  # Old Gym API - convert to gymnasium format
                     ob, reward, done, info = result
-                    # Add result to lists
-                    obs.append(ob)
-                    rewards.append(reward)
-                    dones.append(done)
-                    infos.append(info)
+                    obs_list.append(ob)
+                    rewards_list.append(reward)
+                    terminated_list.append(done)
+                    truncated_list.append(False)  # No truncation in old gym API
+                    info_list.append(info)
                 
-                if dones[i]:
+                # Store new observations
+                self._save_obs(i, ob)
+                
+                # Handle auto-reset for terminated environments
+                if terminated_list[i] or truncated_list[i]:
                     # For environments that automatically reset on done
-                    if infos[i].get("terminal_observation") is None and hasattr(self.envs[i], "reset"):
+                    if info_list[i].get("terminal_observation") is None and hasattr(self.envs[i], "reset"):
                         terminal_obs = ob
                         if isinstance(ob, np.ndarray):
                             terminal_obs = ob.copy()
-                        infos[i]["terminal_observation"] = terminal_obs
+                        info_list[i]["terminal_observation"] = terminal_obs
                         
                         # Auto-reset environment
                         reset_result = self.envs[i].reset()
@@ -704,27 +703,31 @@ class CustomDummyVecEnv:
                             new_obs = reset_result
                         # Store new observation
                         self._save_obs(i, new_obs)
-                    else:
-                        # If the environment doesn't automatically reset, we store the last observation
-                        self._save_obs(i, ob)
-                else:
-                    # Regular case - just store the observation
-                    self._save_obs(i, ob)
             except Exception as e:
                 logger.error(f"Error stepping environment {i}: {e}")
                 logger.error(traceback.format_exc())
                 # Default values in case of error
-                obs.append(np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype))
-                rewards.append(0.0)
-                dones.append(True)
-                infos.append({"error": str(e)})
+                obs_list.append(np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype))
+                rewards_list.append(0.0)
+                terminated_list.append(True)
+                truncated_list.append(False)
+                info_list.append({"error": str(e)})
+                self._save_obs(i, np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype))
                 
         # Convert to numpy arrays
-        rewards = np.array(rewards)
-        dones = np.array(dones)
+        rewards = np.array(rewards_list, dtype=np.float32)
+        terminated = np.array(terminated_list, dtype=bool)
+        truncated = np.array(truncated_list, dtype=bool)
+        
+        # Create a reference to the original info dict for each env
+        infos = {
+            "final_observation": obs_list,  # Not used but needed for API
+            "final_info": info_list,  # Not used but needed for API
+            "_final_info": info_list  # Used by SB3
+        }
         
         # Return observations from buffer
-        return self.buf_obs.copy(), rewards, dones, infos
+        return self.buf_obs.copy(), rewards, terminated, truncated, infos
     
     def _save_obs(self, idx, obs):
         """Save observation for the given environment index."""
@@ -811,6 +814,84 @@ class CustomDummyVecEnv:
     def get_attr(self, attr_name):
         """Get attribute from each environment."""
         return [getattr(env, attr_name) for env in self.envs]
+    
+    def set_attr(self, attr_name, values):
+        """Set attribute for each environment."""
+        for env, value in zip(self.envs, values):
+            setattr(env, attr_name, value)
+    
+    def env_is_wrapped(self, wrapper_class, indices=None):
+        """Check if environments are wrapped with a given wrapper."""
+        indices = indices or range(self.num_envs)
+        return [wrapper_class in self.get_wrapper_class(i) for i in indices]
+    
+    def get_wrapper_class(self, index):
+        """Get the wrapped classes for a given environment."""
+        env = self.envs[index]
+        wrapper_classes = []
+        while hasattr(env, "env"):
+            wrapper_classes.append(type(env))
+            env = env.env
+        return wrapper_classes
+    
+    def seed(self, seed=None):
+        """Set random seed for all environments."""
+        seeds = []
+        for i, env in enumerate(self.envs):
+            if seed is not None:
+                curr_seed = seed + i
+            else:
+                curr_seed = None
+            if hasattr(env, 'seed'):
+                seeds.append(env.seed(curr_seed))
+        return seeds
+    
+    def render(self, mode=None):
+        """Render the environments."""
+        return [env.render(mode=mode) for env in self.envs]
+
+    # Properties required by gymnasium.vector.VectorEnv
+    @property
+    def single_observation_space(self):
+        """Returns the observation space for a single environment."""
+        return self.observation_space
+    
+    @property
+    def single_action_space(self):
+        """Returns the action space for a single environment."""
+        return self.action_space
+    
+    @property
+    def unwrapped(self):
+        """Returns itself as the VectorEnv is already unwrapped."""
+        return self
+    
+    def call(self, name, *args, **kwargs):
+        """Call a method or get a property from each environment."""
+        results = []
+        for env in self.envs:
+            if hasattr(env, name):
+                attr = getattr(env, name)
+                if callable(attr):
+                    results.append(attr(*args, **kwargs))
+                else:
+                    results.append(attr)
+            else:
+                results.append(None)
+        return results
+    
+    def close(self):
+        """Close all environments."""
+        for env in self.envs:
+            env.close()
+    
+    def env_method(self, method_name, *method_args, **method_kwargs):
+        """Call instance methods of each environments."""
+        return self.call(method_name, *method_args, **method_kwargs)
+    
+    def get_attr(self, attr_name):
+        """Get attribute from each environment."""
+        return self.call(attr_name)
     
     def set_attr(self, attr_name, values):
         """Set attribute for each environment."""
@@ -1403,6 +1484,7 @@ def train_with_finrl(
         Trained model
     """
     logger.info("Training with FinRL framework")
+    print("=== Starting FinRL training with updated CustomDummyVecEnv ===")
     
     try:
         # Import stable-baselines3 and torch.nn
