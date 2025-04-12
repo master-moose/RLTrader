@@ -747,220 +747,56 @@ def train_with_finrl(args, market_data, device):
     # Prepare data in FinRL format
     df = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
     
-    # Create a single environment - we'll avoid using vectorized environments
-    # due to compatibility issues with gym version and Stable-Baselines3
-    logger.info("Creating a single environment (bypassing vectorization due to compatibility issues)")
+    # Create a single environment directly - avoid all custom wrappers
+    logger.info("Creating a single environment directly (bypassing all vectorization)")
+    
+    # Create environment
     env = create_finrl_env(df, args)
     
-    # Create a wrapper for reward monitoring
-    class RewardMonitorWrapper(gym.Wrapper):
-        """Wrapper to monitor rewards and other metrics"""
-        def __init__(self, env):
-            super().__init__(env)
-            self.episode_rewards = []
-            self.raw_rewards = []
-            self.portfolio_values = []
-            self.positions = []
-            self.actions_taken = []
-            self.step_count = 0
-            self.initial_portfolio = None
-        
-        def reset(self, **kwargs):
-            obs = self.env.reset(**kwargs)
-            
-            # Initialize/reset episode metrics
-            self.episode_rewards = []
-            self.raw_rewards = []
-            self.portfolio_values = []
-            self.positions = []
-            self.actions_taken = []
-            self.step_count = 0
-            
-            # Save initial portfolio value if we can extract it
-            if hasattr(self.env, 'state') and len(self.env.state) > 0:
-                self.initial_portfolio = self.env.state[0]
-                logger.info(f"Initial portfolio value: {self.initial_portfolio}")
-            
-            return obs
-        
-        def step(self, action):
-            # Log action before executing
-            self.actions_taken.append(action)
-            
-            # Capture environment state BEFORE step for reward calculation analysis
-            pre_step_portfolio = None
-            if hasattr(self.env, 'state') and len(self.env.state) > 0:
-                pre_step_portfolio = self.env.state[0]
-            
-            # Execute action
-            obs, reward, done, info = self.env.step(action)
-            self.step_count += 1
-            
-            # Calculate expected reward based on portfolio change
-            if pre_step_portfolio is not None and hasattr(self.env, 'state') and len(self.env.state) > 0:
-                post_step_portfolio = self.env.state[0]
-                portfolio_change = post_step_portfolio - pre_step_portfolio
-                expected_reward = portfolio_change
-                
-                # Scale the reward if needed
-                if hasattr(self.env, 'reward_scaling'):
-                    expected_reward *= self.env.reward_scaling
-                
-                # Check if reward matches our calculation
-                if abs(reward - expected_reward) > 1e-5 and self.step_count % 100 == 0:
-                    logger.warning(f"Reward calculation discrepancy: got {reward}, expected {expected_reward}. "
-                                f"Portfolio changed from {pre_step_portfolio} to {post_step_portfolio}")
-            
-            # Store raw reward (before scaling)
-            if 'reward_scaling' in info:
-                raw_reward = reward / info['reward_scaling']
-                self.raw_rewards.append(raw_reward)
-            else:
-                self.raw_rewards.append(reward)
-            
-            self.episode_rewards.append(reward)
-            
-            # Store portfolio value and position
-            try:
-                # For StockTradingEnv from FinRL
-                try:
-                    portfolio_value = self.env.state[0] if len(self.env.state) > 0 else 0
-                    
-                    # Get stock_dim safely - it's needed to find position in state array
-                    stock_dim = 1  # Default for single asset
-                    if hasattr(self.env, 'stock_dim'):
-                        stock_dim = self.env.stock_dim
-                    elif hasattr(self.env, 'df') and 'tic' in self.env.df.columns:
-                        stock_dim = len(self.env.df['tic'].unique())
-                    
-                    position = self.env.state[1+stock_dim] if len(self.env.state) > 1+stock_dim else 0
-                    self.portfolio_values.append(portfolio_value)
-                    self.positions.append(position)
-                except (AttributeError, IndexError):
-                    pass
-            except Exception as e:
-                logger.error(f"Error capturing portfolio metrics: {e}")
-            
-            # Log periodically
-            if self.step_count % 100 == 0:
-                if len(self.raw_rewards) > 0:
-                    avg_raw_reward = sum(self.raw_rewards[-100:]) / min(100, len(self.raw_rewards))
-                    logger.info(f"Step {self.step_count}: Raw reward: {self.raw_rewards[-1]:.6f}, " 
-                                f"Scaled reward: {reward:.6f}, "
-                                f"Avg raw reward (last 100): {avg_raw_reward:.6f}")
-                    
-                    # Log portfolio and position changes
-                    if len(self.portfolio_values) > 2:
-                        last_portfolio = self.portfolio_values[-1]
-                        prev_portfolio = self.portfolio_values[-2]
-                        portfolio_change = last_portfolio - prev_portfolio
-                        logger.info(f"Portfolio: {last_portfolio:.2f} (change: {portfolio_change:.2f}), "
-                                    f"Position: {self.positions[-1] if self.positions else 'Unknown'}, "
-                                    f"Action: {self.actions_taken[-1]}")
-                    
-                    # Print environment state info
-                    if hasattr(self.env, 'state'):
-                        logger.info(f"Environment State (first 5 elements): {self.env.state[:5]}")
-                        logger.info(f"Environment State shape: {len(self.env.state)}")
-                    
-                    # Check for transaction costs and other info
-                    if hasattr(self.env, 'cost'):
-                        logger.info(f"Transaction cost: {self.env.cost:.6f}")
-                    
-                    # Print additional info from the info dict
-                    important_keys = ['balance', 'position', 'price', 'total_trades']
-                    info_str = ", ".join([f"{k}: {info.get(k, 'N/A')}" for k in important_keys if k in info])
-                    if info_str:
-                        logger.info(f"Info: {info_str}")
-                
-            return obs, reward, done, info
+    # Apply the Monitor wrapper from Stable-Baselines3 which is fully compatible
+    from stable_baselines3.common.monitor import Monitor
     
-    # Wrap the environment with our monitor
-    env = RewardMonitorWrapper(env)
-    logger.info("Added reward monitoring wrapper to environment")
+    # Define a simple logging function for monitoring
+    def logger_callback(log_dict):
+        """Callback for Monitor to log information"""
+        step = log_dict.get('total_steps', 0)
+        if step % 100 == 0:  # Log every 100 steps
+            reward = log_dict.get('reward', 0)
+            ep_len = log_dict.get('episode_length', 0)
+            logger.info(f"Step {step}: Reward: {reward:.4f}, Episode length: {ep_len}")
+    
+    # Create monitor directory
+    monitor_dir = os.path.join(args.save_dir, "monitor_logs") if args.save_dir else "./monitor_logs"
+    os.makedirs(monitor_dir, exist_ok=True)
+    
+    # Wrap environment in Monitor which is compatible with Stable-Baselines3
+    env = Monitor(
+        env,
+        monitor_dir,
+        allow_early_resets=True,
+        info_keywords=('portfolio_value', 'position', 'holdings'),
+    )
+    
+    logger.info("Environment wrapped with Stable-Baselines3 Monitor for compatibility")
     
     # Set random seeds for reproducibility
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
+        env.seed(args.seed)
+        logger.info(f"Set random seed to {args.seed}")
     
     # Log environment information
     logger.info(f"Environment observation space: {env.observation_space}")
+    logger.info(f"Environment action space: {env.action_space}")
     
     # Test reset to validate
-    test_obs = env.reset()
-    if isinstance(test_obs, np.ndarray):
-        logger.info(f"Test observation shape: {test_obs.shape}, dtype: {test_obs.dtype}")
+    obs = env.reset()
+    if isinstance(obs, np.ndarray):
+        logger.info(f"Test observation shape: {obs.shape}, dtype: {obs.dtype}")
     
-    # Set up FinRL agent - we need to use a modified approach without vectorized environments
-    # Create a wrapper that makes a single environment appear like a vectorized environment
-    # This is a simpler version of DummyVecEnv that won't trigger the patching mechanism
-    class SingleEnvWrapper:
-        def __init__(self, env):
-            self.env = env
-            self.observation_space = env.observation_space
-            self.action_space = env.action_space
-            self.num_envs = 1
-            
-        def reset(self):
-            obs = self.env.reset()
-            # Add batch dimension
-            if isinstance(obs, np.ndarray):
-                return np.expand_dims(obs, axis=0)
-            else:
-                return [obs]
-                
-        def step(self, actions):
-            action = actions[0]
-            obs, reward, done, info = self.env.step(action)
-            
-            # Add batch dimensions
-            if isinstance(obs, np.ndarray):
-                obs = np.expand_dims(obs, axis=0)
-            else:
-                obs = [obs]
-                
-            return obs, np.array([reward]), np.array([done]), [info]
-            
-        def close(self):
-            return self.env.close()
-            
-        def render(self, mode='human'):
-            return self.env.render(mode)
-            
-        def get_attr(self, attr_name, indices=None):
-            if indices is None:
-                indices = [0]
-            if len(indices) > 1 or indices[0] != 0:
-                raise ValueError("This wrapper only supports a single environment")
-            return getattr(self.env, attr_name)
-                
-        def set_attr(self, attr_name, value, indices=None):
-            if indices is None:
-                indices = [0]
-            if len(indices) > 1 or indices[0] != 0:
-                raise ValueError("This wrapper only supports a single environment")
-            setattr(self.env, attr_name, value)
-                
-        def env_method(self, method_name, *args, indices=None, **kwargs):
-            if indices is None:
-                indices = [0]
-            if len(indices) > 1 or indices[0] != 0:
-                raise ValueError("This wrapper only supports a single environment")
-            method = getattr(self.env, method_name)
-            return [method(*args, **kwargs)]
-            
-        def seed(self, seed=None):
-            if hasattr(self.env, 'seed'):
-                return [self.env.seed(seed)]
-            return [None]
-    
-    # Wrap our environment with the compatibility wrapper
-    vec_env = SingleEnvWrapper(env)
-    logger.info("Created simplified vectorized environment wrapper for compatibility")
-    
-    # Setup agent with the wrapped environment
-    agent = DRLAgent(env=vec_env)
+    # Set up FinRL agent with the environment directly
+    agent = DRLAgent(env=env)
     
     # Network architecture for models
     net_arch = [256, 256]
@@ -1013,11 +849,44 @@ def train_with_finrl(args, market_data, device):
     total_timesteps = getattr(args, 'total_timesteps', 100000)
     logger.info(f"Training for {total_timesteps} timesteps")
     
-    # Modify the training parameters to work with a single environment
+    # Define a custom callback to log training progress
+    from stable_baselines3.common.callbacks import BaseCallback
+    
+    class LoggingCallback(BaseCallback):
+        def __init__(self, verbose=0):
+            super().__init__(verbose)
+            self.step_count = 0
+        
+        def _on_step(self):
+            self.step_count += 1
+            
+            # Log every 100 steps
+            if self.step_count % 100 == 0:
+                logger.info(f"Training step {self.step_count}")
+                
+                # For SAC, log the entropy coefficient
+                if hasattr(self.model, 'ent_coef_tensor') and self.model.ent_coef_tensor is not None:
+                    ent_coef = self.model.ent_coef_tensor.item()
+                    logger.info(f"Current entropy coefficient: {ent_coef:.6f}")
+                
+                # For SAC, log the actor and critic losses
+                if hasattr(self.model, 'actor_loss') and hasattr(self.model, 'critic_loss'):
+                    if self.model.actor_loss is not None and self.model.critic_loss is not None:
+                        actor_loss = self.model.actor_loss.item() if hasattr(self.model.actor_loss, 'item') else self.model.actor_loss
+                        critic_loss = self.model.critic_loss.item() if hasattr(self.model.critic_loss, 'item') else self.model.critic_loss
+                        logger.info(f"Actor loss: {actor_loss:.6f}, Critic loss: {critic_loss:.6f}")
+            
+            return True
+    
+    # Create the callback
+    callback = LoggingCallback()
+    
+    # Train the model with the callback
     trained_model = agent.train_model(
         model=model,
         tb_log_name=f"{args.finrl_model.lower()}",
-        total_timesteps=total_timesteps
+        total_timesteps=total_timesteps,
+        callback=callback
     )
     
     # Save model
