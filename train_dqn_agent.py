@@ -1151,89 +1151,165 @@ def train_with_finrl(
     lstm_model=None, lstm_processor=None
 ):
     """
-    Train a FinRL agent with the specified parameters.
+    Train a reinforcement learning model using FinRL.
     
     Args:
         args: Command line arguments
-        logger: Logger
-        start_date: Start date for training
-        end_date: End date for training
+        logger: Logger instance
+        start_date: Start date for data
+        end_date: End date for data
         tickers: List of tickers to trade
         data_source: Source of data
-        num_workers: Number of workers for parallel environments
+        num_workers: Number of parallel environments
         use_lstm_predictions: Whether to use LSTM predictions
-        lstm_model: LSTM model to use for predictions
-        lstm_processor: LSTM processor for data preprocessing
+        lstm_model: Trained LSTM model
+        lstm_processor: LSTM data processor
         
     Returns:
-        trained FinRL model
+        Trained FinRL model
     """
-    logger.info(f"Training FinRL agent with model: {args.finrl_model}")
-    logger.info(f"Start date: {start_date}, End date: {end_date}")
-    logger.info(f"Tickers: {tickers}")
-    logger.info(f"Number of workers: {num_workers}")
+    try:
+        # Import stable-baselines3 and torch.nn
+        from stable_baselines3 import PPO, DDPG, TD3, SAC
+        import torch.nn as nn
+        from stable_baselines3.common.callbacks import BaseCallback
+        import gym
+        import numpy as np
+        import os
+    except ImportError as e:
+        logger.error(f"Error importing required packages: {e}")
+        raise
     
-    # Set up parameters
-    lookback = 5
-    initial_balance = 1000000.0
-    include_cash = False
-    
-    # Get state dimension from args or use default
+    # Extract arguments for training
+    model_name = args.finrl_model.lower()
+    initial_balance = getattr(args, 'initial_balance', 1000000.0)
+    lookback = getattr(args, 'lookback', 10)
+    include_cash = getattr(args, 'include_cash', False)
     state_dim = getattr(args, 'state_dim', 16)  # Default to 16 if not specified
     
-    # Generate synthetic data or format the real data properly
-    try:
-        logger.info("Creating synthetic data with multi-index format for FinRL...")
-        df = create_synthetic_data(tickers, start_date, end_date)
+    # First check if synthetic data exists in data/synthetic directory
+    synthetic_data_path = os.path.join('data', 'synthetic', 'synthetic_dataset.h5')
+    
+    if os.path.exists(synthetic_data_path):
+        logger.info(f"Found existing synthetic data at {synthetic_data_path}, loading...")
         
-        # Format the dataframe for StockTradingEnv which requires a multi-index DataFrame
-        # with date and tic as the index levels
-        logger.info(f"Formatting DataFrame for FinRL environment, original shape: {df.shape}")
-        
-        # Make sure we have a date column that's datetime
-        if 'date' not in df.columns and not isinstance(df.index, pd.DatetimeIndex):
-            logger.warning("No date column found, using index as date")
-            df['date'] = df.index
-        elif 'date' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['date']):
-            logger.info("Converting date column to datetime")
-            df['date'] = pd.to_datetime(df['date'])
-        
-        # Reset index if it's already a DatetimeIndex to work with the data
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index()
-            df.rename(columns={'index': 'date'}, inplace=True)
-        
-        # Add a 'day' column which is used by StockTradingEnv
-        if 'day' not in df.columns:
-            df['day'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+        try:
+            import pandas as pd
+            import tables
             
-        # Ensure we have a 'tic' column - if not, use the ticker from tickers list
-        # This assumes the dataframe has data for only one ticker
-        if 'tic' not in df.columns:
-            logger.info(f"Adding 'tic' column with value: {tickers[0]}")
-            df['tic'] = tickers[0]
+            # Load data from HDF5 file
+            df_dict = {}
+            with pd.HDFStore(synthetic_data_path, mode='r') as store:
+                # Get all available timeframes from the HDF5 file
+                timeframes = [key[1:] for key in store.keys()]  # Remove leading '/'
+                logger.info(f"Available timeframes in dataset: {timeframes}")
+                
+                # Load primary timeframe (15m) to use for FinRL
+                if '15m' in timeframes:
+                    df = store['15m']
+                    logger.info(f"Loaded 15m data with shape {df.shape}")
+                    
+                    # Reset index to make date a column if it's in the index
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df = df.reset_index()
+                
+                # Fallback to other timeframes if 15m not available
+                elif len(timeframes) > 0:
+                    # Use the first available timeframe
+                    tf = timeframes[0]
+                    df = store[f'/{tf}']
+                    logger.info(f"15m timeframe not available, using {tf} with shape {df.shape}")
+                    
+                    # Reset index to make date a column if it's in the index
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df = df.reset_index()
+                else:
+                    raise ValueError("No timeframe data found in the HDF5 file")
+                
+            # Ensure required columns exist
+            required_columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
             
-        # If we have multiple tickers, we need to make sure each row has the correct ticker
-        if len(tickers) > 1 and 'tic' not in df.columns:
-            # Need to replicate data for each ticker or ensure each ticker has its own data
-            logger.warning(f"Multiple tickers {tickers} but no 'tic' column in DataFrame")
-            # This is a placeholder - in a real implementation, 
-            # you'd need to properly structure data for multiple tickers
-        
-        # Create a multi-index with date and tic
-        logger.info("Creating multi-index DataFrame with (date, tic)")
-        df = df.set_index(['date', 'tic'])
-        
-        # Log the levels of the multi-index
-        logger.info(f"DataFrame multi-index levels: {df.index.names}")
-        logger.info(f"Final dataframe shape: {df.shape}")
-        logger.info(f"DataFrame columns: {df.columns}")
-        logger.info(f"First few rows of the DataFrame:\n{df.head()}")
-        
-    except Exception as e:
-        logger.error(f"Error creating synthetic data: {e}")
-        logger.error(traceback.format_exc())
-        raise
+            # Check for timestamp column which might be named 'date' or be in the index
+            if 'timestamp' not in df.columns:
+                if 'date' in df.columns:
+                    df.rename(columns={'date': 'timestamp'}, inplace=True)
+                else:
+                    # If neither timestamp nor date is in columns, index might be the date
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df['timestamp'] = df.index
+                        df.reset_index(drop=True, inplace=True)
+            
+            # Ensure datetime type for timestamp
+            if 'timestamp' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # Add 'tic' column if not present
+            if 'tic' not in df.columns:
+                logger.info(f"Adding 'tic' column with value: {tickers[0]}")
+                df['tic'] = tickers[0]
+            
+            # Create 'day' column if not present (required by some FinRL components)
+            if 'day' not in df.columns:
+                df['day'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d')
+            
+            # Create a multi-index dataframe with (timestamp, tic)
+            logger.info("Creating multi-index DataFrame with (timestamp, tic)")
+            df = df.rename(columns={'timestamp': 'date'})  # FinRL expects 'date'
+            df = df.set_index(['date', 'tic'])
+            
+            logger.info(f"Processed data shape: {df.shape}")
+            logger.info(f"DataFrame columns: {df.columns}")
+        except Exception as e:
+            logger.error(f"Error loading synthetic data: {e}")
+            logger.error(traceback.format_exc())
+            logger.warning("Falling back to generating new synthetic data")
+            df = None
+    else:
+        logger.info(f"No existing synthetic data found at {synthetic_data_path}, generating new data...")
+        df = None
+    
+    # Generate synthetic data or format the real data properly if loading failed
+    if df is None:
+        try:
+            # Try to import generate_data functions to use the same format
+            try:
+                # First try to import directly
+                from generate_data import generate_synthetic_data
+                logger.info("Using generate_data.py's generate_synthetic_data function")
+                
+                # Generate synthetic data using the consistent generator
+                output_dir = os.path.join('data', 'synthetic')
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Generate fewer samples for quick training (can be adjusted)
+                num_samples = 100000  # ~1 year of 15-min data
+                
+                # Generate data with the same format as generate_data.py
+                dataset = generate_synthetic_data(
+                    num_samples=num_samples,
+                    output_dir=output_dir
+                )
+                
+                # Use the 15m timeframe data for FinRL
+                df = dataset['15m'].copy()
+                df.reset_index(inplace=True)  # Convert index to column
+                df.rename(columns={'timestamp': 'date'}, inplace=True)  # Rename to match FinRL
+                
+                # Add tic column
+                df['tic'] = tickers[0]  # Assign first ticker to all rows
+                
+                # Set multi-index
+                df = df.set_index(['date', 'tic'])
+                
+                logger.info(f"Generated synthetic data using generate_data.py's format")
+            except (ImportError, ModuleNotFoundError):
+                logger.warning("Could not import generate_data module, falling back to internal synthetic data generation")
+                logger.info("Creating synthetic data with multi-index format for FinRL...")
+                df = create_synthetic_data(tickers, start_date, end_date)
+        except Exception as e:
+            logger.error(f"Error creating synthetic data: {e}")
+            logger.error(traceback.format_exc())
+            raise
     
     # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
     logger.info(f"Using DummyVecEnv for environment vectorization due to compatibility issues")
