@@ -1252,27 +1252,22 @@ def train_with_finrl(
             include_cash=include_cash,
             df=df  # Pass the formatted DataFrame
         )
-        # First try using SB3's Monitor which is still maintained
+        # For monitoring and logging, prioritize Gymnasium wrappers
         try:
-            from stable_baselines3.common.monitor import Monitor
-            logger.info("Using SB3's Monitor wrapper for logging")
-            return Monitor(env, None, allow_early_resets=True)
+            # Try with Gymnasium first since we know it's installed (version 1.1.1)
+            from gymnasium.wrappers import RecordEpisodeStatistics
+            logger.info("Using gymnasium's RecordEpisodeStatistics wrapper")
+            return RecordEpisodeStatistics(env)
         except (ImportError, AttributeError):
             try:
-                # If SB3 Monitor is not available, try gym's RecordEpisodeStatistics
-                from gymnasium.wrappers import RecordEpisodeStatistics
-                logger.info("Using gymnasium's RecordEpisodeStatistics wrapper")
-                return RecordEpisodeStatistics(env)
+                # Try SB3's Monitor as a fallback
+                from stable_baselines3.common.monitor import Monitor
+                logger.info("Using SB3's Monitor wrapper for logging")
+                return Monitor(env, None, allow_early_resets=True)
             except (ImportError, AttributeError):
-                try:
-                    # Try gym's RecordEpisodeStatistics as a last resort
-                    from gym.wrappers import RecordEpisodeStatistics
-                    logger.info("Using gym's RecordEpisodeStatistics wrapper")
-                    return RecordEpisodeStatistics(env)
-                except (ImportError, AttributeError):
-                    # If neither is available, just return the unwrapped environment
-                    logger.warning("No monitoring wrapper available, returning unwrapped environment")
-                    return env
+                # As a last resort, return the unwrapped environment
+                logger.warning("No monitoring wrapper available, returning unwrapped environment")
+                return env
     
     # Create the vectorized environment using DummyVecEnv
     envs = []
