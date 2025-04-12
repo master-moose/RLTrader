@@ -151,14 +151,117 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Train a DQN agent for cryptocurrency trading.'
     )
+    
+    # Model and training arguments
+    parser.add_argument(
+        '--lstm_model_path',
+        type=str,
+        help='Path to the trained LSTM model'
+    )
+    parser.add_argument(
+        '--use_finrl',
+        action='store_true',
+        help='Use FinRL framework for training'
+    )
     parser.add_argument(
         '--finrl_model',
         type=str,
         choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
+        default='dqn',
         help='FinRL model to use for training'
     )
+    parser.add_argument(
+        '--data_dir',
+        type=str,
+        default='data/synthetic',
+        help='Directory containing the data files'
+    )
+    parser.add_argument(
+        '--save_dir',
+        type=str,
+        default='models/dqn',
+        help='Directory to save the trained model'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Random seed for reproducibility'
+    )
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='cuda' if torch.cuda.is_available() else 'cpu',
+        help='Device to use for training'
+    )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose logging'
+    )
     
-    # Rest of the argument parsing
+    # Training parameters
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=64,
+        help='Batch size for training'
+    )
+    parser.add_argument(
+        '--learning_rate',
+        type=float,
+        default=0.0001,
+        help='Learning rate for the optimizer'
+    )
+    parser.add_argument(
+        '--gamma',
+        type=float,
+        default=0.99,
+        help='Discount factor for future rewards'
+    )
+    parser.add_argument(
+        '--epsilon_start',
+        type=float,
+        default=1.0,
+        help='Starting value for epsilon-greedy exploration'
+    )
+    parser.add_argument(
+        '--epsilon_end',
+        type=float,
+        default=0.01,
+        help='Final value for epsilon-greedy exploration'
+    )
+    parser.add_argument(
+        '--epsilon_decay',
+        type=float,
+        default=0.995,
+        help='Decay rate for epsilon-greedy exploration'
+    )
+    parser.add_argument(
+        '--target_update',
+        type=int,
+        default=1000,
+        help='Frequency of target network updates'
+    )
+    parser.add_argument(
+        '--memory_size',
+        type=int,
+        default=100000,
+        help='Size of the replay memory'
+    )
+    parser.add_argument(
+        '--episodes',
+        type=int,
+        default=1000,
+        help='Number of episodes to train'
+    )
+    parser.add_argument(
+        '--max_steps',
+        type=int,
+        default=1000,
+        help='Maximum number of steps per episode'
+    )
+    
     return parser.parse_args()
 
 def load_lstm_model(model_path, device):
