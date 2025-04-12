@@ -147,16 +147,39 @@ class BaseStockTradingEnv(gym.Env):
         self.day += 1
         done = self.day >= len(self.df) if self.df is not None else False
         
-        # Simple reward
+        # Calculate reward based on price change and action
         reward = 0
+        info = {"terminal_observation": self.state if done else None}
+        
+        if self.df is not None and self.day < len(self.df) and self.day > 0:
+            # Get current and previous price data
+            current_price = self.df.iloc[self.day]['close']
+            previous_price = self.df.iloc[self.day-1]['close']
+            price_change = (current_price - previous_price) / previous_price
+            
+            # Action is 0 (sell), 1 (hold), or 2 (buy)
+            if action == 0:  # Sell
+                reward = -price_change  # Reward for selling is positive when price goes down
+                info["action_type"] = "sell"
+            elif action == 2:  # Buy
+                reward = price_change  # Reward for buying is positive when price goes up
+                info["action_type"] = "buy"
+            else:  # Hold
+                # Small reward/penalty for holding based on whether price is trending up or down
+                reward = price_change * 0.1
+                info["action_type"] = "hold"
+            
+            # Scale reward for better learning
+            reward = reward * 100  # Scale up for better learning signal
+            info["price_change"] = price_change
+            info["reward"] = reward
         
         # Update state (simple implementation)
         if self.df is not None and self.day < len(self.df):
             self.data = self.df.iloc[self.day]
             # In a real implementation, we would update the state based on the action and new data
         
-        # For now, just return zeros as the state
-        return self.state, reward, done, {"terminal_observation": self.state if done else None}
+        return self.state, reward, done, info
         
     def render(self, mode='human'):
         """Render the environment."""
