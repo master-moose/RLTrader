@@ -521,6 +521,14 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna()
     
+    # IMPORTANT: FinRL StockTradingEnv requires a numerical index
+    # Reset the index to create a numerical one, and keep date as a column
+    if isinstance(df.index, pd.DatetimeIndex):
+        df.reset_index(inplace=True)
+        df.rename(columns={'index': 'datetime'}, inplace=True)
+        # Create the day column as an integer index (0, 1, 2, ...) that FinRL uses
+        df['day'] = np.arange(len(df))
+    
     logger.info(f"Prepared FinRL data with shape: {df.shape}")
     return df
 
