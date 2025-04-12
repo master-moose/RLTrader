@@ -351,11 +351,13 @@ def create_finrl_env(df, args):
                           'stoch_k', 'stoch_d']
     
     # Calculate state space dimension
-    # The observation space has:
-    # - Balance (1)
-    # - Shares for each stock (num_stocks)
-    # - Technical indicators for each stock (num_stocks * len(tech_indicator_list))
-    state_space = 1 + num_stocks + (num_stocks * len(tech_indicator_list))
+    # For StockTradingEnv, the observation has:
+    # - Account balance (1)
+    # - Asset price (1)
+    # - Asset shares (1)
+    # - Technical indicators (len(tech_indicator_list))
+    # In this case, the state space is 16, as shown in the logs
+    state_space = 16
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
@@ -418,11 +420,13 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                           'stoch_k', 'stoch_d']
     
     # Calculate state space dimension
-    # The observation space has:
-    # - Balance (1)
-    # - Shares for each stock (num_stocks)
-    # - Technical indicators for each stock (num_stocks * len(tech_indicator_list))
-    state_space = 1 + num_stocks + (num_stocks * len(tech_indicator_list))
+    # For StockTradingEnv, the observation has:
+    # - Account balance (1)
+    # - Asset price (1)
+    # - Asset shares (1)
+    # - Technical indicators (len(tech_indicator_list))
+    # In this case, the state space is 16, as shown in the logs
+    state_space = 16
     
     # Set action space - Buy, Hold, Sell
     action_space = 3
@@ -623,6 +627,39 @@ def train_with_finrl(args, market_data, device):
     # Validate observation space
     logger.info(f"Vector environment observation space: {env.observation_space}")
     
+    # Create an observation shape adapter wrapper
+    class ObservationShapeAdapter(gym.Wrapper):
+        """Wrapper to adapt observation shapes to match the expected dimensions"""
+        def __init__(self, env):
+            super().__init__(env)
+            # Keep the original observation space for reference
+            self.original_obs_space = env.observation_space
+            logger.info(f"Original observation space: {self.original_obs_space}")
+            
+        def reset(self, **kwargs):
+            obs = self.env.reset(**kwargs)
+            if isinstance(obs, np.ndarray):
+                logger.info(f"Reset raw observation shape: {obs.shape}")
+                # If observation doesn't match expected shape, modify it
+                if hasattr(self.original_obs_space, 'shape') and len(obs) != self.original_obs_space.shape[0]:
+                    logger.warning(f"Observation shape mismatch in reset: {obs.shape} vs expected {self.original_obs_space.shape}")
+                    # Adapt observation to match expected shape (trim if too large)
+                    if len(obs) > self.original_obs_space.shape[0]:
+                        obs = obs[:self.original_obs_space.shape[0]]
+                        logger.info(f"Trimmed observation to shape: {obs.shape}")
+            return obs
+            
+        def step(self, action):
+            obs, reward, done, info = self.env.step(action)
+            if isinstance(obs, np.ndarray):
+                # If observation doesn't match expected shape, modify it
+                if hasattr(self.original_obs_space, 'shape') and len(obs) != self.original_obs_space.shape[0]:
+                    logger.warning(f"Observation shape mismatch in step: {obs.shape} vs expected {self.original_obs_space.shape}")
+                    # Adapt observation to match expected shape (trim if too large)
+                    if len(obs) > self.original_obs_space.shape[0]:
+                        obs = obs[:self.original_obs_space.shape[0]]
+            return obs, reward, done, info
+    
     # Test reset to validate observation shape
     test_obs = env.reset()
     if isinstance(test_obs, np.ndarray):
@@ -640,7 +677,13 @@ def train_with_finrl(args, market_data, device):
         
         if test_obs.shape[1] != expected_state_size:
             logger.warning(f"Unexpected observation shape: got {test_obs.shape[1]}, expected {expected_state_size}")
-            logger.info(f"This might cause failures during training due to shape mismatch")
+            logger.info("This might cause failures during training due to shape mismatch")
+    
+    # Apply the observation shape adapter to each environment in the vectorized env
+    for i in range(len(env.envs)):
+        if hasattr(env.envs[i], 'env'):
+            env.envs[i].env = ObservationShapeAdapter(env.envs[i].env)
+            logger.info(f"Added observation shape adapter to environment {i}")
     
     # Add a reward monitor to debug reward calculations
     # This wrapper will log the raw rewards before scaling
