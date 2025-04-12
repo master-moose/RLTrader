@@ -439,13 +439,29 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
             # Wrap the environment to ensure consistent observation shape
             return StockTradingEnvWrapper(base_env, state_space=state_space)
         
-        # Add the environment creation function to the list
-        env_list.append(make_env)
+        # Add the environment creation function to the list with proper closure handling
+        env_fn = lambda idx=i: make_env(idx)
+        env_list.append(env_fn)
     
-    # Use SubprocVecEnv for parallel processing when num_workers > 1
-    # This gives better performance by running environments in separate processes
-    logger.info(f"Using {'SubprocVecEnv' if num_workers > 1 else 'DummyVecEnv'} for environment vectorization")
-    vec_env = SubprocVecEnv(env_list) if num_workers > 1 else DummyVecEnv(env_list)
+    try:
+        # Use SubprocVecEnv for parallel processing when num_workers > 1
+        # This gives better performance by running environments in separate processes
+        logger.info(f"Using {'SubprocVecEnv' if num_workers > 1 else 'DummyVecEnv'} for environment vectorization")
+        if num_workers > 1:
+            # Try to create SubprocVecEnv with error handling
+            try:
+                vec_env = SubprocVecEnv(env_list)
+                logger.info("Successfully created SubprocVecEnv")
+            except Exception as e:
+                logger.warning(f"Failed to create SubprocVecEnv: {str(e)}. Falling back to DummyVecEnv")
+                vec_env = DummyVecEnv(env_list)
+        else:
+            vec_env = DummyVecEnv(env_list)
+    except Exception as e:
+        logger.error(f"Error creating vectorized environment: {str(e)}")
+        logger.info("Falling back to DummyVecEnv as a safety measure")
+        vec_env = DummyVecEnv(env_list)
+    
     return vec_env
 
 def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
