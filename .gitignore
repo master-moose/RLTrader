@@ -29,3 +29,10 @@ models/
 *.ptl
 *.pthl
 *.pth.tar
+*.h5
+*.hdf5
+*.h5py
+*.h5py.tar
+*.h5py.tar.gz
+*.h5py.tar.gz.tar
+*.h5py.tar.gz.tar.gz
