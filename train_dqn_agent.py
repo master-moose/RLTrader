@@ -760,8 +760,17 @@ def train_with_finrl(args, market_data, device):
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
+        
+        # Handle both old and new gym API formats for seeding
         if hasattr(env, 'seed'):
             env.seed(args.seed)
+        elif hasattr(env, '_seed'):
+            env._seed(args.seed)
+        elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "_seed"):
+            env.unwrapped._seed(args.seed)
+        else:
+            logger.warning(f"Could not seed environment - no seed method found")
+            
         logger.info(f"Set random seed to {args.seed}")
     
     # Log environment information
