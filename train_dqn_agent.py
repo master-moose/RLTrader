@@ -670,15 +670,23 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     Create multiple FinRL environments for parallel training.
     
     Args:
-        df: DataFrame with market data
-        args: Command line arguments
-        num_workers: Number of parallel environments
+        df: DataFrame with financial data
+        args: Arguments from command line
+        num_workers: Number of worker environments to create
         
     Returns:
-        VecEnv with multiple environments
+        Vectorized environment
     """
-    num_envs_per_worker = getattr(args, 'num_envs_per_worker', 1)
+    env_list = []
+    StockTradingEnvClass = None
+    num_envs_per_worker = getattr(args, 'num_envs_per_worker', 4)
     use_subproc = getattr(args, 'use_subproc_vecenv', False)
+    
+    # Get device from args or default to CPU
+    device = None
+    if hasattr(args, 'device'):
+        import torch
+        device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith('cuda') else 'cpu')
     
     logger.info(f"Creating vectorized environment with {num_workers} workers and {num_envs_per_worker} envs per worker")
     logger.info(f"Using {'SubprocVecEnv' if use_subproc else 'DummyVecEnv'} for environment vectorization")
@@ -766,7 +774,6 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     hmax = getattr(args, 'hmax', 100)  # Maximum number of shares to trade
     
     # Create lists for transaction costs (required by FinRL)
-    transaction_cost_pct_list = [transaction_cost_pct] * stock_dim
     buy_cost_pct_list = [transaction_cost_pct] * stock_dim
     sell_cost_pct_list = [transaction_cost_pct] * stock_dim
     
@@ -840,87 +847,21 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         
         # Select the first day's data for testing
         first_day = df['day'].min()
-        test_df = df[df['day'] == first_day].reset_index(drop=True)
+        test_df = df[df['day'] == first_day].copy()
         logger.info(f"Test data shape: {test_df.shape}")
         
-        # Create a modified environment class that doesn't require specific DataFrame formats
-        class SafeStockTradingEnv(StockTradingEnvClass):
-            def _initiate_state(self):
-                """Safely initialize the state without expecting specific DataFrame formats"""
-                if hasattr(self, 'tech_indicator_list') and self.tech_indicator_list:
-                    tech_vals = []
-                    for indicator in self.tech_indicator_list:
-                        if indicator in self.df.columns:
-                            val = self.df.iloc[self.day][indicator]
-                            tech_vals.append(val)
-                        else:
-                            tech_vals.append(0.0)  # Default value if indicator not found
-                else:
-                    tech_vals = []
-                
-                # Get price and volume data safely
-                if self.day < len(self.df):
-                    row = self.df.iloc[self.day]
-                    price = row.get('close', 10000.0)  # Default price if 'close' not found
-                    volume = row.get('volume', 1000000.0)  # Default volume if 'volume' not found
-                else:
-                    price = 10000.0
-                    volume = 1000000.0
-                
-                # Create a simple state representation:
-                # [balance, positions values, prices, volumes, technical indicators]
-                state = [self.balance]  # Start with account balance
-                
-                # Add positions (stock holdings)
-                for stock_idx in range(self.stock_dim):
-                    state.append(self.state_memory[-1][stock_idx + 1])  # Add position from previous state
-                
-                # Add price info
-                state.append(float(price))
-                
-                # Add volume info
-                state.append(float(volume))
-                
-                # Add technical indicators
-                state.extend([float(x) for x in tech_vals])
-                
-                return np.array(state)
-                
-            def step(self, actions):
-                """Safely step the environment"""
-                self.terminal = self.day >= len(self.df) - 1
-                
-                if self.terminal:
-                    return self.state, 0, True, {}
-                    
-                # The rest of step implementation...
-                # This would be customized based on StockTradingEnvClass
-                # For now, we'll just return a placeholder state
-                self.day += 1
-                reward = 0.0
-                done = False
-                info = {}
-                
-                # Update state
-                self.state = self._initiate_state()
-                
-                return self.state, reward, done, info
-            
-        # Use the safe environment class instead
-        StockTradingEnvClass = SafeStockTradingEnv
-        
-        # Create a test environment to check the state dimension
+        # Create test parameters that match expected parameters
         test_params = {
-            'df': df,
+            'df': test_df,
             'stock_dim': stock_dim,
             'hmax': hmax,
-            'initial_amount': initial_amount, 
+            'num_stock_shares': [0] * stock_dim,  # Required parameter
+            'initial_amount': initial_amount,
             'buy_cost_pct': buy_cost_pct_list,
             'sell_cost_pct': sell_cost_pct_list,
-            'state_space': state_space,
-            'action_space': action_space,
-            'tech_indicator_list': tech_indicator_list,
             'reward_scaling': reward_scaling,
+            'state_space': state_space,
+            'tech_indicator_list': tech_indicator_list,
             'print_verbosity': 0
         }
         
@@ -955,11 +896,11 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     'df': df,
                     'stock_dim': stock_dim,
                     'hmax': hmax,
-                    'num_stock_shares': [0] * stock_dim,  # Start with no shares
+                    'num_stock_shares': [0] * stock_dim,  # Start with no shares - REQUIRED parameter
                     'action_space': action_space,
                     'tech_indicator_list': tech_indicator_list,
                     'initial_amount': initial_amount,
-                    'transaction_cost_pct': transaction_cost_pct_list,
+                    # 'transaction_cost_pct': transaction_cost_pct_list,  # Remove - not accepted by FinRL
                     'buy_cost_pct': buy_cost_pct_list,  # Pass as list
                     'sell_cost_pct': sell_cost_pct_list,  # Pass as list
                     'reward_scaling': reward_scaling,
@@ -990,13 +931,13 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         env_list.append(env_fn)
     
     # Create the vectorized environment
-    if use_subproc and str(device).startswith('cpu'):
+    if use_subproc and (device is None or str(device).startswith('cpu')):
         # Import the SubprocVecEnv from stable_baselines3
         from stable_baselines3.common.vec_env import SubprocVecEnv
         vec_env = SubprocVecEnv(env_list)
         logger.info("Using SubprocVecEnv for parallel environment execution")
     else:
-        if use_subproc and not str(device).startswith('cpu'):
+        if use_subproc and device is not None and not str(device).startswith('cpu'):
             logger.info("SubprocVecEnv requested but running on GPU. Using DummyVecEnv instead for better GPU utilization.")
         vec_env = DummyVecEnv(env_list)
         logger.info("Using DummyVecEnv for environment vectorization")
