@@ -2,39 +2,49 @@
 # -*- coding: utf-8 -*-
 
 """
-Train a DQN agent for cryptocurrency trading using the LSTM model for state representation.
-With FinRL integration for improved GPU utilization.
+Train a DQN agent for cryptocurrency trading using an LSTM model.
+Includes FinRL integration for enhanced model capabilities.
 """
 
 import os
 import argparse
 import json
 import logging
+import traceback
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import traceback
-from datetime import datetime
-from tqdm import tqdm
-import torch.nn.functional as F
-from concurrent.futures import ThreadPoolExecutor
-import psutil
-import h5py
-import pandas as pd
 import gym
-
-# Setup logging first so it's available for import statements
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+)
 from stable_baselines3.common.utils import set_random_seed
+from cryptocurrency_trading_env import CryptocurrencyTradingEnv
+from lstm_dqn_agent import LSTMDQNAgent
+from utils.data_utils import prepare_data, load_data
+
+# Import FinRL components if available
+try:
+    from finrl.meta.env_stock_trading.env_stocktrading import (
+        StockTradingEnv as FinRLStockTradingEnv
+    )
+    from finrl.meta.preprocessor.preprocessors import FeatureEngineer
+    from finrl.agents.stablebaselines3.models import DRLAgent
+    HAS_FINRL = True
+except ImportError:
+    HAS_FINRL = False
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Define a fallback for INDICATORS in case we can't import it
 INDICATORS = ['macd', 'rsi', 'cci', 'dx']
 
-# Define a basic StockTradingEnv class that can be used if imports fail
-class StockTradingEnv(gym.Env):
+
+class BaseStockTradingEnv(gym.Env):
     """Placeholder StockTradingEnv in case FinRL imports fail"""
     def __init__(self, df=None, **kwargs):
         self.observation_space = gym.spaces.Box(
@@ -42,73 +52,16 @@ class StockTradingEnv(gym.Env):
         )
         self.action_space = gym.spaces.Discrete(3)  # buy, hold, sell
         logger.warning("Using placeholder StockTradingEnv - NOT FUNCTIONAL!")
-        
+    
     def reset(self):
         return np.zeros(100)
-        
+    
     def step(self, action):
         return np.zeros(100), 0, True, {}
 
-# Try different known import paths for FinRL 0.3.7
-try:
-    # Try importing the components directly
-    try:
-        from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
-        from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-        from finrl.agents.stablebaselines3.models import DRLAgent
-        logger.info("Using FinRL 0.3.7 direct path imports")
-    except ImportError:
-        # Try alternate paths
-        try:
-            from finrl.env_stock_trading.env_stocktrading import StockTradingEnv
-            from finrl.preprocessing.preprocessors import FeatureEngineer
-            from finrl.drl.stable_baselines3.models import DRLAgent
-            logger.info("Using FinRL 0.3.7 alternate path imports")
-        except ImportError:
-            # Try another possible layout
-            try:
-                from finrl.applications.stock_trading.stock_trading import StockTradingEnv
-                from finrl.applications.preprocessor.preprocessors import FeatureEngineer
-                from finrl.applications.models import DRLAgent
-                logger.info("Using FinRL 0.3.7 applications path imports")
-            except ImportError:
-                # Last attempt
-                logger.error("Failed to import StockTradingEnv from any known path")
-                from stable_baselines3.common.base_class import BaseAlgorithm as DRLAgent
-                # Note: StockTradingEnv is already defined above as a fallback
-                # Define a stub for FeatureEngineer
-                class FeatureEngineer:
-                    def __init__(self, **kwargs):
-                        pass
-                    def preprocess_data(self, df):
-                        logger.warning("Using fallback FeatureEngineer - returning unprocessed data")
-                        return df
-    
-    # Try to import INDICATORS
-    try:
-        from finrl.meta.config import INDICATORS
-    except ImportError:
-        try:
-            from finrl.config import INDICATORS
-        except ImportError:
-            try:
-                from finrl.config.config import INDICATORS
-            except ImportError:
-                logger.warning(f"Using default INDICATORS: {INDICATORS}")
 
-except Exception as e:
-    logger.error(f"Error setting up FinRL imports: {e}")
-    # StockTradingEnv is already defined above
-    from stable_baselines3.common.base_class import BaseAlgorithm as DRLAgent
-    logger.warning("Using BaseAlgorithm from stable-baselines3 as fallback")
-    
-    # Define a minimal FeatureEngineer stub
-    class FeatureEngineer:
-        def __init__(self, **kwargs):
-            pass
-        def preprocess_data(self, df):
-            logger.warning("Using stub FeatureEngineer - returning unprocessed data")
-            return df
+# Use FinRL's StockTradingEnv if available, otherwise use placeholder
+StockTradingEnv = FinRLStockTradingEnv if HAS_FINRL else BaseStockTradingEnv
 
 # Create alias for CryptocurrencyTradingEnv
 CryptocurrencyTradingEnv = StockTradingEnv
@@ -126,105 +79,17 @@ BAD_TRADE_THRESHOLD = -0.001  # -0.1% loss threshold for a bad trade
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Train a DQN agent for cryptocurrency trading')
-    
-    # Data and model paths
-    parser.add_argument('--data_dir', type=str, default='data/synthetic',
-                        help='Directory containing the training data')
-    parser.add_argument('--lstm_model_path', type=str, required=True,
-                        help='Path to the trained LSTM model checkpoint')
-    parser.add_argument('--output_dir', type=str, default='models/dqn',
-                        help='Directory to save trained models and results')
-    
-    # Training parameters
-    parser.add_argument('--episodes', type=int, default=1000,
-                        help='Number of episodes to train')
-    parser.add_argument('--episode_length', type=int, default=10000,
-                        help='Length of each episode in steps (default: 10000)')
-    parser.add_argument('--batch_size', type=int, default=256,
-                        help='Batch size for experience replay')
-    parser.add_argument('--buffer_size', type=int, default=100000,
-                        help='Size of the replay buffer')
-    parser.add_argument('--gamma', type=float, default=0.99,
-                        help='Discount factor for future rewards')
-    parser.add_argument('--epsilon_start', type=float, default=1.0,
-                        help='Initial exploration rate')
-    parser.add_argument('--epsilon_end', type=float, default=0.05,
-                        help='Final exploration rate')
-    parser.add_argument('--epsilon_decay', type=float, default=0.998,
-                        help='Exploration rate decay factor')
-    parser.add_argument('--learning_rate', type=float, default=0.0005,
-                        help='Learning rate for the Q-network')
-    parser.add_argument('--target_update', type=int, default=10,
-                        help='Frequency of target network updates (episodes)')
-    parser.add_argument('--updates_per_step', type=int, default=1,
-                        help='Number of network updates per environment step')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed for reproducibility')
-    
-    # Environment parameters
-    parser.add_argument('--window_size', type=int, default=20,
-                        help='Window size for observations')
-    parser.add_argument('--initial_balance', type=float, default=10000.0,
-                        help='Initial balance for trading')
-    parser.add_argument('--transaction_fee', type=float, default=0.001,
-                        help='Transaction fee as a percentage')
-    parser.add_argument('--reward_scaling', type=float, default=0.001,
-                        help='Scaling factor for rewards')
-    parser.add_argument('--trade_cooldown', type=int, default=12,
-                        help='Number of steps between trades')
-    parser.add_argument('--primary_timeframe', type=str, default='1h',
-                        help='Primary timeframe for trading')
-    parser.add_argument('--use_indicators', action='store_true',
-                        help='Whether to use technical indicators')
-    parser.add_argument('--use_position_features', action='store_true',
-                        help='Whether to include position features in state')
-    parser.add_argument('--lookback_window', type=int, default=20,
-                        help='Lookback window for LSTM features')
-    
-    # Parallelization
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of parallel environments to run')
-    
-    # Device
-    parser.add_argument('--device', type=str, default=None,
-                        help='Device to use (cpu or cuda, None for auto-detection)')
-    
-    # Performance options
-    parser.add_argument('--use_amp', action='store_true',
-                        help='Use Automatic Mixed Precision for faster training')
-    
-    # Saving and evaluation options
-    parser.add_argument('--save_dir', type=str, default='models/dqn',
-                        help='Directory to save model checkpoints')
-    parser.add_argument('--save_interval', type=int, default=50,
-                        help='Frequency to save model checkpoints (episodes)')
-    parser.add_argument('--eval_interval', type=int, default=0,
-                        help='Frequency to evaluate model (episodes, 0 to disable)')
-    
-    # FinRL specific options
-    parser.add_argument('--use_finrl', action='store_true',
-                        help='Use FinRL framework for training')
-    parser.add_argument(
-        '--finrl_model', 
-        type=str, 
-        choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
-        default='dqn', 
-        help='FinRL algorithm to use'
+    parser = argparse.ArgumentParser(
+        description='Train a DQN agent for cryptocurrency trading.'
     )
-    parser.add_argument('--net_arch', type=str, default='[256,256]',
-                        help='Network architecture for FinRL models')
-    parser.add_argument('--tensorboard_log', type=str, default='./tensorboard_logs',
-                        help='TensorBoard log directory')
-    parser.add_argument('--total_timesteps', type=int, default=1000000,
-                        help='Total timesteps for FinRL training')
+    parser.add_argument(
+        '--finrl_model',
+        type=str,
+        choices=['dqn', 'ppo', 'a2c', 'ddpg', 'td3', 'sac'],
+        help='FinRL model to use for training'
+    )
     
-    # Debug
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug mode')
-    parser.add_argument('--verbose', action='store_true',
-                        help='Enable verbose logging')
-    
+    # Rest of the argument parsing
     return parser.parse_args()
 
 def load_lstm_model(model_path, device):
@@ -459,111 +324,23 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe=None):
                 result_df['date'] = pd.date_range(start='2020-01-01', periods=len(result_df), freq='1h')
         return result_df
 
-def create_finrl_env(processed_data, args, env_id=0):
-    """
-    Create a FinRL environment from processed data.
+def create_finrl_env(df, config):
+    """Create a FinRL environment for cryptocurrency trading."""
+    num_stocks = len(df['tic'].unique())
+    num_stock_shares = [0] * num_stocks
     
-    Parameters:
-    -----------
-    processed_data : pd.DataFrame
-        Processed data from prepare_crypto_data_for_finrl
-    args : argparse.Namespace
-        Command line arguments
-    env_id : int
-        Environment ID
-        
-    Returns:
-    --------
-    env : gym.Env
-        FinRL environment
-    """
-    # Define the stock dimension (number of unique stocks/cryptos)
-    stock_dimension = len(processed_data['tic'].unique())
-    
-    # Define state space dimension
-    state_space = 1 + 2*stock_dimension + len(INDICATORS)*stock_dimension
-    if args.use_position_features:
-        state_space += 2  # Add position and unrealized PnL
-        
-    # Define action space dimension
-    if args.finrl_model in ['ddpg', 'td3', 'sac']:
-        action_space = 1  # Continuous action space for these algorithms
-    else:
-        action_space = 3  # buy, hold, sell (discrete)
-    
-    # Define environment parameters - CRITICAL: Only use parameters that FinRL 0.3.7 accepts
-    env_kwargs = {
-        "initial_amount": args.initial_balance,
-        "buy_cost_pct": args.transaction_fee,
-        "sell_cost_pct": args.transaction_fee,
-        "state_space": state_space,
-        "stock_dim": stock_dimension,
-        "tech_indicator_list": INDICATORS,
-        "action_space": action_space,
-        "reward_scaling": args.reward_scaling,
+    env_config = {
+        'df': None,  # Will be set after preprocessing
+        'num_stock_shares': num_stock_shares,
+        'transaction_cost_pct': config.get('transaction_cost_pct', 0.001),
+        'state_space': len(INDICATORS) + 2,  # +2 for price and shares held
+        'action_space': 3,  # buy, hold, sell
+        'tech_indicator_list': INDICATORS,
+        'print_verbosity': 1
     }
     
-    # Add hmax only if not using placeholder StockTradingEnv
-    if hasattr(StockTradingEnv, '__module__') and 'finrl' in StockTradingEnv.__module__:
-        env_kwargs["hmax"] = 100  # Max number of shares to trade
-    
-    logger.info(f"Creating environment with parameters: {env_kwargs}")
-    
-    # Process data for environment
-    train_data = processed_data.copy()
-    
-    # CRITICAL: Ensure we have a date column
-    if 'date' not in train_data.columns:
-        logger.warning("No date column found in processed data, creating one")
-        train_data['date'] = pd.date_range(start='2020-01-01', periods=len(train_data), freq='1h')
-    
-    # Sort by date and tic - required by FinRL
-    try:
-        train_data = train_data.sort_values(['date', 'tic'], ignore_index=True)
-    except Exception as e:
-        logger.error(f"Error sorting data: {e}")
-        # If the sort fails, just reset the index
-        train_data = train_data.reset_index(drop=True)
-    
-    # Create an integer index from date values for FinRL
-    try:
-        # Add a temporary numeric column based on date factorization
-        factorized_dates, _ = train_data['date'].factorize()
-        train_data['date_id'] = factorized_dates
-        # Use this as index instead of modifying the original index
-        train_data = train_data.set_index('date_id')
-    except Exception as e:
-        logger.error(f"Error setting factorized index: {e}")
-        # Use simple sequential index if factorize fails
-        train_data.index = np.arange(len(train_data))
-    
-    # Create environment
-    try:
-        logger.info(f"Creating environment with StockTradingEnv class: {StockTradingEnv}")
-        env = CryptocurrencyTradingEnv(df=train_data, **env_kwargs)
-        
-        # For single process environment
-        env_train = DummyVecEnv([lambda: env])
-        
-        return env_train
-    except Exception as e:
-        logger.error(f"Error creating environment: {e}")
-        logger.error(traceback.format_exc())
-        
-        # Try with a more minimal set of parameters as fallback
-        try:
-            minimal_kwargs = {
-                "df": train_data,
-                "stock_dim": stock_dimension,
-                "initial_amount": args.initial_balance,
-                "transaction_cost_pct": args.transaction_fee
-            }
-            logger.info(f"Attempting with minimal parameters: {minimal_kwargs}")
-            env = CryptocurrencyTradingEnv(**minimal_kwargs)
-            return DummyVecEnv([lambda: env])
-        except Exception as fallback_error:
-            logger.error(f"Fallback also failed: {fallback_error}")
-            raise
+    env = CryptocurrencyTradingEnv(**env_config)
+    return env
 
 def train_dqn_agent(args):
     """
@@ -694,7 +471,7 @@ def train_with_finrl(args, market_data, device):
     processed_data = prepare_crypto_data_for_finrl(market_data, args.primary_timeframe)
     
     # Create environment
-    env_train = create_finrl_env(processed_data, args, env_id=0)
+    env_train = create_finrl_env(processed_data, args)
     
     # Setup agent parameters
     if args.finrl_model in ['sac', 'td3', 'ddpg']:
