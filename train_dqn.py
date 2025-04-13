@@ -45,7 +45,31 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import datetime
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
+import os
+import time
+import sys
+
+# Apply custom patches to stable-baselines3
+try:
+    from patch_sb3_runner import setup_patches
+    if setup_patches():
+        logging.info("Successfully applied patches to stable-baselines3")
+    else:
+        logging.warning("Failed to apply some patches to stable-baselines3")
+except ImportError:
+    logging.warning("patch_sb3_runner not found, continuing without patches")
+
+# Configure logging with a more visible format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 # Set project root to path
 project_root = str(Path(__file__).parent)
@@ -56,17 +80,6 @@ if project_root not in sys.path:
 from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.utils import set_seeds
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("logs/training.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # Define technical indicators to ensure they're included in the environment
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
@@ -679,17 +692,50 @@ class TensorboardCallback(BaseCallback):
         
         # Debug counter
         self.debug_steps = 0
-        self.debug_frequency = 1000
+        self.debug_frequency = 500  # Reduced from 1000 to 500 to see more updates
         self.last_debug_output = 0
+        
+        # Total steps counter for progress tracking
+        self.total_steps = 0
+        self.start_time = time.time()
     
     def _on_step(self) -> bool:
         """Called at each step"""
         self.debug_steps += 1
+        self.total_steps += 1
         
-        # Debug output every N steps
-        if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
+        # Log step count and training progress every N steps
+        if self.debug_steps % self.debug_frequency == 0:
             self.last_debug_output = self.debug_steps
-            logger.info(f"Training progress at step {self.debug_steps}")
+            
+            # Calculate time metrics
+            elapsed_time = time.time() - self.start_time
+            steps_per_second = self.total_steps / max(1, elapsed_time)
+            
+            # Log basic progress info
+            logger.info(f"Training progress at step {self.total_steps}")
+            
+            # Log to tensorboard
+            self.logger.record("time/total_timesteps", self.total_steps)
+            self.logger.record("time/steps_per_second", steps_per_second)
+            
+            # Explicitly flush logger to ensure metrics are written
+            if hasattr(self.logger, 'dump'):
+                self.logger.dump(self.total_steps)
+        
+        # Log action counts periodically
+        if self.debug_steps % (self.debug_frequency * 2) == 0:
+            total_actions = sum(self.action_counts.values()) or 1  # Avoid division by zero
+            
+            # Calculate action percentages
+            for action, count in self.action_counts.items():
+                action_name = {0: "sell", 1: "hold", 2: "buy"}.get(action, f"action_{action}")
+                action_pct = (count / total_actions) * 100
+                self.logger.record(f"actions/{action_name}_pct", action_pct)
+            
+            # Log hold ratio as a key metric
+            hold_ratio = (self.action_counts.get(1, 0) / total_actions) * 100
+            self.logger.record("actions/hold_ratio", hold_ratio)
         
         # Log rewards when episodes complete
         if self.locals is not None and 'dones' in self.locals and 'rewards' in self.locals:
@@ -698,6 +744,17 @@ class TensorboardCallback(BaseCallback):
                     reward = self.locals['rewards'][i]
                     self.episode_rewards.append(reward)
                     self.logger.record('environment/reward', reward)
+                    self.logger.record('environment/episodes', len(self.episode_rewards))
+                    
+                    # Log mean and std of recent rewards
+                    if len(self.episode_rewards) > 0:
+                        recent_rewards = self.episode_rewards[-min(10, len(self.episode_rewards)):]
+                        mean_reward = sum(recent_rewards) / len(recent_rewards)
+                        self.logger.record('environment/mean_reward', mean_reward)
+                        
+                        if len(recent_rewards) > 1:
+                            reward_std = np.std(recent_rewards)
+                            self.logger.record('environment/reward_std', reward_std)
                     
                     # If info dict available, extract additional metrics
                     if 'infos' in self.locals and len(self.locals['infos']) > i:
@@ -708,6 +765,12 @@ class TensorboardCallback(BaseCallback):
                             portfolio_value = info['portfolio_value']
                             self.portfolio_values.append(portfolio_value)
                             self.logger.record('portfolio/value', portfolio_value)
+                            
+                            # Log portfolio growth percentage from start
+                            if hasattr(self.training_env, 'envs') and hasattr(self.training_env.envs[0], 'initial_amount'):
+                                initial_amount = self.training_env.envs[0].initial_amount
+                                portfolio_growth_pct = ((portfolio_value / initial_amount) - 1) * 100
+                                self.logger.record('portfolio/growth_pct', portfolio_growth_pct)
                         
                         # Track cooldown violations
                         if 'cooldown_violation' in info and info['cooldown_violation']:
@@ -725,7 +788,11 @@ class TensorboardCallback(BaseCallback):
                             self.logger.record('safety/same_price_trades', self.same_price_trades)
                         
                         # Track actions if available
-                        if 'action' in info:
+                        if 'action_taken' in info:
+                            action = info['action_taken']
+                            if action in self.action_counts:
+                                self.action_counts[action] += 1
+                        elif 'action' in info:
                             action = info['action']
                             if action in self.action_counts:
                                 self.action_counts[action] += 1
@@ -754,6 +821,10 @@ class TensorboardCallback(BaseCallback):
                                 if self.total_loss > 0:
                                     profit_factor = self.total_profit / max(self.total_loss, 1e-6)
                                     self.logger.record('trades/profit_factor', profit_factor)
+                                    
+                # Force logger to write metrics to disk more frequently
+                if hasattr(self.logger, 'dump'):
+                    self.logger.dump(self.total_steps)
         
         return True
 
@@ -1179,7 +1250,6 @@ def train_dqn(env, args):
         
     except Exception as e:
         logger.error(f"Error during DQN training: {str(e)}")
-        import traceback
         logger.error(traceback.format_exc())
         return None
 
@@ -1313,8 +1383,8 @@ def train_a2c(env, args):
     )
     callbacks.append(checkpoint_callback)
     
-    # Add tensorboard callback for logging
-    tensorboard_callback = TensorboardCallback()
+    # Add tensorboard callback for logging with more frequent updates
+    tensorboard_callback = TensorboardCallback(verbose=1)
     callbacks.append(tensorboard_callback)
     
     # Combine callbacks
@@ -1335,8 +1405,16 @@ def train_a2c(env, args):
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Create A2C-specific policy_kwargs
-    policy_kwargs = {}
+    # Create A2C-specific policy_kwargs with better defaults for training stability
+    policy_kwargs = {
+        'net_arch': {
+            'pi': [256, 256],  # Actor network
+            'vf': [256, 256]   # Value function network
+        },
+        'activation_fn': nn.Tanh,  # Use Tanh for more stable training
+        'use_rms_prop': True,  # Use RMSProp
+        'rms_prop_eps': 1e-5
+    }
     
     # Add LSTM feature extractor if provided
     lstm_model = None
@@ -1348,7 +1426,10 @@ def train_a2c(env, args):
         policy_kwargs["features_extractor_kwargs"] = {"lstm_model": lstm_model}
         
     logger.info(f"Creating A2C model with n_steps={args.n_steps}, using device={device}")
+    # Import A2C which should now be our patched version
     from stable_baselines3 import A2C
+    
+    # Use higher verbosity for better progress tracking
     model = A2C(
         "MlpPolicy",
         env,
@@ -1362,7 +1443,7 @@ def train_a2c(env, args):
         use_rms_prop=True,  # Use RMSProp optimizer instead of Adam for A2C
         rms_prop_eps=1e-5,
         normalize_advantage=True,
-        verbose=1 if args.verbose else 0,
+        verbose=2 if args.verbose else 1,  # Increase verbosity to see progress bar
         tensorboard_log=tensorboard_log_dir,
         device=device,
         policy_kwargs=policy_kwargs,
@@ -1374,7 +1455,8 @@ def train_a2c(env, args):
         model.learn(
             total_timesteps=args.timesteps,
             callback=callback,
-            tb_log_name="a2c_run"
+            tb_log_name="a2c_run_1",  # Adding _1 suffix to make it clearer in TensorBoard
+            progress_bar=True  # Enable progress bar
         )
         
         # Save trained model
