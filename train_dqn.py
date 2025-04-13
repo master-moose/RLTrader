@@ -38,6 +38,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.dqn.policies import DQNPolicy  # Add explicit import for DQNPolicy
 from typing import Dict, List, Tuple, Union, Optional, Any, Callable
 import psutil
 import pandas as pd
@@ -178,7 +179,7 @@ class LSTMFeatureExtractor(BaseFeaturesExtractor):
         return self.output_layer(features)
 
 # Add a custom policy for DQN that discourages holding
-class AntiHoldPolicy(stable_baselines3.dqn.policies.DQNPolicy):
+class AntiHoldPolicy(DQNPolicy):  # Change from stable_baselines3.dqn.policies.DQNPolicy to just DQNPolicy
     """
     A custom DQN policy that discourages the hold action by artificially
     reducing its Q-value during action selection.
