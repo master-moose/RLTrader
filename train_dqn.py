@@ -1609,7 +1609,6 @@ def train_a2c(env, args, callbacks=None):
     learning_rate = args.learning_rate
     gamma = args.gamma
     ent_coef = args.ent_coef
-    batch_size = args.batch_size  # Get batch_size from args
     
     # Set n_steps to represent 1 year of 15-min candles (96 candles per day * 365 days)
     n_steps = args.n_steps if hasattr(args, 'n_steps') else 35040
@@ -1617,14 +1616,20 @@ def train_a2c(env, args, callbacks=None):
     # Get number of environments
     num_envs = env.num_envs if hasattr(env, 'num_envs') else 1
     
+    # Note: A2C doesn't use batch_size directly like DQN. Instead, its effective batch size
+    # is determined by n_steps * num_envs (the number of environments running in parallel)
+    batch_size = args.batch_size  # Still store for logging purposes
+    
     # Log the updated parameters
     logger.info(f"Using n_steps={n_steps} (1 year of 15-min candles: 96 candles/day * 365 days)")
+    # Note that this isn't directly passed to A2C but useful to track
     logger.info(f"Using batch size: {batch_size} for A2C training")
     logger.info(f"Training with {num_envs} parallel environments")
     
     # Calculate effective batch size considering the number of environments
-    effective_batch_size = batch_size * num_envs
-    logger.info(f"Effective batch size (batch_size × num_envs): {effective_batch_size}")
+    # This is the actual batch size A2C will use internally
+    effective_batch_size = n_steps * num_envs
+    logger.info(f"Effective batch size (n_steps × num_envs): {effective_batch_size}")
     
     # Increase entropy coefficient significantly to encourage exploration
     ent_coef = max(ent_coef, 0.20)  # Increased from 0.05 to 0.20 for much more exploration
@@ -1693,12 +1698,11 @@ def train_a2c(env, args, callbacks=None):
         rms_prop_eps=1e-5,
         verbose=1,
         tensorboard_log="./logs/a2c/",
-        policy_kwargs=policy_kwargs,
-        batch_size=batch_size  # Add the batch_size parameter
+        policy_kwargs=policy_kwargs
     )
     
     # Log key parameters to ensure they're being used
-    logger.info(f"A2C Model initialized with: n_steps={n_steps}, batch_size={batch_size}")
+    logger.info(f"A2C Model initialized with: n_steps={n_steps} (effective batch size: {n_steps * num_envs})")
     logger.info(f"Environment initialized with: initial_balance={args.initial_balance}, max_steps={args.max_steps}")
     
     # Load model from checkpoint if specified
@@ -1726,8 +1730,7 @@ def train_a2c(env, args, callbacks=None):
                     rms_prop_eps=1e-5,
                     verbose=1,
                     tensorboard_log="./logs/a2c/",
-                    policy_kwargs=policy_kwargs,
-                    batch_size=batch_size  # Add the batch_size parameter
+                    policy_kwargs=policy_kwargs
                 )
             else:
                 # Re-raise the exception if it's not the specific one we're handling
@@ -1743,7 +1746,7 @@ def train_a2c(env, args, callbacks=None):
     
     try:
         # Log the actual parameters before training starts
-        logger.info(f"Starting A2C training with batch_size={batch_size}, n_steps={n_steps}, total_timesteps={total_timesteps}")
+        logger.info(f"Starting A2C training with n_steps={n_steps} (effective batch size: {n_steps * num_envs}), total_timesteps={total_timesteps}")
         
         model.learn(
             total_timesteps=total_timesteps,
