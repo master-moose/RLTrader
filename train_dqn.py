@@ -82,38 +82,36 @@ MAX_TRADE_FREQUENCY = 0.95  # Increased from 0.80 to 0.95 - allow up to 95% of s
 # Class for LSTM feature extraction
 class LSTMFeatureExtractor(BaseFeaturesExtractor):
     """
-    Feature extractor that uses a pre-trained LSTM model for state representation.
+    Feature extractor that uses an LSTM model to process observations before 
+    passing them to the policy network.
     
-    The LSTM model is loaded from a saved state dict and used to extract features
-    from the environment observations before passing them to the RL policy.
+    This allows utilization of pre-trained LSTM models for feature extraction
+    in reinforcement learning.
     """
     
     def __init__(self, observation_space, lstm_state_dict=None, features_dim=64):
         """
-        Initialize the feature extractor.
+        Initialize the LSTM feature extractor.
         
         Args:
             observation_space: The observation space of the environment
-            lstm_state_dict: The state dict of the pre-trained LSTM model
-            features_dim: The dimension of the features to extract
+            lstm_state_dict: The state dictionary of a pre-trained LSTM model
+            features_dim: The output dimension of the LSTM features
         """
-        super(LSTMFeatureExtractor, self).__init__(observation_space, features_dim)
+        # Call the parent constructor with the correct features_dim
+        super().__init__(observation_space, features_dim=features_dim)
         
-        # Initialize the LSTM model
-        self.lstm_model = None
-        # Don't set features_dim directly as it's already set by the parent class
-        # self.features_dim = features_dim  # This line is causing the error
+        # Create LSTM model architecture - this should match the saved model
+        input_dim = observation_space.shape[0]
+        self.lstm_model = torch.nn.LSTM(
+            input_size=input_dim, 
+            hidden_size=features_dim,
+            num_layers=1,
+            batch_first=True
+        )
         
+        # Try to load the state dict
         if lstm_state_dict is not None:
-            # Create LSTM model architecture - this should match the saved model
-            self.lstm_model = torch.nn.LSTM(
-                input_size=observation_space.shape[0], 
-                hidden_size=features_dim,
-                num_layers=1,
-                batch_first=True
-            )
-            
-            # Try to load the state dict
             try:
                 # Use partial loading if the state dicts don't match exactly
                 if hasattr(lstm_state_dict, 'items'):  # It's a dictionary
@@ -139,45 +137,34 @@ class LSTMFeatureExtractor(BaseFeaturesExtractor):
                 logger.error(f"Error loading LSTM weights: {e}")
                 logger.error(traceback.format_exc())
         
-        # If LSTM model is not available, use a simple linear layer
-        if self.lstm_model is None:
-            logger.warning("Using linear layer for feature extraction instead of LSTM")
-            self.linear = torch.nn.Linear(observation_space.shape[0], features_dim)
-            
-        # Output layer to ensure proper dimension
-        self.output_layer = torch.nn.Linear(features_dim, features_dim)
+        # Set to eval mode since we're not training the LSTM
+        self.lstm_model.eval()
         
     def forward(self, observations):
         """
-        Extract features from observations using the LSTM model.
+        Process observations through the LSTM feature extractor.
         
         Args:
-            observations: The observations from the environment
+            observations: Tensor of observations from the environment
             
         Returns:
-            torch.Tensor: The extracted features
+            Tensor of processed features
         """
-        # Add sequence dimension if not present
-        if len(observations.shape) == 2:
-            # For batched observations without sequence dimension
-            # Shape from [batch_size, features] to [batch_size, 1, features]
-            observations = observations.unsqueeze(1)
+        # Ensure observations are of the right shape
+        # LSTM expects [batch_size, sequence_length, input_size]
         
-        if self.lstm_model is not None:
-            # Use LSTM for feature extraction
-            try:
-                lstm_out, _ = self.lstm_model(observations)
-                # Take the last time step output
-                features = lstm_out[:, -1, :]
-            except Exception as e:
-                logger.error(f"Error in LSTM forward pass: {e}")
-                # Fallback to linear layer
-                features = self.output_layer(observations[:, -1, :])
-        else:
-            # Use linear layer
-            features = self.linear(observations[:, -1, :])
-        
-        return self.output_layer(features)
+        with torch.no_grad():  # No need to track gradients in feature extraction
+            # Process as a single timestep sequence [batch_size, 1, input_size]
+            # Add sequence dimension
+            obs_seq = observations.unsqueeze(1)
+            
+            # Forward pass through LSTM
+            lstm_out, _ = self.lstm_model(obs_seq)
+            
+            # Extract the output for the last timestep [batch_size, features_dim]
+            features = lstm_out[:, -1, :]
+            
+        return features
 
 # Add a custom policy for DQN that discourages holding
 class AntiHoldPolicy(DQNPolicy):  # Change from stable_baselines3.dqn.policies.DQNPolicy to just DQNPolicy
@@ -1676,6 +1663,15 @@ def train_a2c(env, args, callbacks=None):
             # Update all observation spaces in the environment to match the LSTM feature dimension
             logger.info(f"Updating all observation spaces to match feature dimension {features_dim}")
             update_observation_spaces_recursively(env, features_dim, logger)
+            
+            # Apply the patch to ensure SafeTradingEnvWrapper augmentation works with the new dimension
+            logger.info(f"Applying observation augmentation patch for dimension {features_dim}")
+            patch_observation_augmentation(env, features_dim)
+            
+            # Explicitly patch VecNormalize to handle the new dimensions properly
+            logger.info(f"Explicitly patching VecNormalize for dimension {features_dim}")
+            patch_vec_normalize(env, features_dim, logger)
+            
             logger.info("Completed updating observation spaces in all environment wrappers")
             
         except Exception as e:
@@ -2226,6 +2222,77 @@ def main():
         
         # Log completion
         logger.info("Script execution completed.")
+
+
+def patch_observation_augmentation(env, target_dim):
+    """
+    Add a patch to ensure SafeTradingEnvWrapper can handle different observation dimensions
+    when the LSTM feature extractor is used.
+    
+    Args:
+        env: The environment to patch
+        target_dim: The target dimension for observations
+    """
+    if env is None:
+        return
+    
+    # Check if this is a SafeTradingEnvWrapper
+    if isinstance(env, SafeTradingEnvWrapper):
+        # Monkey patch the _augment_observation method to handle the new dimensions
+        original_augment_observation = env._augment_observation
+        
+        def patched_augment_observation(observation):
+            # If observation dimension matches target_dim, return as is
+            if isinstance(observation, np.ndarray) and len(observation) == target_dim:
+                return observation
+            
+            # Otherwise, call the original method
+            return original_augment_observation(observation)
+        
+        # Replace the method
+        env._augment_observation = patched_augment_observation
+        logger.info(f"Patched SafeTradingEnvWrapper._augment_observation to handle {target_dim}-dimensional observations")
+    
+    # Recursively patch child environments
+    if hasattr(env, 'env'):
+        patch_observation_augmentation(env.env, target_dim)
+    elif hasattr(env, 'venv'):
+        patch_observation_augmentation(env.venv, target_dim)
+    elif hasattr(env, 'envs') and isinstance(env.envs, list):
+        for nested_env in env.envs:
+            patch_observation_augmentation(nested_env, target_dim)
+
+
+def patch_vec_normalize(env, target_dim, logger):
+    """
+    Explicitly patch VecNormalize to ensure it properly handles the target observation dimension.
+    This is needed because VecNormalize has unique handling of observation normalization.
+    
+    Args:
+        env: The environment containing VecNormalize
+        target_dim: Target observation dimension
+        logger: Logger for debug information
+    """
+    if env is None:
+        return
+    
+    # Check if this is a VecNormalize environment
+    if hasattr(env, 'obs_rms') and hasattr(env.obs_rms, 'mean'):
+        logger.info(f"Found VecNormalize, checking observation dimensions")
+        
+        # Check if dimensions need updating
+        if len(env.obs_rms.mean) != target_dim:
+            logger.info(f"Updating VecNormalize obs_rms from dim {len(env.obs_rms.mean)} to {target_dim}")
+            # Create new running mean and variance with correct dimension
+            env.obs_rms.mean = np.zeros(target_dim, dtype=np.float64)
+            env.obs_rms.var = np.ones(target_dim, dtype=np.float64)
+            env.obs_rms.count = 0  # Reset the count to indicate new statistics
+    
+    # Continue checking child environments
+    if hasattr(env, 'venv'):
+        patch_vec_normalize(env.venv, target_dim, logger)
+    elif hasattr(env, 'env'):
+        patch_vec_normalize(env.env, target_dim, logger)
 
 
 if __name__ == "__main__":
