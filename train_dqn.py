@@ -25,6 +25,7 @@ import torch
 import json
 import gc
 import traceback
+import gymnasium
 from gymnasium import spaces
 from gymnasium.wrappers import TimeLimit
 from stable_baselines3 import DQN, PPO, A2C, SAC
