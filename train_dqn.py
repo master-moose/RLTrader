@@ -2300,11 +2300,46 @@ def patch_vec_normalize(env, target_dim, logger):
         logger: Logger for debug information
     """
     if env is None:
-        return
+        return env
     
     # Check if this is a VecNormalize environment
     if hasattr(env, 'obs_rms') and hasattr(env.obs_rms, 'mean'):
         logger.info(f"Found VecNormalize, checking observation dimensions")
+        
+        # Store original update method for patching
+        original_update = env.obs_rms.update
+        
+        # Define a patched update method to handle dimension mismatches
+        def patched_update(obs):
+            """Ensure observations are the correct dimension before updating statistics"""
+            # If dimensions don't match, fix them
+            if isinstance(obs, np.ndarray):
+                if len(obs.shape) == 1 and obs.shape[0] != target_dim:
+                    logger.info(f"Fixing observation dimension for RMS update: {obs.shape} -> {target_dim}")
+                    # Create a properly sized array
+                    fixed_obs = np.zeros(target_dim, dtype=obs.dtype)
+                    # Copy data while respecting dimensions
+                    min_dim = min(obs.shape[0], target_dim)
+                    fixed_obs[:min_dim] = obs[:min_dim]
+                    # Call original update with fixed observation
+                    return original_update(fixed_obs)
+                elif len(obs.shape) > 1 and obs.shape[1] != target_dim:
+                    logger.info(f"Fixing batch observation dimensions for RMS update: {obs.shape} -> ({obs.shape[0]}, {target_dim})")
+                    # For batched observations
+                    batch_size = obs.shape[0]
+                    fixed_batch = np.zeros((batch_size, target_dim), dtype=obs.dtype)
+                    # Copy data while respecting dimensions
+                    min_dim = min(obs.shape[1], target_dim)
+                    for i in range(batch_size):
+                        fixed_batch[i, :min_dim] = obs[i, :min_dim]
+                    return original_update(fixed_batch)
+            
+            # If no fixing needed or not a numpy array, call original
+            return original_update(obs)
+        
+        # Replace the update method
+        env.obs_rms.update = patched_update
+        logger.info("Patched VecNormalize.obs_rms.update to handle dimension mismatch")
         
         # Check if dimensions need updating
         if len(env.obs_rms.mean) != target_dim:
@@ -2319,343 +2354,78 @@ def patch_vec_normalize(env, target_dim, logger):
         patch_vec_normalize(env.venv, target_dim, logger)
     elif hasattr(env, 'env'):
         patch_vec_normalize(env.env, target_dim, logger)
-
-
-def debug_observation_shape(observation, prefix=""):
-    """
-    Debug helper to print observation shapes
-    
-    Args:
-        observation: The observation to debug
-        prefix: Optional prefix for the log message
-    """
-    if observation is None:
-        logger.debug(f"{prefix}Observation is None")
-        return
         
-    if isinstance(observation, np.ndarray):
-        logger.debug(f"{prefix}Observation shape: {observation.shape}, dtype: {observation.dtype}")
-        if len(observation.shape) > 1:
-            logger.debug(f"{prefix}First row shape: {observation[0].shape}")
-    elif isinstance(observation, list):
-        logger.debug(f"{prefix}Observation is a list of length {len(observation)}")
-        if len(observation) > 0 and isinstance(observation[0], np.ndarray):
-            logger.debug(f"{prefix}First element shape: {observation[0].shape}, dtype: {observation[0].dtype}")
-    else:
-        logger.debug(f"{prefix}Observation is type: {type(observation)}")
+    return env
 
 
-# Update safe_reset function to use the debug helper
 def patch_vec_normalize_reset(env, target_dim, logger):
     """
-    Patch VecNormalize to safely handle dimension mismatches during reset.
-    This is a more comprehensive patch that intercepts the reset method to ensure
-    correct dimension handling.
+    Patch the reset method of VecNormalize to handle dimension mismatches.
+    This is called separately from patch_vec_normalize to focus on the reset functionality.
     
     Args:
-        env: The environment to patch (should be VecNormalize)
-        target_dim: Target observation dimension
+        env: The environment to patch
+        target_dim: Target dimension
         logger: Logger for debug information
     """
     if env is None:
-        return
+        return env
     
     # Check if this is a VecNormalize environment
     if hasattr(env, 'obs_rms') and hasattr(env.obs_rms, 'mean'):
-        logger.info(f"Patching VecNormalize.reset to handle dimension mismatch")
+        logger.info(f"Patching VecNormalize reset for dimension {target_dim}")
         
-        # Fix the observation dimensions
-        if len(env.obs_rms.mean) != target_dim:
-            logger.info(f"Updating VecNormalize obs_rms from dim {len(env.obs_rms.mean)} to {target_dim}")
-            # Create new running mean and variance with correct dimension
-            env.obs_rms.mean = np.zeros(target_dim, dtype=np.float64)
-            env.obs_rms.var = np.ones(target_dim, dtype=np.float64)
-            env.obs_rms.count = 0  # Reset the count to indicate new statistics
-        
-        # Also patch the normalization functions
-        original_normalize_obs = env.normalize_obs
-        
-        def patched_normalize_obs(obs):
-            """Patch to ensure observations are the correct dimension before normalization"""
-            # Debug observation shape
-            debug_observation_shape(obs, "Pre-fixdim normalize_obs: ")
-            
-            # Fix dimensions if needed
-            fixed_obs = fix_observation_dimensions(obs, target_dim)
-            
-            # Debug fixed observation shape
-            debug_observation_shape(fixed_obs, "Post-fixdim normalize_obs: ")
-            
-            # Call original normalization
-            return original_normalize_obs(fixed_obs)
-            
-        # Replace the method
-        env.normalize_obs = patched_normalize_obs
-        
-        # Store the original reset method
+        # Store original reset method
         original_reset = env.reset
         
-        # Define a safer reset method
-        def safe_reset(**kwargs):
-            # Call the underlying environment's reset
+        # Define a patched reset method
+        def patched_reset(**kwargs):
+            """Patched reset to handle observation dimension mismatches"""
             try:
-                # First get the raw observations without going through VecNormalize's normalization
-                if hasattr(env, 'venv'):
-                    raw_obs = env.venv.reset(**kwargs)
-                    
-                    # Debug raw observation shape
-                    debug_observation_shape(raw_obs, "Raw reset observation: ")
-                    
-                    # Fix the dimensions of raw observations if needed
-                    fixed_raw_obs = fix_observation_dimensions(raw_obs, target_dim)
-                    
-                    # Debug fixed observation shape
-                    debug_observation_shape(fixed_raw_obs, "Fixed reset observation: ")
-                    
-                    # Now normalize manually
-                    normalized_obs = env.normalize_obs(fixed_raw_obs)
-                    return normalized_obs
-                else:
-                    # If we can't access venv, try original with exception handling
-                    obs = original_reset(**kwargs)
-                    return obs
-            except ValueError as e:
-                if "broadcast" in str(e) and "shapes" in str(e):
-                    logger.warning(f"Caught dimension mismatch in VecNormalize.reset: {e}")
-                    
-                    # Try to get raw observations from the underlying environment
-                    if hasattr(env, 'venv'):
-                        raw_obs = env.venv.reset(**kwargs)
-                        debug_observation_shape(raw_obs, "Exception fallback raw observation: ")
-                    else:
-                        # If we can't get raw obs, raise the original error
-                        logger.error("Cannot get raw observations, unable to fix dimension mismatch")
-                        raise
-                    
-                    # Fix dimensions
-                    fixed_obs = fix_observation_dimensions(raw_obs, target_dim)
-                    debug_observation_shape(fixed_obs, "Exception fallback fixed observation: ")
-                    
-                    # Skip the running mean update this time
-                    # Just perform the normalization manually
-                    obs = np.clip((fixed_obs - env.obs_rms.mean) / np.sqrt(env.obs_rms.var + env.epsilon),
-                                 -env.clip_obs, env.clip_obs)
-                    
-                    logger.info(f"Successfully bypassed dimension mismatch in VecNormalize.reset")
-                    return obs
-                else:
-                    # If it's not a dimension error, re-raise
-                    raise
+                # Call original reset to get observation and info
+                obs, info = original_reset(**kwargs)
+                
+                # Check and fix observation dimensions if needed
+                if isinstance(obs, np.ndarray):
+                    if len(obs.shape) == 1 and obs.shape[0] != target_dim:
+                        logger.info(f"Fixing reset observation from {obs.shape} to {target_dim}")
+                        # Create a fixed observation with correct dimension
+                        fixed_obs = np.zeros(target_dim, dtype=obs.dtype)
+                        # Copy values while respecting dimensions
+                        min_dim = min(obs.shape[0], target_dim)
+                        fixed_obs[:min_dim] = obs[:min_dim]
+                        # Return fixed observation
+                        return fixed_obs, info
+                    elif len(obs.shape) > 1 and obs.shape[1] != target_dim:
+                        logger.info(f"Fixing batch reset observations from {obs.shape} to ({obs.shape[0]}, {target_dim})")
+                        # Create a fixed batch with correct dimensions
+                        batch_size = obs.shape[0]
+                        fixed_batch = np.zeros((batch_size, target_dim), dtype=obs.dtype)
+                        # Copy values while respecting dimensions
+                        min_dim = min(obs.shape[1], target_dim)
+                        for i in range(batch_size):
+                            fixed_batch[i, :min_dim] = obs[i, :min_dim]
+                        # Return fixed batch
+                        return fixed_batch, info
+                
+                # Return original observations if no fixing needed
+                return obs, info
+            
+            except Exception as e:
+                logger.error(f"Error in patched VecNormalize reset: {e}")
+                # Fall back to original reset
+                return original_reset(**kwargs)
         
-        # Replace the reset method
-        env.reset = safe_reset
-        logger.info("VecNormalize.reset successfully patched to handle dimension mismatches")
+        # Replace reset method with patched version
+        env.reset = patched_reset
+        logger.info("Successfully patched VecNormalize reset method")
     
     # Continue patching child environments
     if hasattr(env, 'venv'):
         patch_vec_normalize_reset(env.venv, target_dim, logger)
     elif hasattr(env, 'env'):
         patch_vec_normalize_reset(env.env, target_dim, logger)
-
-
-def fix_observation_dimensions(observation, target_dim):
-    """
-    Ensure an observation has the correct dimensions by padding or truncating.
     
-    Args:
-        observation: The observation to fix
-        target_dim: The target dimension
-        
-    Returns:
-        Observation with fixed dimensions
-    """
-    if observation is None:
-        return None
-        
-    # Handle numpy arrays
-    if isinstance(observation, np.ndarray):
-        # Handle batched observations (with shape like (n_envs, obs_dim))
-        if len(observation.shape) > 1:
-            logger.debug(f"Processing batched observation with shape {observation.shape}")
-            batch_size = observation.shape[0]
-            current_dim = observation.shape[1]
-            
-            # If dimensions already match, return as-is
-            if current_dim == target_dim:
-                return observation
-                
-            # Create a new batch array with the target dimension
-            if current_dim < target_dim:
-                # Pad with zeros
-                padded = np.zeros((batch_size, target_dim), dtype=observation.dtype)
-                # Copy original data
-                padded[:, :current_dim] = observation
-                logger.debug(f"Padded batched observation from shape {observation.shape} to {padded.shape}")
-                return padded
-            else:
-                # Truncate
-                truncated = observation[:, :target_dim]
-                logger.debug(f"Truncated batched observation from shape {observation.shape} to {truncated.shape}")
-                return truncated
-        
-        # Handle single observation (with shape like (obs_dim,))
-        else:
-            current_dim = observation.shape[0]
-            
-            # If dimensions already match, return as-is
-            if current_dim == target_dim:
-                return observation
-                
-            # If dimensions don't match, pad or truncate
-            if current_dim < target_dim:
-                # Pad with zeros
-                padded = np.zeros(target_dim, dtype=observation.dtype)
-                padded[:current_dim] = observation
-                return padded
-            else:
-                # Truncate
-                return observation[:target_dim]
-            
-    # Handle batches of observations
-    elif isinstance(observation, list) or (isinstance(observation, tuple) and len(observation) > 0):
-        return [fix_observation_dimensions(obs, target_dim) for obs in observation]
-        
-    # Return as-is for unsupported types
-    return observation
-
-
-def patch_subproc_vec_env(env, target_dim, logger):
-    """
-    Directly patch SubprocVecEnv to handle dimension issues at the source.
-    This is the most direct approach to fixing the issue.
-    
-    Args:
-        env: The environment to patch
-        target_dim: Target dimension
-        logger: Logger for information
-    """
-    if env is None:
-        return
-    
-    # Check if this is a SubprocVecEnv
-    if isinstance(env, SubprocVecEnv) or (hasattr(env, '__class__') and 
-                                          env.__class__.__name__ == 'SubprocVecEnv'):
-        logger.info("Patching SubprocVecEnv.reset to handle dimension issues")
-        
-        # Store original reset
-        original_reset = env.reset
-        
-        # Define patched reset function
-        def patched_reset(**kwargs):
-            try:
-                # Try to get observations directly from workers to have more control
-                for remote in env.remotes:
-                    remote.send(('reset', kwargs))
-                
-                # Collect observations directly from workers
-                obs = [remote.recv() for remote in env.remotes]
-                logger.debug(f"Direct worker reset received {len(obs)} observations")
-                
-                # Debug the first observation
-                if len(obs) > 0:
-                    debug_observation_shape(obs[0], "First worker observation: ")
-                
-                # Fix dimensions immediately before further processing
-                fixed_obs = [fix_observation_dimensions(ob, target_dim) for ob in obs]
-                    
-                # Stack into a numpy array - this is what VecEnv expects
-                obs_array = np.stack(fixed_obs)
-                logger.debug(f"Stacked observations to shape {obs_array.shape}")
-                
-                return obs_array
-                
-            except Exception as e:
-                logger.warning(f"Direct SubprocVecEnv reset failed: {e}, falling back to original reset")
-                
-                # Fall back to original reset with handling
-                try:
-                    obs = original_reset(**kwargs)
-                    
-                    # Check if we need to fix the observations
-                    if isinstance(obs, np.ndarray) and len(obs.shape) > 1 and obs.shape[1] != target_dim:
-                        logger.warning(f"Original reset returned wrong observation dimension: {obs.shape}, fixing")
-                        fixed_obs = fix_observation_dimensions(obs, target_dim)
-                        return fixed_obs
-                    
-                    return obs
-                except Exception as e2:
-                    logger.error(f"Both direct and original reset methods failed: {e2}")
-                    raise e2
-        
-        # Replace reset method
-        env.reset = patched_reset
-        logger.info("SubprocVecEnv.reset successfully patched")
-    
-    # Check child environments
-    if hasattr(env, 'venv'):
-        patch_subproc_vec_env(env.venv, target_dim, logger)
-    elif hasattr(env, 'env'):
-        patch_subproc_vec_env(env.env, target_dim, logger)
-
-
-def patch_observation_space(env, target_dim, logger):
-    """
-    Patch observation space dimensions in a given environment.
-    
-    This function updates the observation space of the environment to match
-    the target dimension and returns the patched environment.
-    
-    Args:
-        env: The environment to patch
-        target_dim: Target observation space dimension
-        logger: Logger for debug information
-        
-    Returns:
-        The patched environment with updated observation space
-    """
-    if env is None:
-        return env
-        
-    logger.info(f"Patching observation space for environment to target dim {target_dim}")
-    
-    # Update this environment's observation space if it exists
-    if hasattr(env, 'observation_space'):
-        current_shape = env.observation_space.shape
-        if len(current_shape) == 1 and current_shape[0] != target_dim:
-            logger.info(f"Updating observation space from {current_shape} to {(target_dim,)}")
-            env.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, 
-                shape=(target_dim,), 
-                dtype=np.float32
-            )
-    
-    # If this is a SafeTradingEnvWrapper, also patch its step method
-    if hasattr(env, '_augment_observation'):
-        original_augment = env._augment_observation
-        
-        def patched_augment_observation(observation):
-            # First apply the original augmentation
-            augmented = original_augment(observation)
-            
-            # Then ensure it has the right dimensions
-            if isinstance(augmented, np.ndarray) and len(augmented.shape) == 1:
-                if augmented.shape[0] != target_dim:
-                    logger.debug(f"Fixing augmented observation from shape {augmented.shape} to {target_dim}")
-                    padded = np.zeros(target_dim, dtype=augmented.dtype)
-                    padded[:min(augmented.shape[0], target_dim)] = augmented[:min(augmented.shape[0], target_dim)]
-                    return padded
-            return augmented
-            
-        # Replace the method
-        env._augment_observation = patched_augment_observation
-        logger.info("Patched _augment_observation method to ensure correct dimensions")
-    
-    # Recursively check child environments
-    if hasattr(env, 'venv'):
-        patch_observation_space(env.venv, target_dim, logger)
-    elif hasattr(env, 'env'):
-        patch_observation_space(env.env, target_dim, logger)
-        
     return env
 
 
@@ -2689,6 +2459,8 @@ def comprehensive_environment_patch(env, target_dim, logger):
     if isinstance(env, VecNormalize):
         logger.info("Patching VecNormalize")
         env = patch_vec_normalize(env, target_dim, logger)
+        # Also patch VecNormalize reset specifically
+        env = patch_vec_normalize_reset(env, target_dim, logger)
     
     # 4. Check for SafeTradingEnvWrapper and set target dimension
     def set_dimension_in_wrappers(e):
@@ -2716,8 +2488,3 @@ def comprehensive_environment_patch(env, target_dim, logger):
     
     logger.info("Comprehensive environment patching complete")
     return env
-
-
-if __name__ == "__main__":
-    # Run the main function
-    main()
