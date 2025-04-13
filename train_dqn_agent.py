@@ -1219,7 +1219,7 @@ def convert_gym_space(space):
 
 # Now modify the create_finrl_env function to use this wrapper
 def create_finrl_env(
-    start_date, end_date, symbols, data_source="binance", initial_balance=1000000.0,
+    start_date, end_date, symbols, data_source="binance", initial_balance=10000.0,
     lookback=5, state_space=16, include_cash=False, initial_stocks=None, window_size=None,
     df=None  # New parameter to allow passing a pre-created DataFrame
 ):
@@ -1485,11 +1485,16 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     logger.info(f"Setting strict base trade cooldown to {base_trade_cooldown} steps")
     
     # Calculate maximum number of shares to trade per step (hmax)
+    # Enforcing a minimum position size of 10%
     if 'close' in df.columns:
         avg_price = df['close'].mean()
-        hmax = max(int(initial_amount * 0.1 / avg_price), 10)  # Allow up to 10% of balance per trade
+        # Calculate hmax to be exactly 10% of the initial balance at the average price
+        hmax = int(initial_amount * 0.1 / avg_price)
+        logger.info(f"Setting minimum position size to 10% of initial balance (hmax={hmax})")
     else:
-        hmax = 100  # Default value
+        # Default to a reasonable value that likely represents ~10% of initial balance
+        hmax = 10
+        logger.info(f"Using default hmax={hmax} (approximately 10% of initial balance)")
     
     logger.info(f"Environment config: initial_amount={initial_amount}, "
                 f"transaction_cost_pct={transaction_cost_pct}, "
@@ -2051,7 +2056,7 @@ def train_with_finrl(
     finrl_model = args.finrl_model.lower()
 
     # Environment parameters 
-    initial_balance = getattr(args, 'initial_balance', 1000000.0)
+    initial_balance = getattr(args, 'initial_balance', 10000.0)
     state_dim = getattr(args, 'state_dim', 16)  # Default to 16 if not specified
     
     # Use the preprocessed data
@@ -2484,7 +2489,7 @@ def parse_args():
     
     # Training parameters
     parser.add_argument('--device', type=str, default='cpu', help='Device to use for training (cpu, cuda:0, etc.)')
-    parser.add_argument('--initial_balance', type=float, default=1000000.0, help='Initial balance for trading environment')
+    parser.add_argument('--initial_balance', type=float, default=10000.0, help='Initial balance for trading environment')
     parser.add_argument('--timesteps', type=int, default=50000, help='Number of timesteps to train')
     parser.add_argument('--learning_rate', type=float, default=0.0003, help='Learning rate')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
