@@ -72,10 +72,10 @@ logger = logging.getLogger(__name__)
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
 
 # Constants for trading safeguards - ADJUSTING FOR MORE AGGRESSIVE TRADING
-TRADE_COOLDOWN_PERIOD = 15  # Reduced from 25 to 15 - allows even more frequent trading
-OSCILLATION_PENALTY = 120.0  # Reduced from 250.0 to 120.0 - much less penalty for oscillation
-SAME_PRICE_TRADE_PENALTY = 250.0  # Reduced from 500.0 to 250.0
-MAX_TRADE_FREQUENCY = 0.20  # Increased from 0.15 to 0.20 - allow up to 20% of steps to be trades
+TRADE_COOLDOWN_PERIOD = 5  # Reduced from 15 to 5 - allows much more frequent trading
+OSCILLATION_PENALTY = 50.0  # Reduced from 120.0 to 50.0 - much less penalty for oscillation
+SAME_PRICE_TRADE_PENALTY = 100.0  # Reduced from 250.0 to 100.0
+MAX_TRADE_FREQUENCY = 0.30  # Increased from 0.20 to 0.30 - allow up to 30% of steps to be trades
 
 # Class for LSTM feature extraction
 class LSTMFeatureExtractor(BaseFeaturesExtractor):
@@ -244,7 +244,21 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Track trading metrics for risk-aware rewards
         self.sharpe_ratio = 0.0
         self.max_drawdown = 0.0
-        self.peak_value = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 0.0
+        
+        # Get the portfolio value from the environment
+        if hasattr(self.env, 'portfolio_value') and self.env.portfolio_value > 0:
+            self.peak_value = self.env.portfolio_value
+            # Use the initial portfolio value for tracking growth across training
+            self.starting_portfolio = self.env.portfolio_value
+            self.highest_portfolio = self.starting_portfolio
+            logger.info(f"SafeTradingEnvWrapper initialized with portfolio value: {self.starting_portfolio:.2f}")
+        else:
+            self.peak_value = 10000.0  # Default if env doesn't provide portfolio value
+            self.starting_portfolio = 10000.0
+            self.highest_portfolio = self.starting_portfolio
+            logger.warning("Environment does not provide portfolio value, using default 10000.0")
+        
+        self.portfolio_growth_rate = 0.0
         
         self.current_cooldown = trade_cooldown  # Adjustable cooldown period
         
@@ -259,11 +273,6 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Add a dynamic profit threshold that decreases over time
         self.initial_profit_threshold = 0.001  # Reduced from 0.002 to 0.001
         self.min_profit_threshold = 0.0003  # Reduced from 0.0005 to 0.0003
-        
-        # Portfolio growth tracking for better rewards
-        self.starting_portfolio = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 0.0
-        self.highest_portfolio = self.starting_portfolio
-        self.portfolio_growth_rate = 0.0
         
         # Modify observation space to include action history and risk metrics
         if isinstance(self.env.observation_space, spaces.Box):
@@ -319,14 +328,25 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.trade_pnl = []
         self.successful_trades = 0
         self.failed_trades = 0
-        self.peak_value = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 0.0
+        
+        # Get the initial portfolio value from the environment
+        if hasattr(self.env, 'portfolio_value'):
+            # Important: Only reset peak_value, but keep starting_portfolio from initial env creation
+            # to properly track long-term growth across episodes
+            self.peak_value = self.env.portfolio_value
+            
+            # Log the starting portfolio value for this episode
+            logger.debug(f"New episode starting with portfolio value: {self.env.portfolio_value:.2f}")
+        else:
+            self.peak_value = 0.0
+            
         self.max_drawdown = 0.0
         self.sharpe_ratio = 0.0
         
-        # Reset portfolio growth tracking
-        self.starting_portfolio = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 0.0
-        self.highest_portfolio = self.starting_portfolio
-        self.portfolio_growth_rate = 0.0
+        # CRITICAL: Do NOT reset the starting_portfolio and highest_portfolio values
+        # so that we can properly track growth across episodes
+        # This allows the agent to learn to increase portfolio value over time
+        # If we reset these values, the growth is always measured from the beginning of each episode
         
         # Add action history to observation
         observation = self._augment_observation(observation)
@@ -508,7 +528,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
             # Log detailed growth information for debugging at less frequent intervals
-            if current_step % 100000 == 0 or (trade_occurred and current_step % 10000 == 0):
+            if current_step % 10000 == 0 or (trade_occurred and current_step % 10000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
             growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0
             risk_adjusted_reward += growth_reward
@@ -645,7 +665,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             action = 1  # Force hold action
             self.forced_actions += 1
             
-            if self.forced_actions % 10 == 0:  # Log periodically to avoid spamming
+            if self.forced_actions % 100 == 0:  # Reduce log frequency to avoid spamming
                 logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
                               f"{current_step - self.last_trade_step}/{self.min_cooldown} steps since last trade")
     
@@ -721,7 +741,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             action = 1
             self.forced_actions += 1
             
-            if self.forced_actions % 10 == 0:  # Log periodically to avoid spamming
+            if self.forced_actions % 100 == 0:  # Reduce log frequency to avoid spamming
                 logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
                               f"{current_step - self.last_trade_step}/{self.min_cooldown} steps since last trade")
         
@@ -753,9 +773,9 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
         # Early training stabilization - make this period much shorter
-        if current_step < 100 and action != 1 and current_step % 20 != 0:  # Reduced from 300 to 100 and from 50 to 20
+        if current_step < 50 and action != 1 and current_step % 5 != 0:  # Reduced from 100 to 50 and from 20 to 5
             logger.debug(f"Early training stability: forcing hold at step {current_step}")
-            action = 1  # Force hold action during early training except every 20th step
+            action = 1  # Force hold action during early training except every 5th step
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -810,7 +830,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 self.cumulative_risk += self.max_risk_per_trade
                 
             # Only log risk management metrics when there's a trade or periodically
-            if trade_occurred and (current_step % 10000 == 0 or self.cumulative_risk % 0.01 < 0.001):
+            if trade_occurred and (current_step % 100000 == 0 or abs(self.cumulative_risk % 0.02) < 0.001):
                 portfolio_value_str = f"{portfolio_value:.2f}" if portfolio_value is not None else "unknown"
                 logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
                            f"Portfolio value: {portfolio_value_str}")
