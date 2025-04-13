@@ -356,6 +356,20 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Calculate reward as change in portfolio value
         self.portfolio_value = self._calculate_portfolio_value()
         
+        # Calculate current cash and asset values for reward adjustment
+        current_price = current_price if current_price is not None else self._get_current_price()
+        if current_price is None or not np.isfinite(current_price) or current_price <= 0:
+            current_price = 1.0
+            
+        asset_value = self.assets_owned[0] * current_price
+        cash_balance = self.portfolio_value - asset_value
+        
+        # Calculate cash ratio (proportion of portfolio in cash)
+        if self.portfolio_value > 0:
+            cash_ratio = cash_balance / self.portfolio_value
+        else:
+            cash_ratio = 1.0
+            
         # For hold actions, we need to ensure no portfolio growth from price appreciation
         # This is key to prevent the agent from getting rewarded for holding during price increases
         if action_type == 1 and self.assets_owned[0] > 0:
@@ -363,11 +377,27 @@ class CryptocurrencyTradingEnv(gym.Env):
             # Calculate what the portfolio value would be if the price hadn't changed
             # The agent should only be rewarded/penalized for explicit trades, not market movements during holds
             hold_penalty = 1.0  # Significantly increased from 0.2 to 1.0 - much higher penalty for any hold action
-            reward = -hold_penalty  # Apply hold penalty directly instead of based on portfolio change
-            logger.debug(f"HOLD action: Not rewarding for price appreciation, applying hold penalty of {hold_penalty:.4f}")
+            
+            # Add additional hold penalty based on cash ratio - penalize more when holding a large portion of portfolio in assets
+            balance_penalty = 0.0
+            if cash_ratio < 0.2:  # When more than 80% of portfolio is in assets
+                # Apply progressively higher penalty as cash ratio decreases
+                balance_penalty = (0.2 - cash_ratio) * 5.0  # Scale penalty: max 1.0 when all in assets
+                logger.debug(f"Applied balance penalty of {balance_penalty:.4f} for low cash ratio ({cash_ratio:.2f})")
+                
+            reward = -(hold_penalty + balance_penalty)  # Apply hold penalty directly instead of based on portfolio change
+            logger.debug(f"HOLD action: Not rewarding for price appreciation, applying hold penalty of {hold_penalty:.4f} + balance penalty of {balance_penalty:.4f}")
         else:
             # For buys and sells, reward normally based on portfolio change
             reward = (self.portfolio_value - previous_portfolio_value) * self.reward_scaling
+            
+            # For buy actions, add a balance component to discourage going all-in
+            if action_type == 2:
+                # Penalize buys that would result in very low cash ratio
+                if cash_ratio < 0.1:  # When less than 10% of portfolio remains as cash after buying
+                    cash_balance_penalty = (0.1 - cash_ratio) * 8.0  # Higher penalty for dangerously low cash
+                    reward -= cash_balance_penalty
+                    logger.debug(f"Applied cash balance penalty of {cash_balance_penalty:.4f} for low cash ratio after buy ({cash_ratio:.2f})")
         
         # Add extra reward for sells (action_type 0) to encourage selling
         # Give even higher reward for sells
@@ -457,17 +487,38 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Basic portfolio state - first few dimensions
         observation[0] = min(self.portfolio_value, self.max_portfolio_value)  # Clip for stability
         
+        # Calculate and add liquid cash balance (explicitly separate from portfolio value)
+        # Cash balance = portfolio value - assets value
+        current_price = self._get_current_price()
+        if current_price is None or not np.isfinite(current_price) or current_price <= 0:
+            current_price = 1.0
+            
+        asset_value = self.assets_owned[0] * current_price
+        cash_balance = self.portfolio_value - asset_value
+        
+        # Make cash balance a prominent feature in the observation space
+        observation[1] = min(max(0, cash_balance), self.max_portfolio_value)  # Clip for stability
+        
+        # Calculate cash ratio (proportion of portfolio in cash)
+        if self.portfolio_value > 0:
+            cash_ratio = cash_balance / self.portfolio_value
+        else:
+            cash_ratio = 1.0  # Default to 1.0 (all cash) if portfolio value is zero
+            
+        # Add cash ratio as a new feature - provides a clear signal about allocation
+        observation[2] = min(max(0, cash_ratio), 1.0)
+        
         # Add owned assets
         for i in range(min(self.stock_dim, len(self.assets_owned))):
-            if i + 1 < self.state_space:
-                observation[i + 1] = min(self.assets_owned[i], 1e6)  # Clip for stability
+            if i + 3 < self.state_space:  # Offset by 3 to account for portfolio value, cash balance, and cash ratio
+                observation[i + 3] = min(self.assets_owned[i], 1e6)  # Clip for stability
         
         # Add holding counter information to the observation - normalized between 0 and 1
         # This helps the agent learn about holding duration
-        if self.stock_dim + 2 < self.state_space:
+        if self.stock_dim + 3 < self.state_space:  # Offset by +1 due to added cash balance feature
             # Make holding counter more prominent in observation
             holding_counter_normalized = min(self.holding_counter / self.max_holding_steps, 1.0)
-            observation[self.stock_dim + 2] = holding_counter_normalized * 2.0  # Multiply by 2 to make it more prominent
+            observation[self.stock_dim + 3] = holding_counter_normalized * 2.0  # Multiply by 2 to make it more prominent
             
             # Add a warning signal as holding approaches max limit - strengthen the signal
             # Start warning signal earlier (at 50% of max instead of 80%)
@@ -475,9 +526,9 @@ class CryptocurrencyTradingEnv(gym.Env):
                 # Create a stronger signal as we get closer to forced sell
                 sell_urgency = (self.holding_counter - 0.5 * self.max_holding_steps) / (0.5 * self.max_holding_steps)
                 # Amplify the urgency signal
-                observation[self.stock_dim + 3] = sell_urgency * 2.0  # Multiply by 2 for stronger signal
+                observation[self.stock_dim + 4] = sell_urgency * 2.0  # Multiply by 2 for stronger signal
             else:
-                observation[self.stock_dim + 3] = 0.0
+                observation[self.stock_dim + 4] = 0.0
         
         # Add market data
         data_index = min(self.day, len(self.df.index.unique()) - 1)
@@ -485,7 +536,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         current_data = self.df[self.df.index == current_date]
         
         # Add price data
-        offset = self.stock_dim + 4  # Start after portfolio value, assets owned, and holding counter
+        offset = self.stock_dim + 5  # Increased offset to account for new cash features
         
         # Add prices and technical indicators
         if not current_data.empty:
@@ -794,24 +845,44 @@ class CryptocurrencyTradingEnv(gym.Env):
         Returns:
             dict: Information about the current state
         """
-        # Include current price in info
-        current_price = self._get_current_price()
-        actual_day = self.day // self.candles_per_day
-        
-        return {
+        # Get core information
+        info = {
             'portfolio_value': self.portfolio_value,
-            'assets_owned': self.assets_owned,
-            'cost': self.cost,
-            'trades': self.trades,
+            'assets_owned': self.assets_owned.tolist(),
             'day': self.day,
-            'actual_day': actual_day,
-            'close_price': current_price,
-            'holding_counter': self.holding_counter,
-            'forced_sells': self.forced_sells,
-            'take_profit_sells': self.take_profit_sells,
-            'take_profit_price': self.take_profit_price,
-            'entry_price': self.entry_price
+            'steps': self.day - self.start_day,
         }
+        
+        # Add current price if available
+        if self.day < len(self.df.index.unique()):
+            current_date = self.df.index.unique()[self.day]
+            current_data = self.df[self.df.index == current_date]
+            if not current_data.empty:
+                info['close_price'] = current_data.iloc[0]['close']
+                
+                # Calculate and add cash balance information
+                current_price = current_data.iloc[0]['close']
+                asset_value = self.assets_owned[0] * current_price
+                cash_balance = self.portfolio_value - asset_value
+                
+                # Add cash information to info dict
+                info['cash_balance'] = cash_balance
+                info['asset_value'] = asset_value
+                if self.portfolio_value > 0:
+                    info['cash_ratio'] = cash_balance / self.portfolio_value
+                else:
+                    info['cash_ratio'] = 1.0
+        
+        # Add trade statistics
+        info['trades'] = self.trades
+        info['costs'] = self.cost
+        
+        # Add take profit tracking
+        info['take_profit_sells'] = self.take_profit_sells
+        info['take_profit_price'] = self.take_profit_price
+        info['entry_price'] = self.entry_price
+        
+        return info
     
     def render(self, mode='human'):
         """

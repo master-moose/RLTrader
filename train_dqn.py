@@ -308,15 +308,15 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.initial_profit_threshold = 0.001  # Reduced from 0.002 to 0.001
         self.min_profit_threshold = 0.0003  # Reduced from 0.0005 to 0.0003
         
-        # Modify observation space to include action history and risk metrics
+        # Adjust observation space to include the new features
         if isinstance(self.env.observation_space, spaces.Box):
             # Calculate new observation space size
             # Original observation dimension + action history (15) + consistency metrics (3) 
-            # + risk metrics (3) + cooldown status (1)
+            # + risk metrics (3) + cash metrics (2) + cooldown status (1)
             original_shape = self.env.observation_space.shape
             if len(original_shape) == 1:
                 # 1D observation space
-                additional_features = 22  # 15 + 3 + 3 + 1
+                additional_features = 24  # 15 + 3 + 3 + 2 + 1
                 low = np.append(self.env.observation_space.low, [-np.inf] * additional_features)
                 high = np.append(self.env.observation_space.high, [np.inf] * additional_features)
                 self.observation_space = spaces.Box(
@@ -325,9 +325,6 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     dtype=self.env.observation_space.dtype
                 )
                 logger.info(f"Expanded observation space from {original_shape[0]} to {original_shape[0] + additional_features} dimensions")
-            else:
-                # More complex observation space, keep original
-                logger.warning(f"Keeping original observation space with shape {original_shape} - cannot augment non-1D space")
         else:
             # Non-Box observation space, keep original
             logger.warning(f"Keeping original observation space of type {type(self.env.observation_space)} - augmentation only supports Box spaces")
@@ -428,6 +425,23 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             1.0 if self.consecutive_holds > 10 else 0.0,  # Long hold indicator
         ])
         
+        # Add cash balance metrics if available in the info dictionary
+        cash_metrics = np.zeros(2)
+        if hasattr(self.env, '_get_info'):
+            info = self.env._get_info()
+            cash_ratio = info.get('cash_ratio', None)
+            if cash_ratio is not None:
+                # Cash ratio (normalized between 0 and 1)
+                cash_metrics[0] = min(max(0, cash_ratio), 1.0)
+                
+                # Cash ratio warning signal - stronger when too far from optimal range (0.3-0.7)
+                if cash_ratio < 0.2:  # Too little cash
+                    cash_metrics[1] = (0.2 - cash_ratio) * 5.0  # Warning increases as cash decreases
+                elif cash_ratio > 0.8:  # Too much cash
+                    cash_metrics[1] = (cash_ratio - 0.8) * 5.0  # Warning increases as cash gets too high
+                else:
+                    cash_metrics[1] = 0.0  # No warning in good range
+        
         # Calculate current cooldown status
         current_step = getattr(self.env, 'day', 0)
         # Add safety check to prevent division by zero
@@ -443,6 +457,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             action_history,
             consistency_metrics,
             risk_metrics,
+            cash_metrics,  # Add cash metrics to augmented features
             np.array([cooldown_status]),
         ])
         
@@ -536,14 +551,20 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         """Calculate risk-aware rewards based on trading performance"""
         # Get current portfolio value
         portfolio_value = info.get('portfolio_value', 0)
+        
+        # Get cash balance information
+        cash_balance = info.get('cash_balance', 0)
+        cash_ratio = info.get('cash_ratio', 1.0)
+        
+        # Initialize adjusted reward
         risk_adjusted_reward = reward
         
-        # Track portfolio metrics if we have a portfolio value
-        if portfolio_value > 0:
-            # Update peak value for drawdown calculation
-            self.peak_value = max(self.peak_value, portfolio_value)
-            
-            # Update highest portfolio value if we have a new high
+        # Track peak portfolio value for drawdown calculation
+        if portfolio_value > self.peak_value:
+            self.peak_value = portfolio_value
+        
+        # Track highest portfolio value across episodes
+        if portfolio_value > self.highest_portfolio:
             prev_highest = self.highest_portfolio
             self.highest_portfolio = portfolio_value
             self.portfolio_growth_rate = (self.highest_portfolio - prev_highest) / max(prev_highest, 1.0)
@@ -592,11 +613,30 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             drawdown_penalty = self.max_drawdown * 0.5  # Less severe penalty (reduced from 1.0 to 0.5)
             risk_adjusted_reward -= drawdown_penalty
         
+        # Add portfolio balance rewards/penalties
+        # Encourage a balanced portfolio allocation
+        if cash_ratio < 0.2:  # Too much in assets
+            # Apply stronger penalties for very low cash positions
+            balance_penalty = min((0.2 - cash_ratio) * 3.0, 1.0)
+            risk_adjusted_reward -= balance_penalty
+            logger.debug(f"Low cash ratio penalty: -{balance_penalty:.4f} (cash ratio: {cash_ratio:.2f})")
+        elif cash_ratio > 0.9 and current_step > 2000:  # Too much in cash, but only after initial training
+            # Gentle nudge to deploy capital after initial training period
+            opportunity_cost = min((cash_ratio - 0.9) * 0.5, 0.5)
+            risk_adjusted_reward -= opportunity_cost
+            logger.debug(f"High cash ratio penalty: -{opportunity_cost:.4f} (cash ratio: {cash_ratio:.2f})")
+        elif cash_ratio >= 0.3 and cash_ratio <= 0.7:
+            # Reward for maintaining a balanced portfolio
+            balance_bonus = 0.1  # Small bonus for good balance
+            risk_adjusted_reward += balance_bonus
+            logger.debug(f"Balanced portfolio bonus: +{balance_bonus:.4f} (cash ratio: {cash_ratio:.2f})")
+        
         # Give bonus for trades, especially selling
         if trade_occurred:
             # Base trade bonus - increased to strongly encourage any trade
             trade_bonus = 0.5  # Increased from 0.25 to 0.5
             risk_adjusted_reward += trade_bonus
+            logger.debug(f"Applied trade bonus: +{trade_bonus:.2f} at step {current_step}")
             
             # Extra bonus for selling (to encourage profit taking)
             if self.action_history and self.action_history[-1] == 0:  # sell action
@@ -1144,6 +1184,13 @@ class TensorboardCallback(BaseCallback):
         self.steps_since_last_log = 0
         
         logger.info(f"TensorboardCallback initialized for model {model_name} with debug frequency {debug_frequency}")
+        
+        # Cash balance tracking
+        self.cash_ratios = []
+        self.cash_ratio_min = 1.0
+        self.cash_ratio_max = 0.0
+        self.optimal_cash_ratio_count = 0  # Times within 0.3-0.7 range
+        self.balanced_portfolio_steps = 0
     
     def _on_step(self) -> bool:
         """Called at each step"""
@@ -1272,6 +1319,45 @@ class TensorboardCallback(BaseCallback):
                         highest = info['highest_portfolio']
                         if hasattr(self, 'logger') and self.logger is not None:
                             self.logger.record('portfolio/highest_value', highest)
+                    
+                    # Track cash ratio metrics if available
+                    if 'cash_ratio' in info:
+                        cash_ratio = info['cash_ratio']
+                        self.cash_ratios.append(cash_ratio)
+                        
+                        # Update min/max values
+                        self.cash_ratio_min = min(self.cash_ratio_min, cash_ratio)
+                        self.cash_ratio_max = max(self.cash_ratio_max, cash_ratio)
+                        
+                        # Track balanced portfolio metrics
+                        if 0.3 <= cash_ratio <= 0.7:
+                            self.optimal_cash_ratio_count += 1
+                            self.balanced_portfolio_steps += 1
+                            
+                        # Log cash ratio information to tensorboard
+                        if hasattr(self, 'logger') and self.logger is not None:
+                            self.logger.record('portfolio/cash_ratio', cash_ratio)
+                            
+                            # Calculate average cash ratio (over last 100 steps)
+                            if len(self.cash_ratios) > 0:
+                                recent_ratios = self.cash_ratios[-min(100, len(self.cash_ratios)):]
+                                avg_cash_ratio = sum(recent_ratios) / len(recent_ratios)
+                                self.logger.record('portfolio/avg_cash_ratio', avg_cash_ratio)
+                            
+                            # Log balance quality metric (1.0 when in optimal range, 0.0 when far from optimal)
+                            if cash_ratio < 0.3:
+                                balance_quality = cash_ratio / 0.3  # Scales from 0 to 1 as ratio goes from 0 to 0.3
+                            elif cash_ratio > 0.7:
+                                balance_quality = 1.0 - min(1.0, (cash_ratio - 0.7) / 0.3)  # Scales from 1 to 0 as ratio goes from 0.7 to 1.0
+                            else:
+                                balance_quality = 1.0  # Optimal range
+                                
+                            self.logger.record('portfolio/balance_quality', balance_quality)
+                            
+                            # Log percentage of steps with balanced portfolio
+                            if self.debug_steps > 0:
+                                balanced_pct = self.balanced_portfolio_steps / self.debug_steps * 100
+                                self.logger.record('portfolio/balanced_portfolio_pct', balanced_pct)
             
             # Print comprehensive stats
             portfolio_str = f", Portfolio: {portfolio_value:.2f}" if portfolio_value is not None else ""
@@ -2204,6 +2290,8 @@ def main():
                         help="Maximum number of steps to hold before forcing a sell (default: 8)")
     parser.add_argument("--take_profit_pct", type=float, default=0.03,
                         help="Take profit percentage for automatic selling (default: 0.03 or 3%)")
+    parser.add_argument("--target_cash_ratio", type=str, default="0.3-0.7",
+                        help="Target cash ratio range (default: '0.3-0.7', format: 'min-max')")
     
     # Parse arguments
     args = parser.parse_args()
@@ -2282,8 +2370,19 @@ def main():
     # Get take profit percentage from args
     take_profit_pct = args.take_profit_pct
     
+    # Parse target cash ratio
+    try:
+        min_cash_ratio, max_cash_ratio = map(float, args.target_cash_ratio.split('-'))
+        if not (0 <= min_cash_ratio <= max_cash_ratio <= 1):
+            logger.warning(f"Invalid target cash ratio range: {args.target_cash_ratio}, using default: 0.3-0.7")
+            min_cash_ratio, max_cash_ratio = 0.3, 0.7
+    except (ValueError, AttributeError):
+        logger.warning(f"Could not parse target cash ratio: {args.target_cash_ratio}, using default: 0.3-0.7")
+        min_cash_ratio, max_cash_ratio = 0.3, 0.7
+    
     logger.info(f"Creating trading environment with cooldown period: {args.trade_cooldown}")
     logger.info(f"Max holding steps: {max_holding_steps}, Take profit: {take_profit_pct*100:.1f}%")
+    logger.info(f"Target cash ratio range: {min_cash_ratio:.2f}-{max_cash_ratio:.2f}")
     
     # Calculate candles per day for 15-minute data
     CANDLES_PER_DAY = 96  # 24 hours * 4 candles per hour for 15-minute data
