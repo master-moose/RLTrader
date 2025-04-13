@@ -698,6 +698,13 @@ class TensorboardCallback(BaseCallback):
         # Total steps counter for progress tracking
         self.total_steps = 0
         self.start_time = time.time()
+        
+        # For tracking episodes and printing statistics
+        self.last_episodes_count = 0
+        self.console_update_freq = 5000  # Print detailed stats every 5000 steps
+        self.last_10_rewards = []
+        self.last_10_lengths = []
+        self.episode_counter = 0
     
     def _on_step(self) -> bool:
         """Called at each step"""
@@ -723,6 +730,10 @@ class TensorboardCallback(BaseCallback):
             if hasattr(self.logger, 'dump'):
                 self.logger.dump(self.total_steps)
         
+        # Print console updates with detailed statistics
+        if self.total_steps % self.console_update_freq == 0:
+            self._print_console_update()
+        
         # Log action counts periodically
         if self.debug_steps % (self.debug_frequency * 2) == 0:
             total_actions = sum(self.action_counts.values()) or 1  # Avoid division by zero
@@ -744,6 +755,22 @@ class TensorboardCallback(BaseCallback):
                     reward = self.locals['rewards'][i]
                     self.episode_rewards.append(reward)
                     self.logger.record('environment/reward', reward)
+                    
+                    # Increment episode counter and keep track of recent rewards
+                    self.episode_counter += 1
+                    self.last_10_rewards.append(reward)
+                    if len(self.last_10_rewards) > 10:
+                        self.last_10_rewards.pop(0)
+                    
+                    # Track episode length if available
+                    if 'infos' in self.locals and len(self.locals['infos']) > i:
+                        info = self.locals['infos'][i]
+                        if 'episode' in info and 'l' in info['episode']:
+                            ep_length = info['episode']['l']
+                            self.last_10_lengths.append(ep_length)
+                            if len(self.last_10_lengths) > 10:
+                                self.last_10_lengths.pop(0)
+                    
                     self.logger.record('environment/episodes', len(self.episode_rewards))
                     
                     # Log mean and std of recent rewards
@@ -827,6 +854,95 @@ class TensorboardCallback(BaseCallback):
                     self.logger.dump(self.total_steps)
         
         return True
+    
+    def _print_console_update(self):
+        """Print a detailed update of training progress to the console"""
+        # Calculate time metrics
+        elapsed_time = time.time() - self.start_time
+        fps = self.total_steps / max(1, elapsed_time)
+        
+        # Estimate remaining time if we know total timesteps
+        total_timesteps = getattr(self.model, '_total_timesteps', 0)
+        remaining_steps = max(0, total_timesteps - self.total_steps) if total_timesteps > 0 else 0
+        remaining_time = remaining_steps / fps if fps > 0 else 0
+        
+        # Format time as hours:minutes:seconds
+        elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
+        remaining_str = time.strftime("%H:%M:%S", time.gmtime(remaining_time)) if remaining_time > 0 else "Unknown"
+        
+        # Training progress header
+        print("\n" + "="*80)
+        print(f"TRAINING PROGRESS - {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*80)
+        
+        # Basic progress
+        progress_pct = (self.total_steps / total_timesteps * 100) if total_timesteps > 0 else 0
+        print(f"Steps: {self.total_steps:,}/{total_timesteps:,} ({progress_pct:.1f}%)")
+        print(f"Episodes completed: {self.episode_counter}")
+        print(f"Time elapsed: {elapsed_str} | Estimated remaining: {remaining_str}")
+        print(f"Training speed: {fps:.1f} steps/second")
+        
+        # Rewards section
+        print("\n" + "-"*40)
+        print("REWARDS & EPISODE STATS")
+        print("-"*40)
+        
+        if self.last_10_rewards:
+            mean_reward = sum(self.last_10_rewards) / len(self.last_10_rewards)
+            reward_std = np.std(self.last_10_rewards) if len(self.last_10_rewards) > 1 else 0
+            print(f"Recent rewards (last 10): {mean_reward:.2f} ± {reward_std:.2f}")
+            
+            if self.last_10_lengths:
+                mean_length = sum(self.last_10_lengths) / len(self.last_10_lengths)
+                print(f"Recent episode length: {mean_length:.1f} steps")
+        else:
+            print("No episodes completed yet")
+        
+        # Portfolio stats if available
+        if self.portfolio_values:
+            initial_value = getattr(self.training_env.envs[0], 'initial_amount', 10000) if hasattr(self.training_env, 'envs') else 10000
+            current_value = self.portfolio_values[-1]
+            growth_pct = ((current_value / initial_value) - 1) * 100
+            
+            print("\n" + "-"*40)
+            print("PORTFOLIO PERFORMANCE")
+            print("-"*40)
+            print(f"Current value: ${current_value:.2f} | Growth: {growth_pct:.2f}%")
+        
+        # Trading stats
+        if self.trade_count > 0:
+            print("\n" + "-"*40)
+            print("TRADING STATISTICS")
+            print("-"*40)
+            print(f"Total trades: {self.trade_count} | Trade frequency: {self.trade_count/max(1, self.total_steps)*100:.2f}%")
+            
+            win_rate = (self.successful_trades / self.trade_count) * 100
+            print(f"Win rate: {win_rate:.1f}%")
+            
+            if self.total_loss > 0:
+                profit_factor = self.total_profit / max(self.total_loss, 1e-6)
+                print(f"Profit factor: {profit_factor:.2f}")
+        
+        # Action distribution
+        total_actions = sum(self.action_counts.values()) or 1
+        print("\n" + "-"*40)
+        print("ACTION DISTRIBUTION")
+        print("-"*40)
+        action_names = {0: "Sell", 1: "Hold", 2: "Buy"}
+        for action, count in self.action_counts.items():
+            action_name = action_names.get(action, f"Action {action}")
+            action_pct = (count / total_actions) * 100
+            print(f"{action_name}: {action_pct:.1f}%")
+        
+        # Safety metrics
+        print("\n" + "-"*40)
+        print("SAFETY METRICS")
+        print("-"*40)
+        print(f"Cooldown violations: {self.cooldown_violations}")
+        print(f"Oscillation count: {self.oscillation_count}")
+        print(f"Same price trades: {self.same_price_trades}")
+        
+        print("\n" + "="*80 + "\n")
 
 
 def setup_logging(log_dir=None):
