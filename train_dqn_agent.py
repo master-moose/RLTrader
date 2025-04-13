@@ -38,7 +38,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import ta
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ProgressBarCallback
 import matplotlib.pyplot as plt  # Add matplotlib
 import psutil  # Add psutil
 import inspect
@@ -1483,7 +1483,7 @@ def train_with_finrl(
         # Import stable-baselines3 and torch.nn
         from stable_baselines3 import PPO, DDPG, TD3, SAC
         import torch.nn as nn
-        from stable_baselines3.common.callbacks import BaseCallback
+        from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ProgressBarCallback
         import gymnasium
         import numpy as np
         import os
@@ -1754,10 +1754,11 @@ def train_with_finrl(
             # Debug info
             self.debug_steps = 0
             self.last_debug_output = 0
-            self.debug_frequency = 5000  # Reduce logging frequency (was 10000)
-            self.log_flush_frequency = 20000  # Flush logs every 20000 steps
+            self.debug_frequency = 500  # Reduce logging frequency (was 5000)
+            self.log_flush_frequency = 5000  # Flush logs more frequently (was 20000)
             
             logger.info("TensorboardCallback initialized - Will track trading metrics")
+            print("TensorboardCallback initialized - Will track trading metrics and output to console")
         
         def _on_step(self):
             # Increment step counter for debugging
@@ -1766,6 +1767,20 @@ def train_with_finrl(
             # Debug output every N steps
             if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
                 logger.info(f"Callback debugging at step {self.debug_steps}")
+                print(f"\n--- Training progress: step {self.debug_steps} ---")
+                
+                # Print key metrics to console
+                if len(self.episode_rewards) > 0:
+                    print(f"Recent reward mean: {np.mean(self.episode_rewards[-10:]):.4f}")
+                
+                if len(self.portfolio_values) > 0:
+                    print(f"Current portfolio value: {self.portfolio_values[-1]:.2f}")
+                
+                if self.trade_count > 0:
+                    win_rate = self.successful_trades / max(1, self.trade_count) * 100
+                    print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
+                    print(f"Action counts: {self.action_counts}")
+                
                 if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
                     logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
                 self.last_debug_output = self.debug_steps
@@ -1969,11 +1984,12 @@ def train_with_finrl(
         total_timesteps = getattr(args, 'timesteps', 50000)  # Default to 50000 if not specified
         logger.info(f"Training model for {total_timesteps} timesteps")
         
-        # Create the callback
+        # Create the callbacks
         tensorboard_callback = TensorboardCallback()
+        progress_callback = ProgressBarCallback()
         
-        # Store the callback in a list to make it accessible later
-        callbacks = [tensorboard_callback]
+        # Store the callbacks in a list to make them accessible later
+        callbacks = [tensorboard_callback, progress_callback]
         
         model.learn(
             total_timesteps=total_timesteps,
