@@ -1559,6 +1559,10 @@ def train_a2c(env, args, callbacks=None):
         policy_kwargs=policy_kwargs
     )
     
+    # Log key parameters to ensure they're being used
+    logger.info(f"A2C Model initialized with: n_steps={n_steps}, batch_size={batch_size}")
+    logger.info(f"Environment initialized with: initial_balance={args.initial_balance}, max_steps={args.max_steps}")
+    
     # Load model from checkpoint if specified
     if args.load_model:
         logger.info(f"Loading model from {args.load_model}")
@@ -1600,6 +1604,9 @@ def train_a2c(env, args, callbacks=None):
     logger.info(f"Training A2C for {total_timesteps} timesteps")
     
     try:
+        # Log the actual parameters before training starts
+        logger.info(f"Starting A2C training with batch_size={batch_size}, n_steps={n_steps}, total_timesteps={total_timesteps}")
+        
         model.learn(
             total_timesteps=total_timesteps,
             callback=all_callbacks,
