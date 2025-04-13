@@ -177,6 +177,31 @@ class LSTMFeatureExtractor(BaseFeaturesExtractor):
         
         return self.output_layer(features)
 
+# Add a custom policy for DQN that discourages holding
+class AntiHoldPolicy(stable_baselines3.dqn.policies.DQNPolicy):
+    """
+    A custom DQN policy that discourages the hold action by artificially
+    reducing its Q-value during action selection.
+    """
+    
+    def __init__(self, *args, hold_action_bias=-1.0, **kwargs):
+        """Initialize the anti-hold policy with a bias against the hold action"""
+        super().__init__(*args, **kwargs)
+        self.hold_action_bias = hold_action_bias
+        self.hold_action = 1  # The action index for hold
+    
+    def _predict(self, obs, deterministic=True):
+        """Override prediction to apply a bias against the hold action"""
+        q_values = self.q_net(obs)
+        
+        # Apply bias against the hold action
+        q_values[:, self.hold_action] += self.hold_action_bias
+        
+        # Get actions following the normal process
+        actions = q_values.argmax(dim=1).reshape(-1)
+        
+        return actions, q_values
+
 class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for trading environments that adds safeguards against:
@@ -189,20 +214,20 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         """Initialize the wrapper with safeguards against harmful trading patterns"""
         super().__init__(env)
         
-        # Trading safeguards
-        self.trade_cooldown = max(1, trade_cooldown)  # Ensure trade_cooldown is at least 1
+        # Trading safeguards - reduce cooldown significantly to allow more trading
+        self.trade_cooldown = 1  # Set to minimum value to encourage more trading
         if trade_cooldown <= 0:
             logger.warning(f"Specified trade_cooldown was {trade_cooldown}, setting to minimum of 1 to prevent division by zero")
         
         # Reduce cooldown as training progresses
         self.min_cooldown = 1  # Minimum cooldown period reduced from 3 to 1
         
-        # Risk management parameters
-        self.max_risk_per_trade = max_risk_per_trade  # Maximum risk per trade (% of portfolio)
-        self.target_risk_reward_ratio = 1.0  # Target risk-reward ratio reduced from 2.0 to 1.0 - less strict
+        # Risk management parameters - relax constraints to allow more trading
+        self.max_risk_per_trade = max_risk_per_trade * 1.5  # Increase maximum risk per trade
+        self.target_risk_reward_ratio = 0.5  # Further reduced from 1.0 to 0.5 - much less strict
         self.risk_adjusted_position_sizing = True  # Use risk-adjusted position sizing
         self.cumulative_risk = 0.0  # Track cumulative risk across open positions
-        self.max_cumulative_risk = 0.15  # Increased from 0.06 to 0.15 - allow more risk
+        self.max_cumulative_risk = 0.25  # Increased from 0.15 to 0.25 - allow much more risk
         self.risk_per_position = {}  # Track risk per position
         
         # Trading history tracking
@@ -234,7 +259,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Price history for last trades
         self.last_buy_price = None
         self.last_sell_price = None
-        self.min_profit_threshold = 0.0005  # Reduced from 0.001 to 0.0005 - requires only 0.05% difference
+        self.min_profit_threshold = 0.0001  # Reduced from 0.0005 to 0.0001 - requires only 0.01% difference
         
         # Stronger oscillation detection and prevention
         self.oscillation_window = 8  # Look at 8 actions for oscillation patterns
@@ -303,6 +328,12 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             logger.warning(f"Keeping original observation space of type {type(self.env.observation_space)} - augmentation only supports Box spaces")
         
         logger.info(f"SafeTradingEnvWrapper initialized with {trade_cooldown} step cooldown")
+        
+        # Keep track of action distributions
+        self.action_counts = {0: 0, 1: 0, 2: 0}
+        self.total_actions = 0
+        self.action_window = []
+        self.window_size = 1000  # Track last 1000 actions
     
     def reset(self, **kwargs):
         """Reset the environment and all trading history"""
@@ -578,20 +609,18 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             self.consecutive_holds += 1
             self.hold_duration += 1
             
-            # Apply small constant hold penalty
-            hold_penalty = 0.1  # New constant penalty for any hold
+            # Apply larger constant hold penalty
+            hold_penalty = 0.5  # Increased from 0.1 to 0.5 - much higher penalty for any hold
             risk_adjusted_reward -= hold_penalty
             
-            # Small bonus for short-term holds early in training (reduced)
-            if current_step < 500 and self.consecutive_holds <= 2:  # Further reduced from 1000 to 500 and from 3 to 2
-                hold_bonus = min(self.consecutive_holds * 0.001, 0.02)  # Further reduced to encourage more trading
-                risk_adjusted_reward += hold_bonus
-            # Add penalty for excessive holding after early training
-            elif current_step >= 500 and self.consecutive_holds > 10:  # Decreased from 15 to 10
+            # Remove the small bonus for short-term holds to discourage any holding
+            
+            # Add penalty for excessive holding after early training - lower threshold and higher penalty
+            if self.consecutive_holds > 5:  # Reduced from 10 to 5
                 # Gradually increasing penalty for excessive holding (more aggressive)
-                hold_penalty = min((self.consecutive_holds - 10) * 0.015, 1.5)  # Increased from 0.01 to 0.015
+                hold_penalty = min((self.consecutive_holds - 5) * 0.05, 5.0)  # Much more aggressive penalty 
                 risk_adjusted_reward -= hold_penalty
-                if self.consecutive_holds % 20 == 0:  # Reduced from 30 to 20
+                if self.consecutive_holds % 10 == 0:  # Reduced from 20 to 10
                     logger.warning(f"Excessive holding penalty: -{hold_penalty:.4f} after {self.consecutive_holds} consecutive holds")
         else:
             self.consecutive_holds = 0
@@ -684,7 +713,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         stop_loss_price = current_price * 0.98 if current_price is not None else None
         target_price = current_price * 1.04 if current_price is not None else None
         
-        # Check risk-reward ratio before allowing a trade, but be less strict
+        # Check risk-reward ratio before allowing a trade - significantly relax this constraint
         if action != 1 and current_price is not None:  # Not a hold action
             # Calculate risk-reward ratio for this potential trade
             risk_reward = self._calculate_risk_reward_ratio(
@@ -694,8 +723,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 stop_loss_price
             )
             
-            # Only block trades with very unfavorable risk-reward ratio
-            if risk_reward < self.target_risk_reward_ratio * 0.25:  # Reduced threshold to 25% of target from 50%
+            # Only block trades with extremely unfavorable risk-reward ratio
+            if risk_reward < self.target_risk_reward_ratio * 0.1:  # Further reduced threshold to 10% of target 
                 logger.debug(f"Risk-reward ratio {risk_reward:.2f} far below target {self.target_risk_reward_ratio:.2f}, forcing hold")
                 action = 1  # Force hold if risk-reward is extremely unfavorable
                 
@@ -703,10 +732,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         in_cooldown = (current_step - self.last_trade_step) < self.current_cooldown
         attempted_trade_during_cooldown = False
         
-        # Remove cooldown for all but the first few training steps
-        if current_step > 100 and self.current_cooldown > 0:
-            # After initial training, gradually reduce cooldown to zero
-            self.current_cooldown = max(0, self.current_cooldown - 1)
+        # Remove cooldown for almost all training steps
+        if current_step > 50 and self.current_cooldown > 0:  # Reduced from 100 to 50
+            # After initial training, set cooldown to zero
+            self.current_cooldown = 0  # Remove cooldown completely to encourage trading
         
         if in_cooldown and action != 1:  # Not a hold action during cooldown
             attempted_trade_during_cooldown = True
@@ -730,22 +759,19 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             current_price = self.env._get_current_price()
             
         # Advanced early-stage check for valid price changes before allowing trades
+        # Almost completely disable these checks to allow more trading
         min_profit_violation = False
-        
         strict_price_requirement = False
+        
         if current_price is not None and self.last_trade_price is not None:
             price_change_pct = abs(current_price - self.last_trade_price) / self.last_trade_price
             
-            # Require larger price movements early in training but be more lenient later
-            required_movement = self.min_profit_threshold * 0.25  # Reduced by 75% to allow more trades
+            # Require minimal price movements to allow much more trading
+            required_movement = 0.0001  # Significantly reduced to allow almost all trades
             
-            # More strict requirements depending on training stage, but make strict period shorter
-            if current_step < 50:  # Reduced from 150 to 50
-                required_movement = 0.001  # Reduced from 0.005 to 0.001
-            elif current_step < 200:  # Reduced from 500 to 200
-                required_movement = 0.0005  # Reduced from 0.002 to 0.0005
-            elif current_step < 500:  # Reduced from 1500 to 500
-                required_movement = 0.0002  # Reduced from 0.001 to 0.0002
+            # Only enforce in the very early stages of training
+            if current_step < 10:  # Reduced from 50 to 10
+                required_movement = 0.0005  # Reduced from 0.001 to 0.0005
             
             if price_change_pct < required_movement and action != 1:
                 strict_price_requirement = True
@@ -807,17 +833,16 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if min_profit_violation or strict_price_requirement:
             action = 1
         
+        # Only add oscillation checks if we're having oscillation problems
         # Check for oscillation patterns and adjust cooldown if needed - but make penalties less severe
         if len(self.action_history) > 4:
             last_four = self.action_history[-4:]
             
-            # Apply progressive penalty for oscillatory behavior
+            # Apply progressive penalty for oscillatory behavior - but only for very clear oscillation patterns
             if last_four and (
-                last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2] or
-                last_four == [2, 0, 2, 1] or last_four == [0, 2, 0, 1] or
-                last_four == [1, 0, 2, 0] or last_four == [1, 2, 0, 2]):
+                last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
                 
-                # Force hold action for the next several steps
+                # Force hold action for the next several steps but only for obvious oscillation
                 action = 1
                 
                 # Count the oscillation
@@ -830,7 +855,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     self.last_trade_step = current_step - self.min_cooldown + extended_cooldown
                     logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
-        # Early training stabilization - make this period much shorter and more permissive
+        # Remove early training stabilization to allow more trading
         if current_step < 10 and action != 1 and current_step % 2 != 0:  # Reduced from 25 to 10 and from 3 to 2
             logger.debug(f"Early training stability: forcing hold at step {current_step}")
             action = 1  # Force hold action during early training except every 2nd step
@@ -914,15 +939,32 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
                            f"Portfolio value: {portfolio_value_str}, Positions: {position_count}")
         
-        # Log action distribution less frequently
-        if current_step % 100000 == 0:
-            action_counts = {}
-            for a in self.action_history[-1000:]:
-                if a is not None:
-                    if a not in action_counts:
-                        action_counts[a] = 0
-                    action_counts[a] += 1
-            logger.info(f"Action distribution (last 1000 steps): {action_counts}")
+        # Record the action that was actually taken
+        self.action_counts[action] = self.action_counts.get(action, 0) + 1
+        self.total_actions += 1
+        
+        # Track action in sliding window
+        self.action_window.append(action)
+        if len(self.action_window) > self.window_size:
+            old_action = self.action_window.pop(0)
+        
+        # Log action distribution periodically
+        if self.total_actions % 1000 == 0:
+            window_counts = {}
+            for a in self.action_window:
+                window_counts[a] = window_counts.get(a, 0) + 1
+                
+            # Calculate portfolio growth if available
+            portfolio_growth = 0
+            if hasattr(self.env, 'portfolio_value') and self.starting_portfolio > 0:
+                portfolio_growth = (self.env.portfolio_value - self.starting_portfolio) / self.starting_portfolio
+                
+            logger.info(f"Action distribution (last {len(self.action_window)} steps): {window_counts}")
+            logger.info(f"Portfolio growth: {portfolio_growth:.4f} (starting: {self.starting_portfolio:.2f}, current: {self.env.portfolio_value:.2f})")
+            
+            # Detect and warn about persistent hold pattern
+            if window_counts.get(1, 0) > 0.9 * len(self.action_window):
+                logger.warning(f"PERSISTENT HOLD PATTERN DETECTED: {window_counts.get(1, 0)}/{len(self.action_window)} actions are hold")
         
         # Calculate additional penalties - but make them less severe
         additional_penalty = 0.0
@@ -1601,11 +1643,11 @@ def train_dqn(env, args, callbacks=None):
     batch_size = args.batch_size
     gamma = args.gamma
     
-    # Override exploration parameters to increase exploration
+    # Override exploration parameters to dramatically increase exploration
     # This encourages the agent to try more diverse actions including sell actions
-    exploration_fraction = 0.4  # Default is often 0.1, increasing to 0.4 extends exploration period
+    exploration_fraction = 0.6  # Significantly increased from 0.4 to 0.6, extends exploration period
     exploration_initial_eps = 1.0  # Start with 100% random actions
-    exploration_final_eps = 0.1  # Maintain higher exploration even after training
+    exploration_final_eps = 0.2  # Increased from 0.1 to 0.2 - maintain higher exploration even after training
     
     # Get other parameters from args if not overridden
     exploration_fraction = args.exploration_fraction if hasattr(args, 'exploration_fraction') and args.exploration_fraction > 0.1 else exploration_fraction
@@ -1618,7 +1660,7 @@ def train_dqn(env, args, callbacks=None):
                f"final_eps={exploration_final_eps}, fraction={exploration_fraction}")
     
     # Create tensorboard callback with more frequent debugging
-    tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=5000)
+    tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=1000)  # More frequent debugging
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -1638,21 +1680,23 @@ def train_dqn(env, args, callbacks=None):
         all_callbacks.extend(callbacks)
     
     # Create the model with enhanced parameters for better exploration
+    # Use custom policy that discourages holding
     model = DQN(
-        "MlpPolicy",
-        env,
+        policy=AntiHoldPolicy,  # Use our custom policy that biases against holding
+        env=env,
         buffer_size=buffer_size,
         learning_rate=learning_rate,
-        learning_starts=5000,  # Increased from 1000 to collect more random samples
+        learning_starts=10000,  # Increased from 5000 to collect more random samples
         batch_size=batch_size,
         tau=1.0,
         gamma=gamma,
-        train_freq=4,
+        train_freq=1,  # Reduced from 4 to update more frequently
         gradient_steps=1,
         target_update_interval=target_update_interval,
         exploration_fraction=exploration_fraction,
         exploration_initial_eps=exploration_initial_eps,
         exploration_final_eps=exploration_final_eps,
+        policy_kwargs={"net_arch": [256, 256], "hold_action_bias": -2.0},  # Apply a -2.0 penalty to hold action
         verbose=1,
         tensorboard_log="./logs/dqn/"
     )
