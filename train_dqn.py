@@ -419,6 +419,8 @@ def parse_args():
     # Environment parameters
     parser.add_argument("--data_path", type=str, default="data/synthetic/synthetic_dataset.h5", 
                        help="Path to market data (HDF5 format)")
+    parser.add_argument("--data_key", type=str, default=None,
+                       help="Specific key/group to use when HDF5 file contains multiple datasets")
     parser.add_argument("--state_space", type=int, default=16, help="State space dimensionality")
     parser.add_argument("--initial_balance", type=float, default=10000.0, help="Initial portfolio balance")
     parser.add_argument("--transaction_cost_pct", type=float, default=0.001, 
@@ -509,7 +511,30 @@ def load_and_preprocess_market_data(args):
         # Check if data is in HDF5 format
         if data_path.endswith('.h5'):
             logger.info(f"Loading market data from HDF5 file: {data_path}")
-            market_data = pd.read_hdf(data_path)
+            
+            # Try to load with key if specified
+            if args.data_key:
+                logger.info(f"Using specified key: {args.data_key}")
+                market_data = pd.read_hdf(data_path, key=args.data_key)
+            else:
+                # Try loading directly first (for single dataset files)
+                try:
+                    market_data = pd.read_hdf(data_path)
+                except ValueError as e:
+                    if "key must be provided" in str(e):
+                        # File has multiple datasets, list them and use the first one
+                        import h5py
+                        with h5py.File(data_path, 'r') as f:
+                            keys = list(f.keys())
+                            logger.info(f"File contains multiple datasets with keys: {keys}")
+                            if keys:
+                                first_key = keys[0]
+                                logger.info(f"Using first key automatically: {first_key}")
+                                market_data = pd.read_hdf(data_path, key=first_key)
+                            else:
+                                raise ValueError("HDF5 file doesn't contain any datasets")
+                    else:
+                        raise
         else:
             # Assume CSV format
             logger.info(f"Loading market data from CSV file: {data_path}")
