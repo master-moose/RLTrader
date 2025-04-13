@@ -14,41 +14,52 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def setup_patches():
-    """Set up the necessary patches for Stable Baselines 3"""
-    
-    # Try to add the patch_sb3 directory to the Python path
-    patch_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "patch_sb3"))
-    
-    if patch_path not in sys.path:
-        logger.info(f"Adding patch_sb3 directory to Python path: {patch_path}")
-        sys.path.insert(0, patch_path)
-    
-    # Try to import the patched modules
+def apply_patch():
+    """Apply the patch to stable-baselines3 PPO implementation."""
     try:
-        # Import patched PPO
-        from patch_sb3.stable_baselines3 import PPO
-        
-        # Replace the stable_baselines3 PPO with our patched version
+        # Get the path to the original stable-baselines3 PPO module
         import stable_baselines3
-        stable_baselines3.PPO = PPO
-        logger.info("Successfully patched PPO")
+        sb3_path = os.path.dirname(stable_baselines3.__file__)
+        ppo_path = os.path.join(sb3_path, "ppo", "ppo.py")
         
-        # Import patched A2C
-        from patch_sb3.stable_baselines3 import A2C
+        # Get the path to our patched version
+        patch_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patch_sb3")
+        patched_ppo_path = os.path.join(patch_dir, "stable_baselines3", "ppo", "ppo.py")
         
-        # Replace the stable_baselines3 A2C with our patched version
-        stable_baselines3.A2C = A2C
-        logger.info("Successfully patched A2C")
+        logger.info(f"Original SB3 PPO path: {ppo_path}")
+        logger.info(f"Patched PPO path: {patched_ppo_path}")
         
-        # You can add more patches here as needed
+        if not os.path.exists(patched_ppo_path):
+            logger.error(f"Patched PPO file not found at: {patched_ppo_path}")
+            return False
+            
+        # Read the patched version
+        with open(patched_ppo_path, 'r') as f:
+            patched_content = f.read()
+            
+        # Create a backup of the original file
+        backup_path = ppo_path + ".backup"
+        if not os.path.exists(backup_path):
+            logger.info(f"Creating backup of original PPO file at: {backup_path}")
+            import shutil
+            shutil.copy2(ppo_path, backup_path)
+        
+        # Write the patched content to the original file
+        with open(ppo_path, 'w') as f:
+            f.write(patched_content)
+            
+        logger.info("Successfully patched stable-baselines3 PPO implementation!")
+        
+        # Reload the module to apply the patch
+        if "stable_baselines3.ppo.ppo" in sys.modules:
+            logger.info("Reloading stable_baselines3.ppo.ppo module")
+            importlib.reload(sys.modules["stable_baselines3.ppo.ppo"])
         
         return True
-    except ImportError as e:
-        logger.warning(f"Failed to import patched modules: {e}")
-        return False
     except Exception as e:
-        logger.warning(f"Error applying patches: {e}")
+        logger.error(f"Error applying patch: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 def run_training():
@@ -63,16 +74,10 @@ def run_training():
         logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
-    # Setup logging
-    logging.basicConfig(level=logging.INFO)
-    
-    # Apply patches
-    success = setup_patches()
-    
-    if success:
-        logger.info("Patches applied successfully")
+    # Apply the patch
+    if apply_patch():
         # Run the training
         run_training()
     else:
-        logger.warning("Failed to apply some or all patches")
+        logger.error("Failed to apply patch. Aborting.")
         sys.exit(1) 

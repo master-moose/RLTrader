@@ -45,31 +45,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import datetime
 import matplotlib
-import os
-import time
-import sys
-
-# Apply custom patches to stable-baselines3
-try:
-    from patch_sb3_runner import setup_patches
-    if setup_patches():
-        logging.info("Successfully applied patches to stable-baselines3")
-    else:
-        logging.warning("Failed to apply some patches to stable-baselines3")
-except ImportError:
-    logging.warning("patch_sb3_runner not found, continuing without patches")
-
-# Configure logging with a more visible format
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-
-# Set up logger
-logger = logging.getLogger(__name__)
+matplotlib.use('Agg')  # Use non-interactive backend
 
 # Set project root to path
 project_root = str(Path(__file__).parent)
@@ -80,6 +56,17 @@ if project_root not in sys.path:
 from crypto_trading_model.environment.crypto_env import CryptocurrencyTradingEnv
 from crypto_trading_model.models.time_series.model import MultiTimeframeModel
 from crypto_trading_model.utils import set_seeds
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("logs/training.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Define technical indicators to ensure they're included in the environment
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
@@ -692,61 +679,49 @@ class TensorboardCallback(BaseCallback):
         
         # Debug counter
         self.debug_steps = 0
-        self.debug_frequency = 500  # Reduced from 1000 to 500 to see more updates
+        self.debug_frequency = 250  # Increased frequency from 1000 to 250 steps
         self.last_debug_output = 0
         
-        # Total steps counter for progress tracking
-        self.total_steps = 0
-        self.start_time = time.time()
-        
-        # For tracking episodes and printing statistics
-        self.last_episodes_count = 0
-        self.console_update_freq = 5000  # Print detailed stats every 5000 steps
-        self.last_10_rewards = []
-        self.last_10_lengths = []
-        self.episode_counter = 0
+        # Add step timing for performance monitoring
+        self.last_time = time.time()
+        self.steps_since_last_log = 0
     
     def _on_step(self) -> bool:
         """Called at each step"""
         self.debug_steps += 1
-        self.total_steps += 1
+        self.steps_since_last_log += 1
         
-        # Log step count and training progress every N steps
-        if self.debug_steps % self.debug_frequency == 0:
+        # Debug output every N steps
+        if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
             self.last_debug_output = self.debug_steps
+            current_time = time.time()
+            time_elapsed = current_time - self.last_time
+            steps_per_second = self.steps_since_last_log / time_elapsed if time_elapsed > 0 else 0
             
-            # Calculate time metrics
-            elapsed_time = time.time() - self.start_time
-            steps_per_second = self.total_steps / max(1, elapsed_time)
+            # Get current portfolio value if available
+            portfolio_value = None
+            if self.locals is not None and 'infos' in self.locals and len(self.locals['infos']) > 0:
+                info = self.locals['infos'][0]
+                if 'portfolio_value' in info:
+                    portfolio_value = info['portfolio_value']
             
-            # Log basic progress info
-            logger.info(f"Training progress at step {self.total_steps}")
+            # Print comprehensive stats
+            portfolio_str = f", Portfolio: {portfolio_value:.2f}" if portfolio_value is not None else ""
+            action_counts_str = ", ".join([f"{action}: {count}" for action, count in self.action_counts.items() if count > 0])
+            action_str = f", Actions: [{action_counts_str}]" if action_counts_str else ""
             
-            # Log to tensorboard
-            self.logger.record("time/total_timesteps", self.total_steps)
-            self.logger.record("time/steps_per_second", steps_per_second)
+            logger.info(f"Step {self.debug_steps}, {steps_per_second:.1f} steps/s{portfolio_str}{action_str}")
             
-            # Explicitly flush logger to ensure metrics are written
-            if hasattr(self.logger, 'dump'):
-                self.logger.dump(self.total_steps)
-        
-        # Print console updates with detailed statistics
-        if self.total_steps % self.console_update_freq == 0:
-            self._print_console_update()
-        
-        # Log action counts periodically
-        if self.debug_steps % (self.debug_frequency * 2) == 0:
-            total_actions = sum(self.action_counts.values()) or 1  # Avoid division by zero
+            # Log key metrics to tensorboard
+            if hasattr(self, 'logger') and self.logger is not None:
+                self.logger.record('training/steps_per_second', steps_per_second)
+                # Record number of steps per action
+                for action, count in self.action_counts.items():
+                    self.logger.record(f'actions/action_{action}_count', count)
             
-            # Calculate action percentages
-            for action, count in self.action_counts.items():
-                action_name = {0: "sell", 1: "hold", 2: "buy"}.get(action, f"action_{action}")
-                action_pct = (count / total_actions) * 100
-                self.logger.record(f"actions/{action_name}_pct", action_pct)
-            
-            # Log hold ratio as a key metric
-            hold_ratio = (self.action_counts.get(1, 0) / total_actions) * 100
-            self.logger.record("actions/hold_ratio", hold_ratio)
+            # Reset counters
+            self.last_time = current_time
+            self.steps_since_last_log = 0
         
         # Log rewards when episodes complete
         if self.locals is not None and 'dones' in self.locals and 'rewards' in self.locals:
@@ -755,33 +730,6 @@ class TensorboardCallback(BaseCallback):
                     reward = self.locals['rewards'][i]
                     self.episode_rewards.append(reward)
                     self.logger.record('environment/reward', reward)
-                    
-                    # Increment episode counter and keep track of recent rewards
-                    self.episode_counter += 1
-                    self.last_10_rewards.append(reward)
-                    if len(self.last_10_rewards) > 10:
-                        self.last_10_rewards.pop(0)
-                    
-                    # Track episode length if available
-                    if 'infos' in self.locals and len(self.locals['infos']) > i:
-                        info = self.locals['infos'][i]
-                        if 'episode' in info and 'l' in info['episode']:
-                            ep_length = info['episode']['l']
-                            self.last_10_lengths.append(ep_length)
-                            if len(self.last_10_lengths) > 10:
-                                self.last_10_lengths.pop(0)
-                    
-                    self.logger.record('environment/episodes', len(self.episode_rewards))
-                    
-                    # Log mean and std of recent rewards
-                    if len(self.episode_rewards) > 0:
-                        recent_rewards = self.episode_rewards[-min(10, len(self.episode_rewards)):]
-                        mean_reward = sum(recent_rewards) / len(recent_rewards)
-                        self.logger.record('environment/mean_reward', mean_reward)
-                        
-                        if len(recent_rewards) > 1:
-                            reward_std = np.std(recent_rewards)
-                            self.logger.record('environment/reward_std', reward_std)
                     
                     # If info dict available, extract additional metrics
                     if 'infos' in self.locals and len(self.locals['infos']) > i:
@@ -793,11 +741,8 @@ class TensorboardCallback(BaseCallback):
                             self.portfolio_values.append(portfolio_value)
                             self.logger.record('portfolio/value', portfolio_value)
                             
-                            # Log portfolio growth percentage from start
-                            if hasattr(self.training_env, 'envs') and hasattr(self.training_env.envs[0], 'initial_amount'):
-                                initial_amount = self.training_env.envs[0].initial_amount
-                                portfolio_growth_pct = ((portfolio_value / initial_amount) - 1) * 100
-                                self.logger.record('portfolio/growth_pct', portfolio_growth_pct)
+                            # Log episode completion with portfolio value
+                            logger.info(f"Episode complete, reward: {reward:.2f}, portfolio: {portfolio_value:.2f}")
                         
                         # Track cooldown violations
                         if 'cooldown_violation' in info and info['cooldown_violation']:
@@ -815,11 +760,7 @@ class TensorboardCallback(BaseCallback):
                             self.logger.record('safety/same_price_trades', self.same_price_trades)
                         
                         # Track actions if available
-                        if 'action_taken' in info:
-                            action = info['action_taken']
-                            if action in self.action_counts:
-                                self.action_counts[action] += 1
-                        elif 'action' in info:
+                        if 'action' in info:
                             action = info['action']
                             if action in self.action_counts:
                                 self.action_counts[action] += 1
@@ -848,101 +789,8 @@ class TensorboardCallback(BaseCallback):
                                 if self.total_loss > 0:
                                     profit_factor = self.total_profit / max(self.total_loss, 1e-6)
                                     self.logger.record('trades/profit_factor', profit_factor)
-                                    
-                # Force logger to write metrics to disk more frequently
-                if hasattr(self.logger, 'dump'):
-                    self.logger.dump(self.total_steps)
         
         return True
-    
-    def _print_console_update(self):
-        """Print a detailed update of training progress to the console"""
-        # Calculate time metrics
-        elapsed_time = time.time() - self.start_time
-        fps = self.total_steps / max(1, elapsed_time)
-        
-        # Estimate remaining time if we know total timesteps
-        total_timesteps = getattr(self.model, '_total_timesteps', 0)
-        remaining_steps = max(0, total_timesteps - self.total_steps) if total_timesteps > 0 else 0
-        remaining_time = remaining_steps / fps if fps > 0 else 0
-        
-        # Format time as hours:minutes:seconds
-        elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
-        remaining_str = time.strftime("%H:%M:%S", time.gmtime(remaining_time)) if remaining_time > 0 else "Unknown"
-        
-        # Training progress header
-        print("\n" + "="*80)
-        print(f"TRAINING PROGRESS - {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*80)
-        
-        # Basic progress
-        progress_pct = (self.total_steps / total_timesteps * 100) if total_timesteps > 0 else 0
-        print(f"Steps: {self.total_steps:,}/{total_timesteps:,} ({progress_pct:.1f}%)")
-        print(f"Episodes completed: {self.episode_counter}")
-        print(f"Time elapsed: {elapsed_str} | Estimated remaining: {remaining_str}")
-        print(f"Training speed: {fps:.1f} steps/second")
-        
-        # Rewards section
-        print("\n" + "-"*40)
-        print("REWARDS & EPISODE STATS")
-        print("-"*40)
-        
-        if self.last_10_rewards:
-            mean_reward = sum(self.last_10_rewards) / len(self.last_10_rewards)
-            reward_std = np.std(self.last_10_rewards) if len(self.last_10_rewards) > 1 else 0
-            print(f"Recent rewards (last 10): {mean_reward:.2f} ± {reward_std:.2f}")
-            
-            if self.last_10_lengths:
-                mean_length = sum(self.last_10_lengths) / len(self.last_10_lengths)
-                print(f"Recent episode length: {mean_length:.1f} steps")
-        else:
-            print("No episodes completed yet")
-        
-        # Portfolio stats if available
-        if self.portfolio_values:
-            initial_value = getattr(self.training_env.envs[0], 'initial_amount', 10000) if hasattr(self.training_env, 'envs') else 10000
-            current_value = self.portfolio_values[-1]
-            growth_pct = ((current_value / initial_value) - 1) * 100
-            
-            print("\n" + "-"*40)
-            print("PORTFOLIO PERFORMANCE")
-            print("-"*40)
-            print(f"Current value: ${current_value:.2f} | Growth: {growth_pct:.2f}%")
-        
-        # Trading stats
-        if self.trade_count > 0:
-            print("\n" + "-"*40)
-            print("TRADING STATISTICS")
-            print("-"*40)
-            print(f"Total trades: {self.trade_count} | Trade frequency: {self.trade_count/max(1, self.total_steps)*100:.2f}%")
-            
-            win_rate = (self.successful_trades / self.trade_count) * 100
-            print(f"Win rate: {win_rate:.1f}%")
-            
-            if self.total_loss > 0:
-                profit_factor = self.total_profit / max(self.total_loss, 1e-6)
-                print(f"Profit factor: {profit_factor:.2f}")
-        
-        # Action distribution
-        total_actions = sum(self.action_counts.values()) or 1
-        print("\n" + "-"*40)
-        print("ACTION DISTRIBUTION")
-        print("-"*40)
-        action_names = {0: "Sell", 1: "Hold", 2: "Buy"}
-        for action, count in self.action_counts.items():
-            action_name = action_names.get(action, f"Action {action}")
-            action_pct = (count / total_actions) * 100
-            print(f"{action_name}: {action_pct:.1f}%")
-        
-        # Safety metrics
-        print("\n" + "-"*40)
-        print("SAFETY METRICS")
-        print("-"*40)
-        print(f"Cooldown violations: {self.cooldown_violations}")
-        print(f"Oscillation count: {self.oscillation_count}")
-        print(f"Same price trades: {self.same_price_trades}")
-        
-        print("\n" + "="*80 + "\n")
 
 
 def setup_logging(log_dir=None):
@@ -1305,32 +1153,34 @@ def load_lstm_model(model_path):
     return None
 
 
-def train_dqn(env, args):
-    """Train a DQN agent"""
-    logger.info("Starting DQN training...")
+def train_dqn(env, args, callbacks=None):
+    """Train a DQN model with specified parameters."""
+    # Create checkpoint directory
+    checkpoint_dir = create_checkpoint_dir(args.finrl_model)
     
-    # Setup callbacks
-    checkpoint_dir = os.path.join('models', 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Initialize callbacks
+    if callbacks is None:
+        callbacks = []
     
-    callbacks = []
-    
+    # Add resource callback if available in the main function's scope
+    try:
+        if 'resource_callback' in globals():
+            callbacks.append(resource_callback)
+    except NameError:
+        logger.warning("Resource callback not available")
+        
     # Add checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=args.checkpoint_freq,
+        save_freq=max(args.timesteps // 10, 1000),
         save_path=checkpoint_dir,
         name_prefix="dqn_model",
-        save_replay_buffer=True,
-        save_vecnormalize=True
+        verbose=1
     )
     callbacks.append(checkpoint_callback)
     
-    # Add tensorboard callback
-    tensorboard_callback = TensorboardCallback()
-    callbacks.append(tensorboard_callback)
-    
-    # Combine callbacks
-    callback = CallbackList(callbacks)
+    # Add TensorBoard callback
+    tb_callback = TensorboardCallback(model_name=args.finrl_model, debug_frequency=250)
+    callbacks.append(tb_callback)
     
     # Create model
     model = DQN(
@@ -1344,7 +1194,7 @@ def train_dqn(env, args):
         exploration_initial_eps=args.exploration_initial_eps,
         exploration_final_eps=args.exploration_final_eps,
         target_update_interval=args.target_update_interval,
-        verbose=1 if args.verbose else 0,
+        verbose=1,  # Always use verbose=1 to show progress bar
         tensorboard_log="tensorboard_log",
         device=args.device
     )
@@ -1354,7 +1204,8 @@ def train_dqn(env, args):
         model.learn(
             total_timesteps=args.timesteps,
             callback=callback,
-            tb_log_name="dqn_run"
+            tb_log_name="dqn_run",
+            log_interval=25  # Log more frequently - every 25 updates
         )
         
         # Save trained model
@@ -1370,45 +1221,34 @@ def train_dqn(env, args):
         return None
 
 
-def train_ppo(env, args):
-    """Train a PPO agent"""
-    logger.info("Starting PPO training...")
+def train_ppo(env, args, callbacks=None):
+    """Train a PPO model with specified parameters."""
+    # Create checkpoint directory
+    checkpoint_dir = create_checkpoint_dir(args.finrl_model)
     
-    # Create directories for checkpoints and logs
-    checkpoint_dir = os.path.join('models', 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Initialize callbacks
+    if callbacks is None:
+        callbacks = []
     
-    # Setup tensorboard logging
-    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tensorboard_log_dir = os.path.join("tensorboard_log", f"PPO_{current_time}")
-    
-    # Ensure minimum values for stability
-    n_steps = max(512, args.n_steps)
-    if n_steps != args.n_steps:
-        logger.warning(f"Adjusted n_steps from {args.n_steps} to {n_steps} for stability")
+    # Add resource callback if available in the main function's scope
+    try:
+        if 'resource_callback' in globals():
+            callbacks.append(resource_callback)
+    except NameError:
+        logger.warning("Resource callback not available")
         
-    batch_size = max(256, args.batch_size)
-    if batch_size != args.batch_size:
-        logger.warning(f"Adjusted batch_size from {args.batch_size} to {batch_size} for stability")
-    
-    # Set up standard callbacks
-    callbacks = []
-    
-    # Add checkpoint callback to save models periodically
+    # Add checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000,
+        save_freq=max(args.timesteps // 10, 1000),
         save_path=checkpoint_dir,
         name_prefix="ppo_model",
-        save_vecnormalize=True
+        verbose=1
     )
     callbacks.append(checkpoint_callback)
     
-    # Add tensorboard callback for logging
-    tensorboard_callback = TensorboardCallback()
-    callbacks.append(tensorboard_callback)
-    
-    # Combine callbacks
-    callback = CallbackList(callbacks)
+    # Add TensorBoard callback
+    tb_callback = TensorboardCallback(model_name=args.finrl_model, debug_frequency=250)
+    callbacks.append(tb_callback)
     
     # Create model with appropriate parameters for stability
     # Cap learning rate at 0.0005 for stability
@@ -1429,18 +1269,18 @@ def train_ppo(env, args):
     else:
         logger.info("Using CPU for PPO with MlpPolicy as recommended for better performance")
     
-    logger.info(f"Creating PPO model with n_steps={n_steps}, batch_size={batch_size}")
+    logger.info(f"Creating PPO model with n_steps={args.n_steps}, batch_size={args.batch_size}")
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=lr_schedule,
-        n_steps=n_steps,
-        batch_size=batch_size,
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
         gamma=args.gamma,
         ent_coef=0.01,  # Slightly higher entropy for better exploration
         clip_range=0.2,
-        verbose=1 if args.verbose else 0,
-        tensorboard_log=tensorboard_log_dir,
+        verbose=1,  # Always use verbose=1 to show progress bar
+        tensorboard_log=os.path.join("tensorboard_log", f"PPO_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"),
         device=device
     )
     
@@ -1450,7 +1290,8 @@ def train_ppo(env, args):
         model.learn(
             total_timesteps=args.timesteps,
             callback=callback,
-            tb_log_name="ppo_run"
+            tb_log_name="ppo_run",
+            log_interval=25  # Log more frequently - every 25 updates
         )
         
         # Save trained model
@@ -1466,45 +1307,34 @@ def train_ppo(env, args):
         return None
 
 
-def train_a2c(env, args):
-    """
-    Train an A2C agent.
+def train_a2c(env, args, callbacks=None):
+    """Train an A2C model with specified parameters."""
+    # Create checkpoint directory
+    checkpoint_dir = create_checkpoint_dir(args.finrl_model)
     
-    Parameters:
-        env: The training environment
-        args: Arguments from command line
+    # Initialize callbacks
+    if callbacks is None:
+        callbacks = []
+    
+    # Add resource callback if available in the main function's scope
+    try:
+        if 'resource_callback' in globals():
+            callbacks.append(resource_callback)
+    except NameError:
+        logger.warning("Resource callback not available")
         
-    Returns:
-        Trained model
-    """
-    logger.info("Starting A2C training...")
-    
-    # Create directories for checkpoints and logs
-    checkpoint_dir = os.path.join('models', 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    # Setup tensorboard logging
-    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tensorboard_log_dir = os.path.join("tensorboard_log", f"A2C_{current_time}")
-    
-    # Set up standard callbacks
-    callbacks = []
-    
-    # Add checkpoint callback to save models periodically
+    # Add checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000,
+        save_freq=max(args.timesteps // 10, 1000),
         save_path=checkpoint_dir,
         name_prefix="a2c_model",
-        save_vecnormalize=True
+        verbose=1
     )
     callbacks.append(checkpoint_callback)
     
-    # Add tensorboard callback for logging with more frequent updates
-    tensorboard_callback = TensorboardCallback(verbose=1)
-    callbacks.append(tensorboard_callback)
-    
-    # Combine callbacks
-    callback = CallbackList(callbacks)
+    # Add TensorBoard callback
+    tb_callback = TensorboardCallback(model_name=args.finrl_model, debug_frequency=250)
+    callbacks.append(tb_callback)
     
     # Create model with appropriate parameters for stability
     # Cap learning rate for stability
@@ -1516,63 +1346,51 @@ def train_a2c(env, args):
     def lr_schedule(remaining_progress):
         return learning_rate * remaining_progress  # Linear schedule
     
-    # Allow A2C to use GPU when available, similar to SAC
-    device = args.device
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # Create A2C-specific policy_kwargs with better defaults for training stability
-    policy_kwargs = {
-        'net_arch': {
-            'pi': [256, 256],  # Actor network
-            'vf': [256, 256]   # Value function network
-        },
-        'activation_fn': nn.Tanh,  # Use Tanh for more stable training
-        'use_rms_prop': True,  # Use RMSProp
-        'rms_prop_eps': 1e-5
-    }
-    
-    # Add LSTM feature extractor if provided
+    # Load LSTM model if path provided
     lstm_model = None
     if args.lstm_model_path:
         lstm_model = load_lstm_model(args.lstm_model_path)
         
+    # Force CPU for MlpPolicy to avoid the GPU utilization warning
+    # Only use GPU if specifically requested via args.device and not auto-detected
+    device = "cpu"
+    if args.device == "cuda" and torch.cuda.is_available():
+        logger.info("Using CUDA for A2C training")
+        device = "cuda"
+    else:
+        logger.info("Using CPU for A2C training")
+    
+    policy_kwargs = {
+        'net_arch': [256, 256]  # Use a deeper network
+    }
+    
     if lstm_model is not None:
         policy_kwargs["features_extractor_class"] = LSTMAugmentedFeatureExtractor
         policy_kwargs["features_extractor_kwargs"] = {"lstm_model": lstm_model}
         
     logger.info(f"Creating A2C model with n_steps={args.n_steps}, using device={device}")
-    # Import A2C which should now be our patched version
     from stable_baselines3 import A2C
-    
-    # Use higher verbosity for better progress tracking
     model = A2C(
         "MlpPolicy",
         env,
-        learning_rate=lr_schedule if callable(lr_schedule) else learning_rate,
+        learning_rate=lr_schedule,
         n_steps=args.n_steps,
         gamma=args.gamma,
-        gae_lambda=0.95,
         ent_coef=args.ent_coef,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        use_rms_prop=True,  # Use RMSProp optimizer instead of Adam for A2C
-        rms_prop_eps=1e-5,
-        normalize_advantage=True,
-        verbose=2 if args.verbose else 1,  # Increase verbosity to see progress bar
-        tensorboard_log=tensorboard_log_dir,
-        device=device,
         policy_kwargs=policy_kwargs,
+        verbose=1,  # Changed from conditional to always have verbose=1 to show progress
+        tensorboard_log=os.path.join("tensorboard_log", f"A2C_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"),
+        device=device
     )
     
-    # Train model with standard approach
+    # Train model
     try:
         logger.info(f"Training A2C model for {args.timesteps} timesteps...")
         model.learn(
             total_timesteps=args.timesteps,
             callback=callback,
-            tb_log_name="a2c_run_1",  # Adding _1 suffix to make it clearer in TensorBoard
-            progress_bar=True  # Enable progress bar
+            tb_log_name="a2c_run_1",  # Changed to include "1" to ensure uniqueness
+            log_interval=25  # Log more frequently - every 25 updates
         )
         
         # Save trained model
@@ -1588,37 +1406,36 @@ def train_a2c(env, args):
         return None
 
 
-def train_sac(env, args):
-    """Train a Soft Actor-Critic (SAC) agent"""
-    logger.info("Starting SAC training...")
+def train_sac(env, args, callbacks=None):
+    """Train a SAC model with specified parameters."""
+    # Create checkpoint directory
+    checkpoint_dir = create_checkpoint_dir(args.finrl_model)
     
-    # Create directories for checkpoints and logs
-    checkpoint_dir = os.path.join('models', 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Initialize callbacks
+    if callbacks is None:
+        callbacks = []
     
-    # Setup tensorboard logging
-    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tensorboard_log_dir = os.path.join("tensorboard_log", f"SAC_{current_time}")
-    
-    # Set up standard callbacks
-    callbacks = []
-    
-    # Add checkpoint callback to save models periodically
+    # Add resource callback if available in the main function's scope
+    try:
+        if 'resource_callback' in globals():
+            callbacks.append(resource_callback)
+    except NameError:
+        logger.warning("Resource callback not available")
+        
+    # Add checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000,
+        save_freq=max(args.timesteps // 10, 1000),
         save_path=checkpoint_dir,
         name_prefix="sac_model",
-        save_vecnormalize=True
+        verbose=1
     )
     callbacks.append(checkpoint_callback)
     
-    # Add tensorboard callback for logging
-    tensorboard_callback = TensorboardCallback()
-    callbacks.append(tensorboard_callback)
+    # Add TensorBoard callback
+    tb_callback = TensorboardCallback(model_name=args.finrl_model, debug_frequency=250)
+    callbacks.append(tb_callback)
     
-    # Combine callbacks
-    callback = CallbackList(callbacks)
-    
+    # Create model with appropriate parameters for stability
     # Cap learning rate for stability
     learning_rate = min(0.0003, args.learning_rate)
     if learning_rate != args.learning_rate:
@@ -1645,19 +1462,18 @@ def train_sac(env, args):
         env,
         learning_rate=learning_rate,
         buffer_size=args.buffer_size,
-        learning_starts=1000,  # Start learning after 1000 steps
         batch_size=args.batch_size,
         gamma=args.gamma,
-        tau=0.005,  # Target network update rate (soft update)
-        ent_coef='auto',  # Automatic entropy tuning
-        target_update_interval=1,
-        gradient_steps=1,
-        train_freq=1,  # Update the policy every step
-        use_sde=False,  # No state-dependent exploration
-        policy_kwargs=policy_kwargs,
-        verbose=1 if args.verbose else 0,
-        tensorboard_log=tensorboard_log_dir,
-        device=device
+        tau=0.005,  # For soft target update
+        ent_coef="auto",  # Automatic entropy tuning
+        target_entropy="auto",  # Automatic target entropy
+        train_freq=1,  # Update policy every step
+        gradient_steps=1,  # One gradient step per step in the environment
+        action_noise=None,  # No additional action noise
+        verbose=1,  # Always use verbose=1 to show progress bar 
+        tensorboard_log=os.path.join("tensorboard_log", f"SAC_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"),
+        device=device,
+        policy_kwargs=policy_kwargs
     )
     
     # Train model
@@ -1666,7 +1482,8 @@ def train_sac(env, args):
         model.learn(
             total_timesteps=args.timesteps,
             callback=callback,
-            tb_log_name="sac_run"
+            tb_log_name="sac_run_1",
+            log_interval=25  # Log more frequently
         )
         
         # Save trained model
@@ -1847,8 +1664,34 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
         return features
         
 
+def check_resources():
+    """Check system resources and log information about CPU and memory usage"""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    
+    # Get CPU usage
+    cpu_percent = process.cpu_percent(interval=0.1)
+    
+    # Get memory usage
+    memory_mb = memory_info.rss / (1024 * 1024)  # Convert to MB
+    
+    # Get GPU info if available
+    gpu_info = ""
+    if torch.cuda.is_available():
+        gpu_memory_allocated = torch.cuda.memory_allocated() / (1024 * 1024)
+        gpu_memory_cached = torch.cuda.memory_reserved() / (1024 * 1024)
+        gpu_info = f", GPU: {gpu_memory_allocated:.0f}MB used / {gpu_memory_cached:.0f}MB reserved"
+    
+    logger.info(f"Resources: CPU: {cpu_percent:.1f}%, Memory: {memory_mb:.0f}MB{gpu_info}")
+    
+    return {
+        'cpu_percent': cpu_percent,
+        'memory_mb': memory_mb
+    }
+
+
 def main():
-    """Main entry point"""
+    """Main entry point for script"""
     # Parse arguments
     args = parse_args()
     
@@ -1864,7 +1707,7 @@ def main():
         logger.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
     else:
         logger.info("CUDA not available, using CPU")
-    
+        
     # Set random seed if provided
     if args.seed is not None:
         logger.info(f"Setting random seed to: {args.seed}")
@@ -1872,7 +1715,7 @@ def main():
         torch.manual_seed(args.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(args.seed)
-    
+            
     # Log key parameters
     logger.info(f"Training with model: {args.finrl_model}")
     logger.info(f"Timesteps: {args.timesteps}")
@@ -1886,24 +1729,55 @@ def main():
     os.makedirs('logs', exist_ok=True)
     os.makedirs('tensorboard_log', exist_ok=True)
     
-    # Load market data
-    df = load_and_preprocess_market_data(args)
+    # Check resources before starting
+    logger.info("Checking system resources before starting:")
+    check_resources()
+    
+    trained_model = None
+    vec_env = None
     
     try:
-        # Create vectorized environment
+        # Load data
+        df = load_and_preprocess_market_data(args)
+        
+        if df is None or len(df) == 0:
+            logger.error("Failed to load market data. Exiting.")
+            return
+            
+        logger.info(f"Loaded market data with shape: {df.shape}")
+        
+        # Create environment
         total_envs = args.num_workers * args.num_envs_per_worker
         logger.info(f"Creating {total_envs} parallel environments")
         vec_env = create_vec_env(df, args, num_envs=total_envs)
         
-        # Load LSTM model if path provided
+        # Load pre-trained LSTM model if specified
         lstm_model = None
         if args.lstm_model_path:
+            logger.info(f"Loading LSTM model from {args.lstm_model_path}")
             lstm_model = load_lstm_model(args.lstm_model_path)
+            if lstm_model is not None:
+                logger.info("LSTM model loaded successfully")
+            else:
+                logger.warning("Failed to load LSTM model, proceeding without it")
+                
+        # Create resource monitoring callback
+        class ResourceCheckCallback(BaseCallback):
+            def __init__(self, check_interval=10000, verbose=0):
+                super().__init__(verbose)
+                self.check_interval = check_interval
+                self.last_check = 0
+            
+            def _on_step(self) -> bool:
+                if self.num_timesteps - self.last_check > self.check_interval:
+                    self.last_check = self.num_timesteps
+                    check_resources()
+                return True
         
-        # Train the specified model
-        trained_model = None
+        # Add resource callback to all training algorithms
+        resource_callback = ResourceCheckCallback(check_interval=10000)  # Check every 10K steps
         
-        # Standard SB3 training
+        # Train according to selected algorithm
         if args.finrl_model.lower() == "dqn":
             trained_model = train_dqn(vec_env, args)
         elif args.finrl_model.lower() == "ppo":
@@ -1918,10 +1792,14 @@ def main():
         
         logger.info("Training completed successfully")
         
+        # Check resources after training
+        logger.info("Checking system resources after training:")
+        check_resources()
+            
     except KeyboardInterrupt:
         logger.info("Training interrupted by user.")
     except Exception as e:
-        logger.error(f"Error during training: {str(e)}")
+        logger.error(f"Error in main function: {str(e)}")
         logger.error(traceback.format_exc())
     finally:
         # Save any final models if training was interrupted
@@ -1932,7 +1810,7 @@ def main():
             
         # Clean up
         try:
-            if 'vec_env' in locals():
+            if vec_env is not None:
                 vec_env.close()
                 logger.info("Environment resources cleaned up")
         except Exception as cleanup_error:
