@@ -229,6 +229,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Risk management parameters - relax constraints to allow more trading
         self.max_risk_per_trade = max_risk_per_trade * 1.5  # Increase maximum risk per trade
+        self.max_history_size = max_history_size  # Initialize max_history_size with the parameter value
         self.target_risk_reward_ratio = 0.3  # Further reduced from 0.5 to 0.3 - much less strict
         self.risk_adjusted_position_sizing = True  # Use risk-adjusted position sizing
         self.cumulative_risk = 0.0  # Track cumulative risk across open positions
