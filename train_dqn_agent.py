@@ -760,7 +760,7 @@ def create_finrl_env(
         'initial_amount': initial_balance,
         'buy_cost_pct': 0.001,  # Transaction cost for buying
         'sell_cost_pct': 0.001,  # Transaction cost for selling
-        'reward_scaling': 0.0001,  # Scaling factor for reward
+        'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
         'hmax': 100,  # Maximum number of shares to trade
         'stock_dim': stock_dimension,
         'num_stock_shares': initial_stocks,
@@ -1061,7 +1061,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     # 'transaction_cost_pct': transaction_cost_pct_list,  # Remove - not accepted by FinRL
                     'buy_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
                     'sell_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
-                    'reward_scaling': reward_scaling,
+                    'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
                     'state_space': state_space,  # Add the missing state_space parameter
                     'print_verbosity': 1 if idx == 0 else 0  # Only print verbose output for the first env
                 }
@@ -1970,15 +1970,39 @@ def train_with_finrl(
         import os
         os.environ['STABLE_BASELINES_TENSORBOARD_QUEUE_SIZE'] = '100000'
         
-        model = model_class(
+        # Get PPO hyperparameters
+        n_steps = getattr(args, 'n_steps', 2048)
+        batch_size = getattr(args, 'batch_size', 64)
+        n_epochs = getattr(args, 'n_epochs', 10)
+        learning_rate = getattr(args, 'learning_rate', 0.0003)  # Increased from 0.0001
+        
+        logger.info(f"PPO parameters: n_steps={n_steps}, batch_size={batch_size}, n_epochs={n_epochs}, lr={learning_rate}")
+        
+        # Create PPO model with enhanced GPU utilization
+        model = PPO(
             "MlpPolicy", 
-            vec_env, 
-            learning_rate=getattr(args, 'learning_rate', 0.0003),
+            vec_env,
+            learning_rate=learning_rate,
             gamma=getattr(args, 'gamma', 0.99),
-            verbose=2,  # Change from 1 to 2 for more detailed logging
-            policy_kwargs=policy_kwargs,
-            tensorboard_log="./tensorboard_logs"
+            n_steps=n_steps,       # Larger batch size for better GPU utilization
+            batch_size=batch_size, # Minibatch size for updates
+            n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
+            ent_coef=0.05,         # Increased entropy coefficient for better exploration
+            vf_coef=1.0,           # Increased value function coefficient
+            clip_range_vf=0.4,     # Enable value function clipping
+            verbose=1 if args.verbose else 0,
+            tensorboard_log="./tensorboard_logs",
+            device=device,
+            policy_kwargs={
+                'net_arch': [512, 256, 128]  # Adjusted network architecture
+            }
         )
+        
+        # Check if we should normalize observations
+        if getattr(args, 'normalize_observations', 'true').lower() == 'true':
+            from stable_baselines3.common.vec_env import VecNormalize
+            logger.info("Wrapping environment with VecNormalize for observation normalization")
+            vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
         
         # Train the model with callback
         total_timesteps = getattr(args, 'timesteps', 50000)  # Default to 50000 if not specified
@@ -2120,39 +2144,49 @@ def setup_logging():
     logging.basicConfig(level=logging.INFO, format=log_format)
     return logging.getLogger()
 
+logger = setup_logging()
+
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Train DQN agent for cryptocurrency trading')
-    
-    # General arguments
-    parser.add_argument('--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (cuda or cpu)')
+    parser = argparse.ArgumentParser(description="Train a DQN agent for cryptocurrency trading")
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use (cuda, cpu)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     
-    # Data arguments
-    parser.add_argument('--start_date', type=str, default='2018-01-01', help='Start date for training data')
-    parser.add_argument('--end_date', type=str, default='2021-12-31', help='End date for training data')
-    parser.add_argument('--tickers', type=str, default='BTC,ETH,LTC', help='Comma-separated list of tickers')
+    # Data parameters
+    parser.add_argument('--start_date', type=str, default='2020-01-01', help='Start date for training data')
+    parser.add_argument('--end_date', type=str, default='2021-01-01', help='End date for training data')
+    parser.add_argument('--tickers', type=str, default='BTC', help='Comma-separated list of tickers to trade')
     
-    # Model arguments
-    parser.add_argument('--use_finrl', action='store_true', help='Use FinRL framework')
-    parser.add_argument('--finrl_model', type=str, default='sac', 
-                       choices=['sac', 'ppo', 'ddpg', 'td3'], 
-                       help='FinRL model to use')
-    parser.add_argument('--lstm_model_path', type=str, help='Path to pretrained LSTM model')
-    parser.add_argument('--timesteps', type=int, default=500000, help='Number of timesteps to train')
-    parser.add_argument('--num_workers', type=int, default=2, help='Number of parallel environments')
-    parser.add_argument('--num_envs_per_worker', type=int, default=4, help='Number of envs per worker')
-    parser.add_argument('--use_subproc_vecenv', action='store_true', help='Use SubprocVecEnv instead of DummyVecEnv')
+    # Model parameters
+    parser.add_argument('--use_finrl', action='store_true', help='Use FinRL environment and models')
+    parser.add_argument('--finrl_model', type=str, choices=['sac', 'ppo', 'ddpg', 'td3'], default='ppo', 
+                        help='FinRL model type to use')
+    parser.add_argument('--lstm_model_path', type=str, default=None, 
+                        help='Path to pre-trained LSTM model to use for predictions')
     
-    # Hyperparameters
+    # Training parameters
+    parser.add_argument('--timesteps', type=int, default=1000000, help='Number of timesteps to train for')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for parallel training')
+    parser.add_argument('--num_envs_per_worker', type=int, default=1, 
+                        help='Number of environments per worker')
+    parser.add_argument('--use_subproc_vecenv', action='store_true', 
+                        help='Use SubprocVecEnv instead of DummyVecEnv')
+    
+    # Environment parameters
+    parser.add_argument('--initial_balance', type=float, default=10000.0, 
+                        help='Initial balance for the trading agent')
+    parser.add_argument('--transaction_fee', type=float, default=0.001, 
+                        help='Transaction fee as a fraction of the transaction amount')
+    
+    # PPO specific parameters
+    parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps per update for PPO')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for PPO')
+    parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs for PPO')
     parser.add_argument('--learning_rate', type=float, default=0.0003, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--initial_balance', type=float, default=1000000.0, help='Initial balance')
-    parser.add_argument('--transaction_fee', type=float, default=0.001, help='Transaction fee')
-    parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps to collect before learning (PPO)')
-    parser.add_argument('--batch_size', type=int, default=256, help='Minibatch size for PPO updates')
-    parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs when optimizing the surrogate loss (PPO)')
+    parser.add_argument('--reward_scaling', type=float, default=1e-4, help='Reward scaling factor')
+    parser.add_argument('--normalize_observations', type=str, default='true', 
+                        help='Whether to normalize observations (true/false)')
     
     return parser.parse_args()
 
@@ -2566,7 +2600,7 @@ def main():
             'stock_dim': 1,  # Single asset trading
             'tech_indicator_list': tech_indicators,
             'action_space': 3,  # Sell, hold, buy
-            'reward_scaling': 1e-4,
+            'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
             'print_verbosity': 10 if args.verbose else 0
         }
         
@@ -2589,7 +2623,7 @@ def main():
                 n_steps = getattr(args, 'n_steps', 2048)
                 batch_size = getattr(args, 'batch_size', 64)
                 n_epochs = getattr(args, 'n_epochs', 10)
-                learning_rate = getattr(args, 'learning_rate', 0.0001)
+                learning_rate = getattr(args, 'learning_rate', 0.0003)  # Increased from 0.0001
                 
                 logger.info(f"PPO parameters: n_steps={n_steps}, batch_size={batch_size}, n_epochs={n_epochs}, lr={learning_rate}")
                 
@@ -2602,14 +2636,22 @@ def main():
                     n_steps=n_steps,       # Larger batch size for better GPU utilization
                     batch_size=batch_size, # Minibatch size for updates
                     n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-                    ent_coef=0.01,         # Entropy coefficient for exploration
+                    ent_coef=0.05,         # Increased entropy coefficient for better exploration
+                    vf_coef=1.0,           # Increased value function coefficient
+                    clip_range_vf=0.4,     # Enable value function clipping
                     verbose=1 if args.verbose else 0,
                     tensorboard_log="./tensorboard_logs",
                     device=device,
                     policy_kwargs={
-                        'net_arch': [512, 512, 256]  # Larger network to utilize GPU better
+                        'net_arch': [512, 256, 128]  # Adjusted network architecture
                     }
                 )
+                
+                # Check if we should normalize observations
+                if getattr(args, 'normalize_observations', 'true').lower() == 'true':
+                    from stable_baselines3.common.vec_env import VecNormalize
+                    logger.info("Wrapping environment with VecNormalize for observation normalization")
+                    vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
                 
                 # Log GPU memory usage before training
                 if torch.cuda.is_available():
@@ -2634,23 +2676,252 @@ def main():
                             logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
                         return True
                 
-                callbacks = [GPUMonitorCallback()]
+                # Define callback to log metrics to tensorboard
+                class TensorboardCallback(BaseCallback):
+                    def __init__(self, verbose=0):
+                        super().__init__(verbose)
+                        # Episode tracking
+                        self.episode_rewards = []
+                        self.episode_lengths = []
+                        self.current_episode_reward = 0
+                        self.current_episode_length = 0
+                        
+                        # Portfolio tracking
+                        self.portfolio_values = []
+                        
+                        # Trade metrics tracking
+                        self.trade_count = 0
+                        self.successful_trades = 0
+                        self.failed_trades = 0
+                        self.total_profit = 0
+                        self.total_loss = 0
+                        self.action_counts = {'buy': 0, 'sell': 0, 'hold': 0}
+                        self.trade_returns = []
+                        self.trade_durations = []
+                        self.recent_trades = []  # List to track recent trades for trend analysis
+                        self.max_recent_trades = 100  # Maximum number of recent trades to keep
+                        
+                        # Position tracking
+                        self.current_position = 0
+                        self.entry_price = 0
+                        self.position_start_time = 0
+                        
+                        # Debug info
+                        self.debug_steps = 0
+                        self.last_debug_output = 0
+                        self.debug_frequency = 500  # Reduce logging frequency (was 5000)
+                        self.log_flush_frequency = 5000  # Flush logs more frequently (was 20000)
+                        
+                        logger.info("TensorboardCallback initialized - Will track trading metrics")
+                        print("TensorboardCallback initialized - Will track trading metrics and output to console")
+                    
+                    def _on_step(self):
+                        # Increment step counter for debugging
+                        self.debug_steps += 1
+                        
+                        # Debug output every N steps
+                        if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
+                            logger.info(f"Callback debugging at step {self.debug_steps}")
+                            print(f"\n--- Training progress: step {self.debug_steps} ---")
+                            
+                            # Print key metrics to console
+                            if len(self.episode_rewards) > 0:
+                                print(f"Recent reward mean: {np.mean(self.episode_rewards[-10:]):.4f}")
+                            
+                            if len(self.portfolio_values) > 0:
+                                print(f"Current portfolio value: {self.portfolio_values[-1]:.2f}")
+                            
+                            if self.trade_count > 0:
+                                win_rate = self.successful_trades / max(1, self.trade_count) * 100
+                                print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
+                                print(f"Action counts: {self.action_counts}")
+                            
+                            if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
+                                logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
+                            self.last_debug_output = self.debug_steps
+                        
+                        # Force tensorboard log flushing periodically
+                        if hasattr(self.logger, "dump_tabular") and self.debug_steps % self.log_flush_frequency == 0:
+                            self.logger.dump_tabular()
+                        
+                        # Track step reward
+                        if hasattr(self, 'locals') and 'rewards' in self.locals:
+                            rewards = self.locals['rewards']
+                            for i, reward in enumerate(rewards):
+                                # Update the current episode rewards
+                                self.current_episode_reward += reward
+                                self.current_episode_length += 1
+                                
+                                # Log environment info if available
+                                if 'infos' in self.locals and i < len(self.locals['infos']):
+                                    info = self.locals['infos'][i]
+                                    
+                                    # Track portfolio value
+                                    if 'portfolio_value' in info:
+                                        self.portfolio_values.append(info['portfolio_value'])
+                                        self.logger.record('portfolio/value', info['portfolio_value'])
+                                    
+                                    # Track position
+                                    if 'position' in info:
+                                        position = info['position']
+                                        self.logger.record('portfolio/position', position)
+                                        
+                                        # Position change detection for trade tracking
+                                        if position != self.current_position:
+                                            # If we had a previous position, this is a trade exit
+                                            if self.current_position != 0:
+                                                trade_duration = self.debug_steps - self.position_start_time
+                                                self.trade_durations.append(trade_duration)
+                                                
+                                                # Check if we have a price to calculate P&L
+                                                if 'close' in info:
+                                                    exit_price = info['close']
+                                                    pnl = (exit_price - self.entry_price) * self.current_position
+                                                    self.trade_returns.append(pnl)
+                                                    
+                                                    # Track trade result
+                                                    if pnl > 0:
+                                                        self.successful_trades += 1
+                                                        self.total_profit += pnl
+                                                        if self.debug_steps % self.debug_frequency == 0:
+                                                            logger.info(f"Successful trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
+                                                    else:
+                                                        self.failed_trades += 1
+                                                        self.total_loss += abs(pnl)
+                                                        if self.debug_steps % self.debug_frequency == 0:
+                                                            logger.info(f"Failed trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
+                                                
+                                                # Add to recent trades for trend analysis
+                                                self.recent_trades.append({
+                                                    'entry_price': self.entry_price,
+                                                    'exit_price': exit_price if 'close' in info else 0,
+                                                    'position': self.current_position,
+                                                    'duration': trade_duration,
+                                                    'pnl': pnl if 'close' in info else 0
+                                                })
+                                                
+                                                # Keep only the most recent trades
+                                                if len(self.recent_trades) > self.max_recent_trades:
+                                                    self.recent_trades.pop(0)
+                                            
+                                            # If new position is non-zero, this is a trade entry
+                                            if position != 0:
+                                                self.trade_count += 1
+                                                if 'close' in info:
+                                                    self.entry_price = info['close']
+                                                    if self.debug_steps % self.debug_frequency == 0:
+                                                        logger.info(f"Trade entry: position={position}, price={self.entry_price:.4f}")
+                                                self.position_start_time = self.debug_steps
+                                            
+                                            self.current_position = position
+                                    
+                                    # Track action type
+                                    if 'action_type' in info:
+                                        action_type = info['action_type']
+                                        if action_type in self.action_counts:
+                                            self.action_counts[action_type] += 1
+                                        self.logger.record(f'actions/{action_type}', self.action_counts.get(action_type, 0))
+                                        
+                                        # Debug output
+                                        if self.debug_steps % (self.debug_frequency * 10) == 0:
+                                            logger.info(f"Action counts: {self.action_counts}")
+                                    
+                                    # Track trade metrics
+                                    if 'trade_count' in info:
+                                        self.logger.record('trades/count', info['trade_count'])
+                                    if 'profit_loss' in info:
+                                        self.logger.record('trades/profit_loss', info['profit_loss'])
+                                
+                                # Check if episode is done
+                                dones = self.locals.get('dones', [False])
+                                
+                                for j, done in enumerate(dones):
+                                    if done and j == i:  # Only process the done signal if it corresponds to the current reward
+                                        # Add the episode statistics
+                                        self.episode_rewards.append(self.current_episode_reward)
+                                        self.episode_lengths.append(self.current_episode_length)
+                                        
+                                        # Log episode statistics
+                                        self.logger.record('episode/reward', self.current_episode_reward)
+                                        self.logger.record('episode/length', self.current_episode_length)
+                                        
+                                        # Calculate and log running statistics
+                                        if len(self.episode_rewards) > 0:
+                                            self.logger.record('episode/mean_reward', np.mean(self.episode_rewards[-100:]))
+                                            self.logger.record('episode/mean_length', np.mean(self.episode_lengths[-100:]))
+                                        
+                                        if len(self.portfolio_values) > 0:
+                                            self.logger.record('portfolio/final_value', self.portfolio_values[-1])
+                                            self.logger.record('portfolio/mean_value', np.mean(self.portfolio_values[-100:]))
+                                        
+                                        # Log trading metrics
+                                        if self.trade_count > 0:
+                                            # Calculate win rate
+                                            win_rate = self.successful_trades / max(1, self.trade_count)
+                                            self.logger.record('trades/win_rate', win_rate)
+                                            
+                                            # Debug output
+                                            logger.info(f"Episode complete - Trading stats: trades={self.trade_count}, win_rate={win_rate:.4f}")
+                                            
+                                            # Profit factor (total profit / total loss)
+                                            profit_factor = self.total_profit / max(1e-6, self.total_loss)  # Avoid div by zero
+                                            self.logger.record('trades/profit_factor', profit_factor)
+                                            
+                                            # Average trade metrics
+                                            if len(self.trade_returns) > 0:
+                                                avg_return = np.mean(self.trade_returns)
+                                                self.logger.record('trades/avg_return', avg_return)
+                                                
+                                                # Average returns of winning and losing trades
+                                                winning_returns = [r for r in self.trade_returns if r > 0]
+                                                losing_returns = [r for r in self.trade_returns if r <= 0]
+                                                
+                                                if winning_returns:
+                                                    self.logger.record('trades/avg_win', np.mean(winning_returns))
+                                                if losing_returns:
+                                                    self.logger.record('trades/avg_loss', np.mean(losing_returns))
+                                            
+                                            # Average trade duration
+                                            if len(self.trade_durations) > 0:
+                                                avg_duration = np.mean(self.trade_durations)
+                                                self.logger.record('trades/avg_duration', avg_duration)
+                                            
+                                            # Trading consistency - using standard deviation of recent returns
+                                            if len(self.trade_returns) > 5:
+                                                returns_std = np.std(self.trade_returns[-20:])
+                                                self.logger.record('trades/returns_std', returns_std)
+                                            
+                                            # Action distribution
+                                            total_actions = sum(self.action_counts.values())
+                                            if total_actions > 0:
+                                                for action, count in self.action_counts.items():
+                                                    self.logger.record(f'actions/{action}_pct', count / total_actions)
+                                        
+                                        # Log running totals
+                                        self.logger.record('trades/total_count', self.trade_count)
+                                        self.logger.record('trades/successful', self.successful_trades)
+                                        self.logger.record('trades/failed', self.failed_trades)
+                                        self.logger.record('trades/total_profit', self.total_profit)
+                                        self.logger.record('trades/total_loss', self.total_loss)
+                                        
+                                        # Recent performance trend (last 20 trades vs previous 20)
+                                        if len(self.trade_returns) >= 40:
+                                            recent_returns = np.mean(self.trade_returns[-20:])
+                                            previous_returns = np.mean(self.trade_returns[-40:-20])
+                                            trend = recent_returns - previous_returns
+                                            self.logger.record('trades/trend', trend)
+                                        
+                                        # Reset episode tracking
+                                        self.current_episode_reward = 0
+                                        self.current_episode_length = 0
+                            
+                        return True
+                
+                callbacks = [GPUMonitorCallback(), TensorboardCallback()]
                 if args.verbose and torch.cuda.is_available():
                     callbacks.append(GPUMonitorCallback())
                 
-                model.learn(total_timesteps=total_timesteps, callback=callbacks)
-                
-                # Save the model
-                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
-                os.makedirs(model_path, exist_ok=True)
-                model.save(f"{model_path}/model")
-                logger.info(f"Model saved to {model_path}/model")
-                
-                # Save arguments used for training
-                with open(f"{model_path}/training_args.json", 'w') as f:
-                    json.dump(vars(args), f, indent=4)
-                logger.info(f"Training arguments saved to {model_path}/training_args.json")
+                model.learn(total_timesteps=total_timesteps, callback=callbacks, tb_log_name=args.finrl_model.lower())
             else:
                 # Default to DQN for discrete action spaces, regardless of what was specified for --finrl_model
                 # SAC specifically doesn't support discrete action spaces, so we'll use DQN instead
@@ -2726,11 +2997,11 @@ def main():
                     logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
                 return True
         
-        callbacks = [GPUMonitorCallback()]
+        callbacks = [GPUMonitorCallback(), TensorboardCallback()]
         if args.verbose and torch.cuda.is_available():
             callbacks.append(GPUMonitorCallback())
         
-        model.learn(total_timesteps=total_timesteps, callback=callbacks)
+        model.learn(total_timesteps=total_timesteps, callback=callbacks, tb_log_name=args.finrl_model.lower())
         
         # Save the model
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')

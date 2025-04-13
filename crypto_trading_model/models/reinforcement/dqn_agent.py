@@ -19,6 +19,7 @@ from tensorflow.keras.losses import Huber
 import matplotlib.pyplot as plt
 import random
 from collections import deque
+import time
 
 # Import from parent directory
 import sys
@@ -402,6 +403,11 @@ class DQNTradingAgent:
         episode = 0
         episode_rewards = []
         episode_reward = 0
+        self.episode_lengths = []  # Track episode lengths
+        self.step_count_at_episode_start = 0  # Track start of each episode
+        
+        # Initialize start time for FPS calculation
+        self.start_time = time.time()
         
         # Reset environment
         state = self.env.reset()
@@ -451,6 +457,21 @@ class DQNTradingAgent:
                     tf.summary.scalar('epsilon', self.epsilon, step=self.step_count)
                     if self.loss_history:
                         tf.summary.scalar('loss', self.loss_history[-1], step=self.step_count)
+                    
+                    # Add FPS logging
+                    if hasattr(self, 'start_time'):
+                        elapsed = time.time() - self.start_time
+                        fps = self.step_count / elapsed if elapsed > 0 else 0
+                        tf.summary.scalar('fps', fps, step=self.step_count)
+                        logger.info(f"FPS: {fps:.1f}")
+                    
+                    # Add episode length logging
+                    avg_ep_length = np.mean(self.episode_lengths[-10:]) if self.episode_lengths else 0
+                    tf.summary.scalar('avgEpisodeLength', avg_ep_length, step=self.step_count)
+                    logger.info(f"Avg Episode Length: {avg_ep_length:.1f}")
+                    
+                    # Explicitly flush to ensure data is written to disk
+                    self.summary_writer.flush()
             
             # Evaluate the agent periodically
             if self.step_count % eval_interval == 0:
@@ -467,10 +488,31 @@ class DQNTradingAgent:
                 episode_rewards.append(episode_reward)
                 self.reward_history.append(episode_reward)
                 self.epsilon_history.append(self.epsilon)
+                self.episode_lengths.append(self.step_count - self.step_count_at_episode_start)  # Record episode length
+                
+                # Logging information
+                if episode % log_interval == 0:
+                    mean_reward = np.mean(episode_rewards[-log_interval:])
+                    mean_episode_length = np.mean(self.episode_lengths[-log_interval:]) if self.episode_lengths else 0
+                    elapsed_time = time.time() - self.start_time
+                    fps = self.step_count / elapsed_time if elapsed_time > 0 else 0
+                    
+                    logger.info(
+                        f"Episode: {episode}, Step: {self.step_count}, "
+                        f"Mean Reward: {mean_reward:.2f}, Mean Episode Length: {mean_episode_length:.2f}, "
+                        f"Epsilon: {self.epsilon:.4f}, FPS: {fps:.2f}"
+                    )
+                    
+                    if self.summary_writer:
+                        self.summary_writer.add_scalar('training/mean_reward', mean_reward, self.step_count)
+                        self.summary_writer.add_scalar('training/mean_episode_length', mean_episode_length, self.step_count)
+                        self.summary_writer.add_scalar('training/epsilon', self.epsilon, self.step_count)
+                        self.summary_writer.add_scalar('training/fps', fps, self.step_count)
                 
                 # Reset
                 state = self.env.reset()
                 episode_reward = 0
+                self.step_count_at_episode_start = self.step_count  # Update for next episode
             else:
                 state = next_state
         
