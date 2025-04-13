@@ -459,10 +459,16 @@ def parse_args():
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--checkpoint_freq", type=int, default=100000, 
                        help="Frequency of model checkpoints")
-    parser.add_argument("--device", type=str, default=None, 
-                       help="Device to use (cuda or cpu)")
+    parser.add_argument("--device", type=str, default="auto", 
+                       help="Device to use (cuda, cpu, or auto to automatically detect)")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Auto-detect device if set to 'auto'
+    if args.device == "auto":
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    return args
 
 
 def ensure_technical_indicators(df, indicators):
@@ -627,7 +633,53 @@ def load_lstm_model(model_path):
     if model_path and os.path.exists(model_path):
         try:
             logger.info(f"Loading pre-trained LSTM model from {model_path}")
-            model = MultiTimeframeModel.load_from_checkpoint(model_path)
+            
+            # Load the saved model checkpoint
+            checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            
+            # Extract model configuration or use defaults
+            if 'config' in checkpoint:
+                model_config = checkpoint['config']
+                logger.info(f"Using configuration from saved model: {model_config}")
+            elif 'hparams' in checkpoint:
+                # Handle Lightning checkpoint format
+                model_config = {
+                    'input_dims': checkpoint['hparams'].get('input_dims', {'15m': 39, '4h': 39, '1d': 39}),
+                    'hidden_dims': checkpoint['hparams'].get('hidden_dims', 128),
+                    'num_layers': checkpoint['hparams'].get('num_layers', 2),
+                    'dropout': checkpoint['hparams'].get('dropout', 0.2),
+                    'bidirectional': checkpoint['hparams'].get('bidirectional', True),
+                    'attention': checkpoint['hparams'].get('attention', True),
+                    'num_classes': checkpoint['hparams'].get('num_classes', 3)
+                }
+                logger.info(f"Using configuration from Lightning checkpoint: {model_config}")
+            else:
+                # Use default configuration
+                model_config = {
+                    'input_dims': {'15m': 39, '4h': 39, '1d': 39},
+                    'hidden_dims': 128,
+                    'num_layers': 2,
+                    'dropout': 0.2,
+                    'bidirectional': True,
+                    'attention': True,
+                    'num_classes': 3
+                }
+                logger.info(f"Using default model configuration: {model_config}")
+            
+            # Create a new model instance
+            model = MultiTimeframeModel(**model_config)
+            
+            # Load the state dictionary
+            if 'state_dict' in checkpoint:
+                # Handle Lightning checkpoint format
+                state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items()}
+                model.load_state_dict(state_dict, strict=False)
+                logger.info("Loaded model state from Lightning checkpoint")
+            else:
+                # Regular PyTorch model
+                model.load_state_dict(checkpoint, strict=False)
+                logger.info("Loaded model state from regular checkpoint")
+            
             model.eval()  # Set to evaluation mode
             return model
         except Exception as e:
