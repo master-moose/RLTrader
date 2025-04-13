@@ -1478,11 +1478,14 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
             try:
                 # Format the observations for the LSTM
                 with torch.no_grad():
-                    # Check if we need to format observations for the LSTM model
-                    if hasattr(self.lstm_model, 'timeframes'):
-                        # This is a multi-timeframe model
-                        if hasattr(observations, 'items'):
-                            # Observations is already a dictionary
+                    # First determine if this is a multi-timeframe model
+                    is_multi_timeframe = hasattr(self.lstm_model, 'timeframes')
+                    
+                    # Process the input based on its type and the model type
+                    if is_multi_timeframe:
+                        # For multi-timeframe models, we need dictionary input
+                        if isinstance(observations, dict):
+                            # Input is already a dictionary
                             lstm_features = self.lstm_model(observations)
                         else:
                             # Create a dictionary with a single timeframe (assuming '15m' as default)
