@@ -836,7 +836,17 @@ class DimensionAdjustingVecEnv(DummyVecEnv):
                 # Try using the new reset API with seed and options
                 if hasattr(self.envs[env_idx], 'np_random'):
                     # Extract seed if we have np_random
-                    seed = self.envs[env_idx].np_random.randint(0, 2**32-1)
+                    # Handle newer NumPy versions that use integers() instead of randint()
+                    try:
+                        if hasattr(self.envs[env_idx].np_random, 'randint'):
+                            seed = self.envs[env_idx].np_random.randint(0, 2**32-1)
+                        else:
+                            # Use integers() for newer NumPy versions
+                            seed = self.envs[env_idx].np_random.integers(0, 2**32-1)
+                    except AttributeError:
+                        # If neither method works, generate a seed another way
+                        seed = int(np.random.random() * 2**32)
+                    
                     obs = self.envs[env_idx].reset(seed=seed)
                 else:
                     # No np_random, just call reset without seed
