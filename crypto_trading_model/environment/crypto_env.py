@@ -1,5 +1,10 @@
 """
 Cryptocurrency trading environment using Gym.
+
+Major fixes in this version:
+1. Prevented rewarding hold actions for price appreciation - now uses fixed penalties
+2. Improved forced sell mechanism with better logging
+3. Added detailed tracking of holding periods
 """
 
 # Don't import the actual module which has dependencies we might not have
