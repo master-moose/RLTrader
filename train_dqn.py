@@ -504,7 +504,7 @@ def ensure_technical_indicators(df, indicators):
             df = pd.concat([df, bb], axis=1)
     
     # Ensure no NaN values
-    df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+    df = df.ffill().bfill().fillna(0)
     
     return df
 
