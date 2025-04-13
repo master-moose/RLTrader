@@ -1,0 +1,7 @@
+[33mcommit ec80e9990e835ca3cc90d1480dd03cd3d9f284f1[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: master-moose <jai.garrovillo@gmail.com>
+Date:   Sun Apr 13 21:53:03 2025 +0200
+
+    Allow more risk-taking to enable better trading exploration
+
+M	train_dqn.py
