@@ -1354,7 +1354,7 @@ def train_dqn(env, args, callbacks=None):
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=10000,
+        save_freq=20000,
         save_path="./models/checkpoints/",
         name_prefix="dqn_model",
         save_replay_buffer=True,
@@ -1532,23 +1532,6 @@ def train_a2c(env, args, callbacks=None):
     obs_space = env.observation_space
     logger.info(f"Environment observation space: {obs_space.shape}")
     
-    # If using a vec environment, check if all envs have the same observation shape
-    if hasattr(env, 'num_envs') and env.num_envs > 1:
-        logger.info(f"Validating observation space for {env.num_envs} environments")
-        # For VecEnv, we need to check the observation space consistency
-        try:
-            # Reset to get an initial observation from all environments
-            obs = env.reset()
-            if isinstance(obs, np.ndarray):
-                logger.info(f"Reset observation shape: {obs.shape}")
-                # Should be (num_envs, *obs_space.shape)
-                expected_shape = (env.num_envs,) + obs_space.shape[1:]
-                if obs.shape != expected_shape:
-                    logger.warning(f"Observation shape mismatch! Expected {expected_shape}, got {obs.shape}")
-        except Exception as e:
-            logger.error(f"Error validating environment observation space: {e}")
-            logger.error(traceback.format_exc())
-    
     # Get parameters from args
     learning_rate = args.learning_rate
     gamma = args.gamma
@@ -1594,6 +1577,7 @@ def train_a2c(env, args, callbacks=None):
     # Check if we have an LSTM model to use for feature extraction
     lstm_state_dict = None
     policy_kwargs = {}
+    features_dim = 64  # Default feature dimension
     
     if args.lstm_model_path:
         logger.info(f"Using LSTM model from {args.lstm_model_path} for feature extraction")
@@ -1607,10 +1591,22 @@ def train_a2c(env, args, callbacks=None):
                 "features_extractor_class": LSTMFeatureExtractor,
                 "features_extractor_kwargs": {
                     "lstm_state_dict": lstm_state_dict,
-                    "features_dim": 64  # Match with the hidden size in the LSTM model
+                    "features_dim": features_dim  # Match with the hidden size in the LSTM model
                 }
             }
             logger.info("Successfully configured LSTM feature extractor")
+            
+            # If we're using a VecNormalize wrapper, we need to update its observation space
+            # to match the output dimension of the LSTM feature extractor
+            if hasattr(env, 'observation_space') and hasattr(env, 'obs_rms'):
+                logger.info(f"Updating VecNormalize observation space from {env.observation_space.shape} to {(features_dim,)}")
+                # Update the observation space to match the LSTM output dimension
+                env.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(features_dim,), dtype=np.float32)
+                # Reset the running mean and std with the new dimension
+                env.obs_rms.mean = np.zeros(features_dim)
+                env.obs_rms.var = np.ones(features_dim)
+                env.obs_rms.count = 0
+                logger.info(f"Updated observation space to: {env.observation_space.shape}")
         except Exception as e:
             logger.error(f"Error setting up LSTM feature extractor: {e}")
             logger.error(traceback.format_exc())
@@ -1669,10 +1665,9 @@ def train_a2c(env, args, callbacks=None):
                 # Re-raise the exception if it's not the specific one we're handling
                 raise
     
-    # Load LSTM model if specified
+    # Load LSTM model if specified - already handled earlier
     if args.lstm_model_path:
         logger.info(f"LSTM model loaded from {args.lstm_model_path}")
-        # The LSTM is now integrated into the policy via feature extractor
     
     # Train the model
     total_timesteps = args.timesteps if hasattr(args, 'timesteps') else 1000000
