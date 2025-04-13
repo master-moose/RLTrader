@@ -72,10 +72,10 @@ logger = logging.getLogger(__name__)
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
 
 # Constants for trading safeguards - ADJUSTING FOR MORE BALANCED TRADING
-TRADE_COOLDOWN_PERIOD = 3  # Further reduced from 5 to 3 - allows even more frequent trading
-OSCILLATION_PENALTY = 20.0  # Further reduced from 50.0 to 20.0 - much less penalty for oscillation
-SAME_PRICE_TRADE_PENALTY = 40.0  # Further reduced from 100.0 to 40.0
-MAX_TRADE_FREQUENCY = 0.50  # Increased from 0.30 to 0.50 - allow up to 50% of steps to be trades
+TRADE_COOLDOWN_PERIOD = 1  # Drastically reduced from 3 to 1 to allow much more frequent trading
+OSCILLATION_PENALTY = 5.0  # Drastically reduced from 20.0 to 5.0 - much less penalty for oscillation
+SAME_PRICE_TRADE_PENALTY = 10.0  # Further reduced from 40.0 to 10.0
+MAX_TRADE_FREQUENCY = 0.80  # Increased from 0.50 to 0.80 - allow up to 80% of steps to be trades
 
 # Class for LSTM feature extraction
 class LSTMFeatureExtractor(BaseFeaturesExtractor):
@@ -192,14 +192,14 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Trading safeguards
         self.trade_cooldown = trade_cooldown
         # Reduce cooldown as training progresses
-        self.min_cooldown = max(3, trade_cooldown // 5)  # Minimum cooldown period reduced from 4 to 5 divisor
+        self.min_cooldown = 1  # Minimum cooldown period reduced from 3 to 1
         
         # Risk management parameters
         self.max_risk_per_trade = max_risk_per_trade  # Maximum risk per trade (% of portfolio)
-        self.target_risk_reward_ratio = 2.0  # Target risk-reward ratio (reward should be 2x the risk)
+        self.target_risk_reward_ratio = 1.0  # Target risk-reward ratio reduced from 2.0 to 1.0 - less strict
         self.risk_adjusted_position_sizing = True  # Use risk-adjusted position sizing
         self.cumulative_risk = 0.0  # Track cumulative risk across open positions
-        self.max_cumulative_risk = 0.06  # Maximum 6% portfolio risk across all positions
+        self.max_cumulative_risk = 0.15  # Increased from 0.06 to 0.15 - allow more risk
         
         # Trading history tracking
         self.last_trade_step = -self.trade_cooldown  # Start with cooldown already passed
@@ -230,7 +230,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Price history for last trades
         self.last_buy_price = None
         self.last_sell_price = None
-        self.min_profit_threshold = 0.001  # Reduced from 0.002 to 0.001 - requires only 0.1% difference
+        self.min_profit_threshold = 0.0005  # Reduced from 0.001 to 0.0005 - requires only 0.05% difference
         
         # Stronger oscillation detection and prevention
         self.oscillation_window = 8  # Look at 8 actions for oscillation patterns
@@ -484,24 +484,23 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         """Calculate risk-aware rewards based on trading performance"""
         # Get current portfolio value
         portfolio_value = info.get('portfolio_value', 0)
+        risk_adjusted_reward = reward
         
-        # Update peak value and max drawdown
-        if portfolio_value > self.peak_value:
-            self.peak_value = portfolio_value
-        
-        # Maintain highest portfolio value for growth rewards
-        if portfolio_value > self.highest_portfolio:
-            # Calculate growth rate for rewards
+        # Track portfolio metrics if we have a portfolio value
+        if portfolio_value > 0:
+            # Update peak value for drawdown calculation
+            self.peak_value = max(self.peak_value, portfolio_value)
+            
+            # Update highest portfolio value if we have a new high
             prev_highest = self.highest_portfolio
             self.highest_portfolio = portfolio_value
             self.portfolio_growth_rate = (self.highest_portfolio - prev_highest) / max(prev_highest, 1.0)
         
         # Calculate drawdown - but make it less impactful
         if self.peak_value > 0:
-            drawdown = (self.peak_value - portfolio_value) / self.peak_value
-            self.max_drawdown = max(self.max_drawdown, drawdown)
+            self.max_drawdown = min(self.max_drawdown, (self.peak_value - portfolio_value) / self.peak_value)
         
-        # If a trade occurred, update trade statistics
+        # Calculate trade return metrics if a trade occurred
         if trade_occurred:
             # Add trade return to history
             if self.last_trade_price is not None and 'close_price' in info:
@@ -511,15 +510,13 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 # Track if this was a successful trade
                 if trade_return > 0:
                     self.successful_trades += 1
-                else:
-                    self.failed_trades += 1
-                
-                # Calculate Sharpe ratio if we have enough trades
-                if len(self.trade_returns) > 5:
-                    returns_array = np.array(self.trade_returns[-20:])
-                    mean_return = np.mean(returns_array)
-                    std_return = np.std(returns_array) + 1e-6  # Add small constant to avoid division by zero
-                    self.sharpe_ratio = mean_return / std_return
+                    
+                    # Calculate Sharpe ratio
+                    if len(self.trade_returns) > 5:
+                        returns_array = np.array(self.trade_returns[-20:])
+                        mean_return = np.mean(returns_array)
+                        std_return = np.std(returns_array) + 1e-6  # Add small constant to avoid division by zero
+                        self.sharpe_ratio = mean_return / std_return
         
         # Apply risk-aware reward adjustments
         risk_adjusted_reward = reward
@@ -530,18 +527,30 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             # Log detailed growth information for debugging at less frequent intervals
             if current_step % 10000 == 0 or (trade_occurred and current_step % 10000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
-            growth_reward = min(growth_pct * 2.0, 2.0)  # Reduced from 3.0 to 2.0 to be less dominant
+            growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0 to reward growth more
             risk_adjusted_reward += growth_reward
             
             # Extra reward for achieving new highs
             if self.portfolio_growth_rate > 0:
-                new_high_reward = min(self.portfolio_growth_rate * 3.0, 0.5)  # Reduced from 5.0 to 3.0 and max from 1.0 to 0.5
+                new_high_reward = min(self.portfolio_growth_rate * 5.0, 1.0)  # Increased from 3.0 to 5.0 and max from 0.5 to 1.0
                 risk_adjusted_reward += new_high_reward
         
         # Add drawdown penalty - but make it much less severe
-        if self.max_drawdown > 0.25:  # Only penalize significant drawdowns (increased from 0.15 to 0.25)
-            drawdown_penalty = self.max_drawdown * 1.0  # Less severe penalty (reduced from 2.0 to 1.0)
+        if self.max_drawdown > 0.50:  # Only penalize significant drawdowns (increased from 0.25 to 0.50)
+            drawdown_penalty = self.max_drawdown * 0.5  # Less severe penalty (reduced from 1.0 to 0.5)
             risk_adjusted_reward -= drawdown_penalty
+        
+        # Give bonus for trades, especially selling
+        if trade_occurred:
+            # Base trade bonus
+            trade_bonus = 0.25  # Increased from 0 to 0.25
+            risk_adjusted_reward += trade_bonus
+            
+            # Extra bonus for selling (to encourage profit taking)
+            if self.action_history and self.action_history[-1] == 0:  # sell action
+                sell_bonus = 0.5  # Additional bonus for selling
+                risk_adjusted_reward += sell_bonus
+                logger.debug(f"Applied sell bonus: +{sell_bonus:.2f} at step {current_step}")
         
         # Add hold bonus during early training, but also add holding penalty for extended periods
         if self.action_history and self.action_history[-1] == 1:  # hold action
@@ -549,15 +558,15 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             self.hold_duration += 1
             
             # Small bonus for short-term holds early in training (reduced)
-            if current_step < 3000 and self.consecutive_holds <= 5:  # Reduced from 5000 to 3000 and from 10 to 5
-                hold_bonus = min(self.consecutive_holds * 0.005, 0.1)  # Reduced from 0.01 to 0.005 and from 0.3 to 0.1
+            if current_step < 1000 and self.consecutive_holds <= 3:  # Reduced from 3000 to 1000 and from 5 to 3
+                hold_bonus = min(self.consecutive_holds * 0.002, 0.05)  # Further reduced to encourage more trading
                 risk_adjusted_reward += hold_bonus
             # Add penalty for excessive holding after early training
-            elif current_step >= 3000 and self.consecutive_holds > 30:  # Increased from 20 to 30
-                # Gradually increasing penalty for excessive holding (less aggressive)
-                hold_penalty = min((self.consecutive_holds - 30) * 0.005, 0.5)  # Reduced from 0.01 to 0.005 and max from 1.0 to 0.5
+            elif current_step >= 1000 and self.consecutive_holds > 15:  # Decreased from 30 to 15
+                # Gradually increasing penalty for excessive holding (more aggressive)
+                hold_penalty = min((self.consecutive_holds - 15) * 0.01, 1.0)  # Increased from 0.005 to 0.01 and max from 0.5 to 1.0
                 risk_adjusted_reward -= hold_penalty
-                if self.consecutive_holds % 50 == 0:
+                if self.consecutive_holds % 30 == 0:  # Reduced from 50 to 30
                     logger.warning(f"Excessive holding penalty: -{hold_penalty:.4f} after {self.consecutive_holds} consecutive holds")
         else:
             self.consecutive_holds = 0
@@ -565,13 +574,16 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Reward for taking actions (not just holding)
         if self.action_history and self.action_history[-1] != 1:  # not a hold action
             # Give reward for exploring buying and selling
-            if current_step < 10000:  # Early in training
-                risk_adjusted_reward += 0.05  # Small bonus to encourage exploration
+            if current_step < 20000:  # Throughout a longer early training period
+                action_bonus = 0.2  # Increased from 0.05 to 0.2
+                risk_adjusted_reward += action_bonus
+                if current_step % 5000 == 0:
+                    logger.info(f"Applying action exploration bonus: +{action_bonus:.2f} at step {current_step}")
         
-        # Add profit streak bonus - less generous to avoid over-optimizing
+        # Add profit streak bonus - more generous to encourage successful trading patterns
         if trade_occurred and 'trade_profit' in info and info['trade_profit'] > 0:
             self.successful_trade_streak += 1
-            streak_bonus = min(self.successful_trade_streak * 0.05, 1.0)  # Reduced from 0.10 to 0.05 and from 2.0 to 1.0
+            streak_bonus = min(self.successful_trade_streak * 0.1, 2.0)  # Increased from 0.05 to 0.1 and from 1.0 to 2.0
             risk_adjusted_reward += streak_bonus
             self.max_successful_streak = max(self.max_successful_streak, self.successful_trade_streak)
             logger.debug(f"Trade streak bonus: +{streak_bonus:.4f} (streak: {self.successful_trade_streak})")
@@ -658,7 +670,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             )
             
             # Only block trades with very unfavorable risk-reward ratio
-            if risk_reward < self.target_risk_reward_ratio * 0.5:  # Reduced threshold by half
+            if risk_reward < self.target_risk_reward_ratio * 0.25:  # Reduced threshold to 25% of target from 50%
                 logger.debug(f"Risk-reward ratio {risk_reward:.2f} far below target {self.target_risk_reward_ratio:.2f}, forcing hold")
                 action = 1  # Force hold if risk-reward is extremely unfavorable
                 
@@ -695,36 +707,36 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             price_change_pct = abs(current_price - self.last_trade_price) / self.last_trade_price
             
             # Require larger price movements early in training but be more lenient later
-            required_movement = self.min_profit_threshold * 0.5  # Reduced by half to allow more trades
+            required_movement = self.min_profit_threshold * 0.25  # Reduced by 75% to allow more trades
             
             # More strict requirements depending on training stage, but make strict period shorter
-            if current_step < 150:  # Reduced from 300 to 150
-                required_movement = 0.005  # Reduced from 0.01 to 0.005
-            elif current_step < 500:  # Reduced from 1000 to 500
-                required_movement = 0.002  # Reduced from 0.005 to 0.002
-            elif current_step < 1500:  # Reduced from 3000 to 1500
-                required_movement = 0.001  # Reduced from 0.003 to 0.001
+            if current_step < 50:  # Reduced from 150 to 50
+                required_movement = 0.001  # Reduced from 0.005 to 0.001
+            elif current_step < 200:  # Reduced from 500 to 200
+                required_movement = 0.0005  # Reduced from 0.002 to 0.0005
+            elif current_step < 500:  # Reduced from 1500 to 500
+                required_movement = 0.0002  # Reduced from 0.001 to 0.0002
             
             if price_change_pct < required_movement and action != 1:
                 strict_price_requirement = True
                 logger.debug(f"Enforcing hold: price movement {price_change_pct:.4f}% < required {required_movement:.4f}%")
                 action = 1  # Force hold
             
-        # Check for min profit threshold violations - but be much more lenient
+        # Check for min profit threshold violations - but be even more lenient
         if current_price is not None:
             # If trying to sell, check if price is higher than last buy
             if action == 0 and self.last_buy_price is not None:
                 profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
                 
-                # Allow selling at a loss more frequently, especially after early training
-                min_profit = self.min_profit_threshold * 0.25  # Drastically reduced to allow more trading
-                if current_step < 1000:  # Reduced from 2000 to 1000
-                    min_profit = 0.002  # Reduced from 0.005 to 0.002
+                # Allow selling at a loss much more frequently
+                min_profit = -0.005  # Allow selling at a loss by default (up to 0.5% loss)
+                if current_step < 500:  # Reduced from 1000 to 500
+                    min_profit = -0.002  # Allow smaller losses early in training
                 
-                # Start allowing some selling at a loss after initial stage
-                if current_step > 5000 and random.random() < 0.3:
-                    # 30% chance to ignore profit threshold after step 5000
-                    min_profit = -0.01  # Allow selling at up to 1% loss
+                # Start allowing larger selling at a loss after initial stage
+                if current_step > 1000 and random.random() < 0.6:
+                    # 60% chance to ignore profit threshold after step 1000 (increased from 30% to 60%)
+                    min_profit = -0.02  # Allow selling at up to 2% loss (increased from 1% to 2%)
                 
                 if profit_pct < min_profit:
                     min_profit_violation = True
@@ -735,14 +747,14 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 discount_pct = (self.last_sell_price - current_price) / self.last_sell_price
                 
                 # Allow buying at worse prices more frequently
-                min_discount = self.min_profit_threshold * 0.25  # Drastically reduced
-                if current_step < 1000:  # Reduced from 2000 to 1000
-                    min_discount = 0.002  # Reduced from 0.005 to 0.002
+                min_discount = -0.005  # Allow buying at worse prices by default (up to 0.5% worse)
+                if current_step < 500:  # Reduced from 1000 to 500
+                    min_discount = -0.002  # Allow smaller worse buys early in training
                 
                 # Start allowing some buying at worse prices after initial stage
-                if current_step > 5000 and random.random() < 0.3:
-                    # 30% chance to ignore discount threshold after step 5000
-                    min_discount = -0.01  # Allow buying at up to 1% worse price
+                if current_step > 1000 and random.random() < 0.6:
+                    # 60% chance to ignore discount threshold after step 1000 (increased from 30% to 60%)
+                    min_discount = -0.02  # Allow buying at up to 2% worse price (increased from 1% to 2%)
                 
                 if discount_pct < min_discount:
                     min_profit_violation = True
@@ -789,9 +801,9 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
         # Early training stabilization - make this period much shorter and more permissive
-        if current_step < 25 and action != 1 and current_step % 3 != 0:  # Reduced from 50 to 25 and from 5 to 3
+        if current_step < 10 and action != 1 and current_step % 2 != 0:  # Reduced from 25 to 10 and from 3 to 2
             logger.debug(f"Early training stability: forcing hold at step {current_step}")
-            action = 1  # Force hold action during early training except every 3rd step
+            action = 1  # Force hold action during early training except every 2nd step
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -1532,9 +1544,9 @@ def train_a2c(env, args, callbacks=None):
     # Log batch size being used
     logger.info(f"Using batch size: {batch_size} for A2C training")
     
-    # Increase entropy coefficient to encourage exploration
-    ent_coef = max(ent_coef, 0.05)  # Ensure minimum entropy for exploration
-    logger.info(f"Using entropy coefficient: {ent_coef} to encourage action exploration")
+    # Increase entropy coefficient significantly to encourage exploration
+    ent_coef = max(ent_coef, 0.20)  # Increased from 0.05 to 0.20 for much more exploration
+    logger.info(f"Using higher entropy coefficient: {ent_coef} to strongly encourage action exploration")
     
     # Create tensorboard callback
     tb_callback = TensorboardCallback(verbose=1, model_name="A2C", debug_frequency=10000)
