@@ -507,8 +507,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Add portfolio growth reward (significant boost)
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
-            # Log detailed growth information for debugging
-            if current_step % 1000 == 0:
+            # Log detailed growth information for debugging at less frequent intervals
+            if current_step % 10000 == 0 or (trade_occurred and current_step % 1000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
             growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0
             risk_adjusted_reward += growth_reward
@@ -809,10 +809,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             elif action == 2:  # Buy (open position)
                 self.cumulative_risk += self.max_risk_per_trade
                 
-            # Log risk management metrics
-            portfolio_value_str = f"{portfolio_value:.2f}" if portfolio_value is not None else "unknown"
-            logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
-                        f"Portfolio value: {portfolio_value_str}")
+            # Only log risk management metrics when there's a trade or periodically
+            if trade_occurred or current_step % 1000 == 0:
+                portfolio_value_str = f"{portfolio_value:.2f}" if portfolio_value is not None else "unknown"
+                logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
+                           f"Portfolio value: {portfolio_value_str}")
         
         # Every 1000 steps, log action distribution
         if current_step % 1000 == 0:
