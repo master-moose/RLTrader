@@ -824,6 +824,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         elif 'position' in info:
             self.current_position = info['position']
         
+        current_position = self.current_position  # Fix: Define current_position from self.current_position
         self.position_history.append(current_position)
         if len(self.position_history) > self.max_history_size:
             self.position_history = self.position_history[-self.max_history_size:]
@@ -2145,8 +2146,8 @@ def main():
         safe_env = SafeTradingEnvWrapper(
             base_env, 
             trade_cooldown=args.trade_cooldown,
-            max_history_size=100,  # Ensure this is consistent across all environments
-            max_risk_per_trade=0.02,  # Add missing parameter
+            max_history_size=100,
+            max_risk_per_trade=0.02,
             take_profit_pct=take_profit_pct
         )
         
