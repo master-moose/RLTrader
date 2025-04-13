@@ -36,3 +36,4 @@ models/
 *.h5py.tar.gz
 *.h5py.tar.gz.tar
 *.h5py.tar.gz.tar.gz
+logs/monitor/monitor.csv
