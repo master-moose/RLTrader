@@ -77,6 +77,105 @@ OSCILLATION_PENALTY = 120.0  # Reduced from 250.0 to 120.0 - much less penalty f
 SAME_PRICE_TRADE_PENALTY = 250.0  # Reduced from 500.0 to 250.0
 MAX_TRADE_FREQUENCY = 0.20  # Increased from 0.15 to 0.20 - allow up to 20% of steps to be trades
 
+# Class for LSTM feature extraction
+class LSTMFeatureExtractor(BaseFeaturesExtractor):
+    """
+    Feature extractor that uses a pre-trained LSTM model for state representation.
+    
+    The LSTM model is loaded from a saved state dict and used to extract features
+    from the environment observations before passing them to the RL policy.
+    """
+    
+    def __init__(self, observation_space, lstm_state_dict=None, features_dim=64):
+        """
+        Initialize the feature extractor.
+        
+        Args:
+            observation_space: The observation space of the environment
+            lstm_state_dict: The state dict of the pre-trained LSTM model
+            features_dim: The dimension of the features to extract
+        """
+        super(LSTMFeatureExtractor, self).__init__(observation_space, features_dim)
+        
+        # Initialize the LSTM model
+        self.lstm_model = None
+        self.features_dim = features_dim
+        
+        if lstm_state_dict is not None:
+            # Create LSTM model architecture - this should match the saved model
+            self.lstm_model = torch.nn.LSTM(
+                input_size=observation_space.shape[0], 
+                hidden_size=features_dim,
+                num_layers=1,
+                batch_first=True
+            )
+            
+            # Try to load the state dict
+            try:
+                # Use partial loading if the state dicts don't match exactly
+                if hasattr(lstm_state_dict, 'items'):  # It's a dictionary
+                    # Extract LSTM weights from the state dict
+                    filtered_state_dict = {}
+                    for key, value in lstm_state_dict.items():
+                        if key.startswith('lstm') or key.startswith('encoder') or key.startswith('rnn'):
+                            filtered_state_dict[key] = value
+                    
+                    # Log what we're loading
+                    logger.info(f"Loading LSTM weights: {list(filtered_state_dict.keys())}")
+                    
+                    # Load the filtered state dict
+                    if filtered_state_dict:
+                        # Try to load with strict=False to allow partial loading
+                        self.lstm_model.load_state_dict(filtered_state_dict, strict=False)
+                        logger.info("LSTM weights loaded successfully")
+                    else:
+                        logger.warning("No LSTM weights found in the state dict")
+                else:
+                    logger.warning("LSTM state dict is not a dictionary")
+            except Exception as e:
+                logger.error(f"Error loading LSTM weights: {e}")
+                logger.error(traceback.format_exc())
+        
+        # If LSTM model is not available, use a simple linear layer
+        if self.lstm_model is None:
+            logger.warning("Using linear layer for feature extraction instead of LSTM")
+            self.linear = torch.nn.Linear(observation_space.shape[0], features_dim)
+            
+        # Output layer to ensure proper dimension
+        self.output_layer = torch.nn.Linear(features_dim, features_dim)
+        
+    def forward(self, observations):
+        """
+        Extract features from observations using the LSTM model.
+        
+        Args:
+            observations: The observations from the environment
+            
+        Returns:
+            torch.Tensor: The extracted features
+        """
+        # Add sequence dimension if not present
+        if len(observations.shape) == 2:
+            # For batched observations without sequence dimension
+            # Shape from [batch_size, features] to [batch_size, 1, features]
+            observations = observations.unsqueeze(1)
+        
+        if self.lstm_model is not None:
+            # Use LSTM for feature extraction
+            try:
+                lstm_out, _ = self.lstm_model(observations)
+                # Take the last time step output
+                features = lstm_out[:, -1, :]
+            except Exception as e:
+                logger.error(f"Error in LSTM forward pass: {e}")
+                # Fallback to linear layer
+                features = self.output_layer(observations[:, -1, :])
+        else:
+            # Use linear layer
+            features = self.linear(observations[:, -1, :])
+        
+        return self.output_layer(features)
+
 class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for trading environments that adds safeguards against:
@@ -1277,6 +1376,32 @@ def train_a2c(env, args, callbacks=None):
     if callbacks:
         all_callbacks.extend(callbacks)
     
+    # Check if we have an LSTM model to use for feature extraction
+    lstm_state_dict = None
+    policy_kwargs = {}
+    
+    if args.lstm_model_path:
+        logger.info(f"Using LSTM model from {args.lstm_model_path} for feature extraction")
+        try:
+            # Load the LSTM model
+            import torch
+            lstm_state_dict = torch.load(args.lstm_model_path, map_location=torch.device('cpu'))
+            
+            # Set up policy kwargs to use our custom feature extractor
+            policy_kwargs = {
+                "features_extractor_class": LSTMFeatureExtractor,
+                "features_extractor_kwargs": {
+                    "lstm_state_dict": lstm_state_dict,
+                    "features_dim": 64  # Match with the hidden size in the LSTM model
+                }
+            }
+            logger.info("Successfully configured LSTM feature extractor")
+        except Exception as e:
+            logger.error(f"Error setting up LSTM feature extractor: {e}")
+            logger.error(traceback.format_exc())
+            # Continue without LSTM feature extraction
+            policy_kwargs = {}
+    
     # Create the model with parameters from args
     model = A2C(
         "MlpPolicy",
@@ -1290,13 +1415,42 @@ def train_a2c(env, args, callbacks=None):
         max_grad_norm=0.5,
         rms_prop_eps=1e-5,
         verbose=1,
-        tensorboard_log="./logs/a2c/"
+        tensorboard_log="./logs/a2c/",
+        policy_kwargs=policy_kwargs
     )
     
     # Load model from checkpoint if specified
     if args.load_model:
         logger.info(f"Loading model from {args.load_model}")
-        model = A2C.load(args.load_model, env=env)
+        try:
+            model = A2C.load(args.load_model, env=env)
+        except AssertionError as e:
+            if "No data found in the saved file" in str(e) and args.lstm_model_path:
+                logger.warning("Failed to load model as A2C model, proceeding with a new A2C model")
+                # Create a new model since the load failed
+                model = A2C(
+                    "MlpPolicy",
+                    env,
+                    learning_rate=learning_rate,
+                    n_steps=n_steps,
+                    gamma=gamma,
+                    gae_lambda=0.95,
+                    ent_coef=ent_coef,
+                    vf_coef=0.5,
+                    max_grad_norm=0.5,
+                    rms_prop_eps=1e-5,
+                    verbose=1,
+                    tensorboard_log="./logs/a2c/",
+                    policy_kwargs=policy_kwargs
+                )
+            else:
+                # Re-raise the exception if it's not the specific one we're handling
+                raise
+    
+    # Load LSTM model if specified
+    if args.lstm_model_path:
+        logger.info(f"LSTM model loaded from {args.lstm_model_path}")
+        # The LSTM is now integrated into the policy via feature extractor
     
     # Train the model
     total_timesteps = args.timesteps if hasattr(args, 'timesteps') else 1000000
@@ -1426,6 +1580,10 @@ def main():
                         help="Number of timesteps to train (default: 1,000,000)")
     parser.add_argument("--load_model", type=str, default=None,
                         help="Path to a saved model to continue training from")
+    
+    # Add parameter for LSTM model
+    parser.add_argument("--lstm_model_path", type=str, default=None,
+                        help="Path to a saved LSTM model to use for state representation")
     
     # Data parameters
     parser.add_argument("--data_path", type=str, default="data/crypto_data.csv",
