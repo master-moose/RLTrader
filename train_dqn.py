@@ -1275,24 +1275,21 @@ def train_a2c(env, args):
     def lr_schedule(remaining_progress):
         return learning_rate * remaining_progress  # Linear schedule
     
-    # Force CPU for MlpPolicy to avoid the GPU utilization warning, similar to PPO
-    device = "cpu"
-    if args.device == "cuda" and torch.cuda.is_available() and "--device=cuda" in sys.argv:
-        logger.info("Using CUDA as explicitly requested via --device=cuda")
-        device = "cuda"
-    else:
-        logger.info("Using CPU for A2C with MlpPolicy as recommended for better performance")
+    # Allow A2C to use GPU when available, similar to SAC
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    logger.info(f"Creating A2C model with n_steps={args.n_steps}")
+    logger.info(f"Creating A2C model with n_steps={args.n_steps}, using device={device}")
     from stable_baselines3 import A2C
     model = A2C(
         "MlpPolicy",
         env,
-        learning_rate=lr_schedule,
+        learning_rate=lr_schedule if callable(lr_schedule) else learning_rate,
         n_steps=args.n_steps,
         gamma=args.gamma,
         gae_lambda=0.95,
-        ent_coef=0.01,
+        ent_coef=args.ent_coef,
         vf_coef=0.5,
         max_grad_norm=0.5,
         use_rms_prop=True,  # Use RMSProp optimizer instead of Adam for A2C
@@ -1300,7 +1297,9 @@ def train_a2c(env, args):
         normalize_advantage=True,
         verbose=1 if args.verbose else 0,
         tensorboard_log=tensorboard_log_dir,
-        device=device
+        device=device,
+        # Include LSTM feature extractor if provided
+        policy_kwargs=policy_kwargs,
     )
     
     # Train model with standard approach
