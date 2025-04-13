@@ -923,6 +923,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
 
 
 class TensorboardCallback(BaseCallback):
+    import deque
     """
     Custom callback for tracking metrics.
     This callback tracks detailed metrics about trading performance and logs them to TensorBoard.
