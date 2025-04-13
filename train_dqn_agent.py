@@ -2088,6 +2088,11 @@ def train_with_finrl(
                     if 'infos' in self.locals and i < len(self.locals['infos']):
                         info = self.locals['infos'][i]
                         
+                        # Initialize variables that might be used later to avoid UnboundLocalError
+                        exit_price = 0
+                        pnl = 0
+                        trade_duration = 0
+                        
                         # Track portfolio value
                         if 'portfolio_value' in info:
                             self.portfolio_values.append(info['portfolio_value'])
@@ -2261,7 +2266,7 @@ def train_with_finrl(
         os.environ['STABLE_BASELINES_TENSORBOARD_QUEUE_SIZE'] = '100000'
         
         # Get PPO hyperparameters
-        n_steps = getattr(args, 'n_steps', 2048)
+        n_steps = getattr(args, 'n_steps', 31284)
         batch_size = getattr(args, 'batch_size', 64)
         n_epochs = getattr(args, 'n_epochs', 10)
         learning_rate = getattr(args, 'learning_rate', 0.0003)  # Increased from 0.0001
@@ -3047,6 +3052,11 @@ def main():
                                 # Log environment info if available
                                 if 'infos' in self.locals and i < len(self.locals['infos']):
                                     info = self.locals['infos'][i]
+                                    
+                                    # Initialize variables that might be used later to avoid UnboundLocalError
+                                    exit_price = 0
+                                    pnl = 0
+                                    trade_duration = 0
                                     
                                     # Track portfolio value
                                     if 'portfolio_value' in info:
@@ -4007,6 +4017,11 @@ def main():
                                 # Log environment info if available
                                 if 'infos' in self.locals and i < len(self.locals['infos']):
                                     info = self.locals['infos'][i]
+                                    
+                                    # Initialize variables that might be used later to avoid UnboundLocalError
+                                    exit_price = 0
+                                    pnl = 0
+                                    trade_duration = 0
                                     
                                     # Track portfolio value
                                     if 'portfolio_value' in info:
