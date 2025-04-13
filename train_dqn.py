@@ -1485,12 +1485,16 @@ def train_a2c(env, args, callbacks=None):
     gamma = args.gamma
     n_steps = args.n_steps
     ent_coef = args.ent_coef
+    batch_size = args.batch_size
     
     # Adjust n_steps for more frequent updates if not explicitly set by user
     # Smaller n_steps leads to more frequent updates
     if n_steps == 2048:  # If using the default value
-        n_steps = 16384 # Use a smaller value for cryptocurrency trading
-        logger.info(f"Adjusting n_steps from default 2048 to {n_steps} for more frequent updates")
+        n_steps = 16384  # Use larger value for cryptocurrency trading as requested
+        logger.info(f"Adjusting n_steps from default 2048 to {n_steps} for cryptocurrency trading")
+    
+    # Log batch size being used
+    logger.info(f"Using batch size: {batch_size} for A2C training")
     
     # Increase entropy coefficient to encourage exploration
     ent_coef = max(ent_coef, 0.05)  # Ensure minimum entropy for exploration
@@ -1560,6 +1564,9 @@ def train_a2c(env, args, callbacks=None):
         logger.info(f"Loading model from {args.load_model}")
         try:
             model = A2C.load(args.load_model, env=env)
+            # Update key parameters even for loaded models
+            model.n_steps = n_steps
+            logger.info(f"Updated loaded model with n_steps={n_steps}")
         except AssertionError as e:
             if "No data found in the saved file" in str(e) and args.lstm_model_path:
                 logger.warning("Failed to load model as A2C model, proceeding with a new A2C model")
