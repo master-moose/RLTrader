@@ -371,9 +371,12 @@ class CryptocurrencyTradingEnv(gym.Env):
             
         # If total value is more than 1.5x initial (reduced from 3x) or asset position is too large, log and apply limit
         if total_value > self.initial_amount * 1.5 or self.assets_owned[asset_index] > 100:  # Reduced from 1000 to 100
-            logger.warning(f"Post-trade check: Portfolio value {total_value:.2f} > 1.5x initial or assets {self.assets_owned[asset_index]:.2f} > 100")
+            # Only log the warning if the value is significantly above the threshold (2x instead of 1.5x)
+            # or if assets are way above the threshold (150 instead of 100)
+            if total_value > self.initial_amount * 2.0 or self.assets_owned[asset_index] > 150:
+                logger.warning(f"Post-trade check: Portfolio value {total_value:.2f} > 2.0x initial or assets {self.assets_owned[asset_index]:.2f} > 150")
             
-            # Actually apply a limit here instead of leaving it to calculate_portfolio_value
+            # Silently apply a limit without spamming logs for normal growth
             if total_value > self.initial_amount * 1.5:
                 reduction_factor = (self.initial_amount * 1.5) / total_value
                 self.portfolio_value *= reduction_factor
@@ -446,7 +449,9 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Apply stricter maximum - never allow more than 10x initial amount (reduced from 20x)
         absolute_max = self.initial_amount * 10
         if total_value > absolute_max:
-            logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
+            # Only log warning if significantly exceeding the limit (15x instead of 10x)
+            if total_value > self.initial_amount * 15:
+                logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
             
             # Proportionally reduce cash and assets 
             if asset_value > 0:
@@ -478,7 +483,9 @@ class CryptocurrencyTradingEnv(gym.Env):
                 # If increasing, limit to 50% growth (instead of doubling)
                 if total_value > original_value:
                     limited_value = original_value * 1.5  # Reduced from 2.0 to 1.5
-                    logger.warning(f"Rate limiting portfolio increase: {total_value:.2f} -> {limited_value:.2f}")
+                    # Only log warning if the change is extremely large (over 80%)
+                    if change_pct > 0.8:
+                        logger.warning(f"Rate limiting portfolio increase: {total_value:.2f} -> {limited_value:.2f}")
                     
                     # Adjust both the portfolio value and asset balance
                     if asset_value > 0:
@@ -497,7 +504,9 @@ class CryptocurrencyTradingEnv(gym.Env):
                 # If decreasing, limit to 30% loss (instead of halving)
                 elif total_value < original_value:
                     limited_value = original_value * 0.7  # Changed from 0.5 to 0.7
-                    logger.warning(f"Rate limiting portfolio decrease: {total_value:.2f} -> {limited_value:.2f}")
+                    # Only log warning if the change is extremely large (over 70%)
+                    if change_pct > 0.7:
+                        logger.warning(f"Rate limiting portfolio decrease: {total_value:.2f} -> {limited_value:.2f}")
                     
                     # Similar adjustment approach for decreases
                     if asset_value > 0:
@@ -514,7 +523,9 @@ class CryptocurrencyTradingEnv(gym.Env):
             # Linear growth cap: allow max 20% increase over initial amount for first 500 steps
             max_allowed = self.initial_amount * (1.0 + 0.2 * (self.day / 500))
             if total_value > max_allowed:
-                logger.warning(f"Early training growth limiting: {total_value:.2f} -> {max_allowed:.2f} at day {self.day}")
+                # Only log warning if significantly exceeding the growth cap (more than 50% over)
+                if total_value > max_allowed * 1.5:
+                    logger.warning(f"Early training growth limiting: {total_value:.2f} -> {max_allowed:.2f} at day {self.day}")
                 # Scale everything down proportionally
                 scale_factor = max_allowed / total_value
                 if asset_value > 0:
@@ -532,7 +543,7 @@ class CryptocurrencyTradingEnv(gym.Env):
             self.assets_owned[0] = 0
         
         # Track if we made a significant change to the value
-        if abs(total_value - original_value) / max(1, original_value) > 0.5 and original_value > 0:
+        if abs(total_value - original_value) / max(1, original_value) > 0.8 and original_value > 0:
             logger.warning(f"Portfolio value changed dramatically: {original_value:.2f} -> {total_value:.2f}")
         
         return float(total_value)
