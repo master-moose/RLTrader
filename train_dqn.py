@@ -2488,3 +2488,8 @@ def comprehensive_environment_patch(env, target_dim, logger):
     
     logger.info("Comprehensive environment patching complete")
     return env
+
+
+if __name__ == "__main__":
+    main()
+    
