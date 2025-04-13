@@ -279,22 +279,31 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Detect if this step includes a trade - store current holdings
         current_holdings = self.state[1:self.stock_dim+1].copy() if self.stock_dim > 0 else []
         
+        # Check for forced holding during initialization period
+        in_initial_period = self.current_step < self.initial_forced_hold_period
+        
         # Store action in history for oscillation detection
-        if isinstance(actions, (int, float, np.int64, np.float64)):
-            self.action_history.append(int(actions))
-        else:
-            # For array actions, store the first element
-            if isinstance(actions, np.ndarray) and len(actions) > 0:
-                self.action_history.append(int(actions[0]))
+        # Only record real agent actions when not in forced hold period
+        if not in_initial_period:
+            if isinstance(actions, (int, float, np.int64, np.float64)):
+                self.action_history.append(int(actions))
             else:
-                self.action_history.append(1)  # Default to hold
+                # For array actions, store the first element
+                if isinstance(actions, np.ndarray) and len(actions) > 0:
+                    self.action_history.append(int(actions[0]))
+                else:
+                    self.action_history.append(1)  # Default to hold
+        else:
+            # During forced hold period, don't record actions for oscillation detection
+            pass
                 
         # Keep action history within maximum size
         if len(self.action_history) > self.max_action_history:
             self.action_history = self.action_history[-self.max_action_history:]
             
-        # Detect action oscillation (buy-sell-buy-sell pattern)
-        if len(self.action_history) >= 4:
+        # Only check for oscillation when not in forced hold period
+        # and we have enough history of actual agent decisions
+        if len(self.action_history) >= 4 and not in_initial_period:
             last_four = self.action_history[-4:]
             # Check for strict buy-sell-buy-sell (2-0-2-0) or sell-buy-sell-buy (0-2-0-2) patterns
             if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
@@ -314,10 +323,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 # (will be stored in info_buffer and added to reward during reward calculation)
                 self.info_buffer['oscillation_penalty'] = -20.0
         
-        # Check for forced holding during initialization period
-        in_initial_period = self.current_step < self.initial_forced_hold_period
+        # Force hold actions during initial period
         if in_initial_period:
-            # Force hold actions during initial period
             if isinstance(actions, np.ndarray) and len(actions) > 0:
                 actions = np.ones_like(actions)  # Force hold (1)
             else:
@@ -563,8 +570,11 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             if self.debug_mode or self.consecutive_attempts > 5:
                 logger.warning(f"Applied severe rapid trade penalty: {penalty:.6f}")
         
-        # Add oscillation penalty based on recent action history
-        if len(self.action_history) >= 4:
+        # Only check for oscillation when not in forced hold period
+        in_initial_period = self.current_step < self.initial_forced_hold_period
+        
+        # Add oscillation penalty based on recent action history (but not during initial forced hold)
+        if len(self.action_history) >= 4 and not in_initial_period:
             last_four = self.action_history[-4:]
             
             # Check for strict oscillation patterns (buy-sell-buy-sell or sell-buy-sell-buy)
@@ -579,12 +589,11 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 self.post_trade_frozen = True
                 self.frozen_until_step = self.current_step + 30000  # 50% longer frozen period
                 
-            # Only detect much more strict patterns of oscillation to reduce false positives
-            elif last_four in ([2, 0, 1, 0], [0, 2, 1, 2], [2, 1, 0, 1], [0, 1, 2, 1]) and len(set(last_four)) > 2:
-                # Only penalize if there's a clear pattern of buy/sell with at most one hold
-                # Apply moderate oscillation penalty
-                # Use a direct penalty value instead of asset-scaled penalty to ensure it's significant
-                oscillation_penalty = -20.0  # Direct penalty value 
+            # Only detect very specific and extreme patterns of oscillation to avoid false positives
+            # Must be exact sequences of buys and sells with no holds in between
+            elif last_four in ([2, 0, 2, 1], [1, 2, 0, 2], [0, 2, 0, 1], [1, 0, 2, 0]):
+                # Apply moderate oscillation penalty - use direct value to avoid scaling issues
+                oscillation_penalty = -20.0
                 base_reward += oscillation_penalty
                 logger.info(f"Applied moderate oscillation penalty: {oscillation_penalty:.6f}")
                 
@@ -2219,10 +2228,14 @@ def train_with_finrl(
                                 self.action_history = self.action_history[-20:]
                                 
                             # Check for oscillation patterns
-                            if len(self.action_history) >= 4:
-                                last_four = self.action_history[-4:]
-                                if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
-                                    logger.warning(f"Oscillation pattern detected in callback: {last_four}")
+                            if len(self.action_history) >= 6:  # Require longer history for stricter detection
+                                # Only count as oscillation if we see multiple cycles in a row
+                                # E.g., buy-sell-buy-sell or sell-buy-sell-buy for at least 6 actions
+                                strict_pattern1 = self.action_history[-6:] == [2, 0, 2, 0, 2, 0]  # buy-sell-buy-sell-buy-sell
+                                strict_pattern2 = self.action_history[-6:] == [0, 2, 0, 2, 0, 2]  # sell-buy-sell-buy-sell-buy
+                                
+                                if strict_pattern1 or strict_pattern2:
+                                    logger.warning(f"Severe oscillation pattern detected in callback: {self.action_history[-6:]}")
                                     self.oscillation_count += 1
                                     self.logger.record('environment/oscillation_detected', 1)
             
