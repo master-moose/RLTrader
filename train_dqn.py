@@ -1321,7 +1321,7 @@ def check_resources():
             logger.warning(f"Error checking GPU resources: {e}")
 
 
-def update_observation_spaces_recursively(env, target_dim, logger):
+def update_observation_spaces_recursively(env, target_dim, logger, visited=None):
     """
     Recursively update observation spaces in a potentially nested environment.
     
@@ -1333,9 +1333,22 @@ def update_observation_spaces_recursively(env, target_dim, logger):
         env: The environment to update
         target_dim: The target dimension for the observation space
         logger: Logger for debugging information
+        visited: Set of already visited objects to avoid infinite recursion
     """
     if env is None:
         return
+        
+    # Initialize visited set if this is the first call
+    if visited is None:
+        visited = set()
+    
+    # Use object id to avoid infinite recursion
+    obj_id = id(env)
+    if obj_id in visited:
+        return
+    
+    # Add to visited set
+    visited.add(obj_id)
         
     # Update this environment's observation space if it exists
     if hasattr(env, 'observation_space'):
@@ -1357,7 +1370,7 @@ def update_observation_spaces_recursively(env, target_dim, logger):
             env.obs_rms.count = 0
     
     # Check for common VecEnv attributes that might contain nested environments
-    for attr_name in ['venv', 'env', 'envs', 'unwrapped']:
+    for attr_name in ['venv', 'env', 'envs']:
         if hasattr(env, attr_name):
             attr = getattr(env, attr_name)
             
@@ -1365,10 +1378,12 @@ def update_observation_spaces_recursively(env, target_dim, logger):
             if isinstance(attr, list):
                 # For environment lists (e.g., SubprocVecEnv)
                 for nested_env in attr:
-                    update_observation_spaces_recursively(nested_env, target_dim, logger)
+                    update_observation_spaces_recursively(nested_env, target_dim, logger, visited)
             else:
                 # For single nested environment
-                update_observation_spaces_recursively(attr, target_dim, logger)
+                update_observation_spaces_recursively(attr, target_dim, logger, visited)
+    
+    # NOTE: Removed 'unwrapped' from the attribute list because it can cause recursion issues
 
 
 def train_dqn(env, args, callbacks=None):
@@ -1594,11 +1609,10 @@ def train_a2c(env, args, callbacks=None):
     learning_rate = args.learning_rate
     gamma = args.gamma
     ent_coef = args.ent_coef
+    batch_size = args.batch_size  # Get batch_size from args
     
     # Set n_steps to represent 1 year of 15-min candles (96 candles per day * 365 days)
-    n_steps = 35040
-    # Set batch_size to 2048 as requested
-    batch_size = 2048
+    n_steps = args.n_steps if hasattr(args, 'n_steps') else 35040
     
     # Get number of environments
     num_envs = env.num_envs if hasattr(env, 'num_envs') else 1
@@ -1679,7 +1693,8 @@ def train_a2c(env, args, callbacks=None):
         rms_prop_eps=1e-5,
         verbose=1,
         tensorboard_log="./logs/a2c/",
-        policy_kwargs=policy_kwargs
+        policy_kwargs=policy_kwargs,
+        batch_size=batch_size  # Add the batch_size parameter
     )
     
     # Log key parameters to ensure they're being used
@@ -1711,7 +1726,8 @@ def train_a2c(env, args, callbacks=None):
                     rms_prop_eps=1e-5,
                     verbose=1,
                     tensorboard_log="./logs/a2c/",
-                    policy_kwargs=policy_kwargs
+                    policy_kwargs=policy_kwargs,
+                    batch_size=batch_size  # Add the batch_size parameter
                 )
             else:
                 # Re-raise the exception if it's not the specific one we're handling
@@ -1738,7 +1754,7 @@ def train_a2c(env, args, callbacks=None):
         )
         
         # Save the final model
-        model_save_path = os.path.join("models", f"a2c_model_final")
+        model_save_path = os.path.join("models", f"final_a2c_model")
         model.save(model_save_path)
         logger.info(f"Model saved to {model_save_path}")
         
