@@ -63,9 +63,10 @@ logger = logging.getLogger(__name__)
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
 
 # Constants for trading safeguards
-TRADE_COOLDOWN_PERIOD = 50  # Minimum steps between trades
-OSCILLATION_PENALTY = 100.0  # Penalty for oscillating between buys and sells
-SAME_PRICE_TRADE_PENALTY = 200.0  # Penalty for trading at same price
+TRADE_COOLDOWN_PERIOD = 100  # Minimum steps between trades
+OSCILLATION_PENALTY = 500.0  # Stronger penalty for oscillating between buys and sells
+SAME_PRICE_TRADE_PENALTY = 1000.0  # Stronger penalty for trading at same price
+MAX_TRADE_FREQUENCY = 0.05  # Maximum 5% of steps can be trades
 
 class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
@@ -99,6 +100,22 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.current_position = 0
         self.forced_actions = 0
         
+        # Enhanced anti-oscillation feature
+        self.last_buy_price = None
+        self.last_sell_price = None
+        self.min_profit_threshold = 0.002  # Require at least 0.2% price difference to trade
+        
+        # Stronger oscillation detection and prevention
+        self.oscillation_window = 8  # Look at 8 actions for oscillation patterns
+        self.progressive_cooldown = True  # Increase cooldown after oscillations
+        self.max_oscillation_cooldown = trade_cooldown * 5  # Maximum extended cooldown
+        self.oscillation_patterns = {
+            'buy_sell_alternation': 0,  # Count of buy-sell alternations
+            'rapid_reversals': 0,       # Count of position reversals
+            'same_action_repeat': 0     # Count of repeated same actions
+        }
+        self.current_cooldown = trade_cooldown  # Adjustable cooldown period
+        
         logger.info(f"SafeTradingEnvWrapper initialized with {trade_cooldown} step cooldown")
     
     def reset(self, **kwargs):
@@ -113,8 +130,90 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.previous_position = 0
         self.current_position = 0
         self.forced_actions = 0
+        self.last_buy_price = None
+        self.last_sell_price = None
+        
+        # Reset oscillation tracking
+        self.oscillation_count = 0
+        self.current_cooldown = self.trade_cooldown
+        self.oscillation_patterns = {
+            'buy_sell_alternation': 0,
+            'rapid_reversals': 0,
+            'same_action_repeat': 0
+        }
         
         return observation, info
+    
+    def _detect_oscillation_patterns(self):
+        """
+        Detect various oscillation patterns in the action history.
+        Returns True if oscillation is detected, False otherwise.
+        """
+        if len(self.action_history) < self.oscillation_window:
+            return False
+        
+        # Get the most recent actions
+        recent_actions = self.action_history[-self.oscillation_window:]
+        
+        # Pattern 1: Buy-Sell alternation (e.g., [2, 0, 2, 0] or [0, 2, 0, 2])
+        alternation_detected = False
+        for i in range(len(recent_actions) - 3):
+            if (recent_actions[i] == 2 and recent_actions[i+1] == 0 and 
+                recent_actions[i+2] == 2 and recent_actions[i+3] == 0):
+                alternation_detected = True
+                self.oscillation_patterns['buy_sell_alternation'] += 1
+                logger.warning(f"Detected action oscillation at step {getattr(self.env, 'current_step', 0)}: {recent_actions[i:i+4]}")
+                break
+            if (recent_actions[i] == 0 and recent_actions[i+1] == 2 and 
+                recent_actions[i+2] == 0 and recent_actions[i+3] == 2):
+                alternation_detected = True
+                self.oscillation_patterns['buy_sell_alternation'] += 1
+                logger.warning(f"Detected action oscillation at step {getattr(self.env, 'current_step', 0)}: {recent_actions[i:i+4]}")
+                break
+        
+        # Pattern 2: Rapid reversals (e.g., long pause then [2, 2, 0, 0] or [0, 0, 2, 2])
+        reversal_detected = False
+        for i in range(len(recent_actions) - 3):
+            if (recent_actions[i] == recent_actions[i+1] == 2 and 
+                recent_actions[i+2] == recent_actions[i+3] == 0):
+                reversal_detected = True
+                self.oscillation_patterns['rapid_reversals'] += 1
+                break
+            if (recent_actions[i] == recent_actions[i+1] == 0 and 
+                recent_actions[i+2] == recent_actions[i+3] == 2):
+                reversal_detected = True
+                self.oscillation_patterns['rapid_reversals'] += 1
+                break
+        
+        return alternation_detected or reversal_detected
+    
+    def _update_cooldown_period(self):
+        """Update the cooldown period based on oscillation behavior"""
+        if not self.progressive_cooldown:
+            return
+        
+        # Calculate oscillation severity score
+        oscillation_score = (
+            self.oscillation_patterns['buy_sell_alternation'] * 2 +
+            self.oscillation_patterns['rapid_reversals'] * 1.5 +
+            self.oscillation_patterns['same_action_repeat'] * 0.5
+        )
+        
+        # Adjust cooldown period based on score
+        if oscillation_score > 5:
+            # Significant oscillation, use maximum cooldown
+            new_cooldown = self.max_oscillation_cooldown
+        elif oscillation_score > 2:
+            # Some oscillation, scale cooldown linearly
+            new_cooldown = self.trade_cooldown + (oscillation_score - 2) * (self.max_oscillation_cooldown - self.trade_cooldown) / 3
+        else:
+            # Minimal oscillation, use base cooldown
+            new_cooldown = self.trade_cooldown
+        
+        # Update if changed significantly
+        if abs(new_cooldown - self.current_cooldown) > 10:
+            self.current_cooldown = int(new_cooldown)
+            logger.info(f"Adjusted cooldown period to {self.current_cooldown} steps (oscillation score: {oscillation_score:.1f})")
     
     def step(self, action):
         """
@@ -146,9 +245,36 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Store original action for tracking
         original_action = action
         
+        # Update cooldown period based on oscillation patterns
+        self._update_cooldown_period()
+        
         # Determine if we're in a trade cooldown period
-        in_cooldown = (current_step - self.last_trade_step) < self.trade_cooldown
+        in_cooldown = (current_step - self.last_trade_step) < self.current_cooldown
         attempted_trade_during_cooldown = False
+        
+        # Get current price for advanced checks
+        current_price = None
+        if hasattr(self.env, '_get_current_price'):
+            current_price = self.env._get_current_price()
+        elif hasattr(self.env, 'current_price'):
+            current_price = self.env.current_price
+            
+        # Check for min profit threshold violations
+        min_profit_violation = False
+        if current_price is not None:
+            # If trying to sell, check if price is higher than last buy
+            if action == 0 and self.last_buy_price is not None:
+                profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
+                if profit_pct < self.min_profit_threshold:
+                    min_profit_violation = True
+                    logger.debug(f"Prevented selling at loss/small profit: {profit_pct:.4f}% at step {current_step}")
+            
+            # If trying to buy, check if price is lower than last sell
+            elif action == 2 and self.last_sell_price is not None:
+                discount_pct = (self.last_sell_price - current_price) / self.last_sell_price
+                if discount_pct < self.min_profit_threshold:
+                    min_profit_violation = True
+                    logger.debug(f"Prevented buying too close to last sell: -{discount_pct:.4f}% at step {current_step}")
         
         if in_cooldown and action != 1:  # Not a hold action
             # Agent is trying to trade during cooldown
@@ -159,17 +285,29 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             
             if self.forced_actions % 10 == 0:  # Log periodically to avoid spamming
                 logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
-                              f"{current_step - self.last_trade_step}/{self.trade_cooldown} steps since last trade")
+                              f"{current_step - self.last_trade_step}/{self.current_cooldown} steps since last trade")
         
-        # Check for oscillation in action history
-        if len(self.action_history) >= 4:
-            # Look for buy-sell-buy-sell (2-0-2-0) or sell-buy-sell-buy (0-2-0-2) patterns
-            last_four = self.action_history[-4:]
-            if last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]:
-                logger.warning(f"Detected action oscillation at step {current_step}: {last_four}")
-                # Force a hold action and prepare for penalty
-                action = 1
-                self.oscillation_count += 1
+        # Also force hold for min profit violations
+        if min_profit_violation:
+            action = 1
+        
+        # Record the action in history before checking for oscillation
+        self.action_history.append(original_action)
+        if len(self.action_history) > self.max_history_size:
+            self.action_history = self.action_history[-self.max_history_size:]
+            
+        # Check for oscillation patterns and force hold if detected
+        if self._detect_oscillation_patterns():
+            # Oscillation detected - force a hold
+            action = 1
+            self.oscillation_count += 1
+            
+            # Apply stronger oscillation prevention for repeated violations
+            if self.oscillation_count > 5:
+                # Extend cooldown period for severe oscillation
+                extended_cooldown = min(self.oscillation_count * 20, 1000)  # More aggressive extension
+                self.last_trade_step = current_step - self.current_cooldown + extended_cooldown
+                logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -191,11 +329,6 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             current_position = self.env.position
         elif 'position' in info:
             current_position = info['position']
-        
-        # Record the action taken
-        self.action_history.append(original_action)
-        if len(self.action_history) > self.max_history_size:
-            self.action_history = self.action_history[-self.max_history_size:]
         
         # Record position
         self.previous_position = self.current_position
@@ -227,7 +360,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if len(self.action_history) >= 4:
             last_four = self.action_history[-4:]
             if last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]:
-                oscillation_penalty = OSCILLATION_PENALTY * (1.0 + min(self.oscillation_count, 5))
+                # Increase oscillation penalty exponentially based on count
+                oscillation_penalty = OSCILLATION_PENALTY * (1.0 + min(self.oscillation_count, 5) ** 1.5)
                 additional_penalty -= oscillation_penalty
                 logger.warning(f"Applied oscillation penalty: {oscillation_penalty:.2f} (#{self.oscillation_count})")
                 
@@ -253,6 +387,12 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             self.last_trade_step = current_step
             if current_price is not None:
                 self.last_trade_price = current_price
+                
+                # Update buy/sell price tracking
+                if original_action == 2:  # Buy action
+                    self.last_buy_price = current_price
+                elif original_action == 0:  # Sell action
+                    self.last_sell_price = current_price
             
             # Reset cooldown violation count after successful trade
             if self.cooldown_violations > 0:
@@ -799,13 +939,36 @@ def train_ppo(env, args):
     # Calculate appropriate clip range based on action space
     clip_range = min(args.clip_range, 0.1)  # Conservative clipping
     
+    # Set appropriate batch size and n_steps based on parameters
+    # Use larger values if specified without arbitrary caps
+    batch_size = args.batch_size
+    n_steps = args.n_steps
+    
+    # Apply sensible minimums rather than arbitrary maximums
+    min_n_steps = 1024
+    min_batch_size = 64
+    
+    # Ensure n_steps is at least the minimum value
+    if n_steps < min_n_steps:
+        logger.warning(f"Increasing n_steps from {n_steps} to {min_n_steps} for stability")
+        n_steps = min_n_steps
+    else:
+        logger.info(f"Using requested n_steps value: {n_steps}")
+    
+    # Ensure batch_size is at least the minimum value
+    if batch_size < min_batch_size:
+        logger.warning(f"Increasing batch_size from {batch_size} to {min_batch_size} for stability")
+        batch_size = min_batch_size
+    else:
+        logger.info(f"Using requested batch_size value: {batch_size}")
+    
     # Create model
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=learning_rate,
-        n_steps=min(args.n_steps, 2048),  # Cap n_steps for stability
-        batch_size=min(args.batch_size, 64),  # Smaller batch size for more stable updates
+        n_steps=n_steps,
+        batch_size=batch_size,
         n_epochs=max(args.n_epochs, 5),  # At least 5 epochs
         gamma=args.gamma,
         ent_coef=max(args.ent_coef, 0.01),  # Ensure sufficient exploration
