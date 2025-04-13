@@ -1903,5 +1903,277 @@ def create_dummy_vectorized_env(env_function, n_envs=1):
     env_fns = [env_function for _ in range(n_envs)]
     return DummyVecEnv(env_fns)
 
+def create_parallel_finrl_envs(df, args, num_workers=4):
+    """
+    Create multiple FinRL environments for parallel training.
+    
+    Args:
+        df: DataFrame with market data in FinRL format
+        args: Training arguments
+        num_workers: Number of workers to use
+        
+    Returns:
+        Vectorized environment containing multiple FinRL environments
+    """
+    logger.info(f"Creating parallel FinRL environment with {num_workers} workers")
+
+    # Determine if we should use subprocess vectorization
+    use_subproc = getattr(args, 'use_subproc', False)
+    num_envs_per_worker = getattr(args, 'num_envs_per_worker', 1)
+
+    # Initialize list of environment functions
+    env_list = []
+
+    # Set device based on args
+    device = None
+    if hasattr(args, 'device'):
+        import torch
+        device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith('cuda') else 'cpu')
+
+    logger.info(f"Creating vectorized environment with {num_workers} workers and {num_envs_per_worker} envs per worker")
+    logger.info(f"Using {'SubprocVecEnv' if use_subproc else 'DummyVecEnv'} for environment vectorization")
+
+    # Use our patched environment instead of importing from FinRL
+    logger.info("Using PatchedStockTradingEnv to prevent numpy.float64 attribute errors")
+    StockTradingEnvClass = PatchedStockTradingEnv
+
+    # Define potential technical indicators
+    potential_indicators = [
+        'macd', 'rsi_14', 
+        'stoch_k', 'stoch_d',
+        'cci_30', 'dx_30',
+        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
+        'close_5_ema', 'close_10_ema', 'close_20_ema', 'close_60_ema', 'close_120_ema',
+        'volatility_30', 'volume_change', 'volume_norm'
+    ]
+
+    # Find which indicators are present in the dataframe
+    tech_indicator_list = []
+
+    logger.info("Checking for existing technical indicators in the dataframe")
+    existing_indicators = [ind for ind in potential_indicators if ind in df.columns]
+    if existing_indicators:
+        tech_indicator_list = existing_indicators
+        logger.info(f"Found {len(existing_indicators)} technical indicators already in dataframe: {existing_indicators}")
+    else:
+        logger.warning("No valid technical indicators found in dataframe. Adding basic indicators.")
+        df = ensure_technical_indicators(df, potential_indicators)
+        # Check again after ensuring indicators
+        tech_indicator_list = [ind for ind in potential_indicators if ind in df.columns]
+        logger.info(f"Added technical indicators: {tech_indicator_list}")
+
+    # Calculate environment dimensions
+    state_space = getattr(args, 'state_dim', 16)  # Default state space size if not specified
+    stock_dim = 1  # Assuming single-asset trading for simplicity
+    num_stocks = len(df['tic'].unique()) if 'tic' in df.columns else 1
+
+    # Calculate action space size
+    include_cash = getattr(args, 'include_cash', False)
+    if include_cash:
+        action_space = num_stocks + 1  # +1 for cash position
+    else:
+        action_space = 3  # Sell, hold, buy
+
+    logger.info(f"Creating parallel environment with state_space={state_space}, "
+                f"action_space={action_space}, num_stocks={num_stocks}")
+
+    # Environment parameters
+    initial_amount = getattr(args, 'initial_balance', 1000000)
+    # Hardcode transaction costs to use crypto exchange maker/taker fees of 0.075%
+    transaction_cost_pct = 0.00075  # 0.075% as a decimal
+    logger.info("Using hardcoded crypto exchange maker/taker fees: 0.075%")
+    reward_scaling = getattr(args, 'reward_scaling', 1e-4)
+
+    # Get trade cooldown setting with dramatically increased default value
+    base_trade_cooldown = getattr(args, 'trade_cooldown', 5000)
+    logger.info(f"Setting strict base trade cooldown to {base_trade_cooldown} steps")
+
+    # Calculate maximum number of shares to trade per step (hmax)
+    # Enforcing a minimum position size of 10%
+    if 'close' in df.columns:
+        avg_price = df['close'].mean()
+        hmax = max(int(initial_amount * 0.1 / avg_price), 10)  # Allow up to 10% of balance per trade
+        # Calculate hmax to be exactly 10% of the initial balance at the average price
+        hmax = int(initial_amount * 0.1 / avg_price)
+        logger.info(f"Setting minimum position size to 10% of initial balance (hmax={hmax})")
+    else:
+        hmax = 100  # Default value
+        # Default to a reasonable value that likely represents ~10% of initial balance
+        hmax = 10
+        logger.info(f"Using default hmax={hmax} (approximately 10% of initial balance)")
+
+    logger.info(f"Environment config: initial_amount={initial_amount}, "
+                f"transaction_cost_pct={transaction_cost_pct}, "
+                f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}, "
+                f"base_trade_cooldown={base_trade_cooldown}")
+
+    # Process the DataFrame to ensure it's correctly formatted for FinRL
+    try:
+        # The DataFrame should be sorted by 'day' and 'tic'
+        if 'day' in df.columns and 'tic' in df.columns:
+            df = df.sort_values(['day', 'tic']).reset_index(drop=True)
+
+        # StockTradingEnv expects a DataFrame with a specific format:
+        # 1. Each row represents a single day and stock
+        # 2. The DataFrame should have columns like 'open', 'high', 'low', 'close', 'volume', etc.
+        # 3. It also needs a 'tic' column to identify different stocks
+        # 4. A 'date' column (or index) for dates
+        # 5. A 'day' column with integer values to represent the time steps
+
+        # Check required columns
+        required_columns = ['open', 'high', 'low', 'close', 'volume', 'tic', 'day']
+        for col in required_columns:
+            if col not in df.columns:
+                logger.warning(f"Required column '{col}' not found in DataFrame")
+                # Create dummy values if missing
+                if col in ['open', 'high', 'low', 'close']:
+                    logger.info(f"Creating dummy '{col}' column with price data")
+                    df[col] = 10000.0  # Dummy price
+                elif col == 'volume':
+                    logger.info(f"Creating dummy '{col}' column")
+                    df[col] = 10000.0  # Dummy volume
+                elif col == 'tic':
+                    logger.info(f"Creating '{col}' column with default ticker")
+                    df[col] = 'BTC'  # Default ticker
+                elif col == 'day':
+                    logger.info(f"Creating '{col}' column with sequential days")
+                    df[col] = np.arange(len(df))  # Sequential days
+
+        # If 'day' column exists but is not numeric, convert it
+        if pd.api.types.is_categorical_dtype(df['day']) or pd.api.types.is_object_dtype(df['day']):
+            logger.info("Converting 'day' column to integer")
+            df['day'] = df['day'].factorize()[0]
+
+        # Ensure numeric columns have finite values
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume'] + tech_indicator_list
+        for col in numeric_cols:
+            if np.any(~np.isfinite(df[col])):
+                logger.warning(f"Column '{col}' contains non-finite values. Replacing with zeros.")
+                df[col] = df[col].replace([np.inf, -np.inf, np.nan], 0)
+
+        # Create a test environment to see if the format is correct
+        logger.info(f"Creating test environment with indicators: {tech_indicator_list}")
+
+        # Select the first day's data for testing
+        first_day = df['day'].min()
+        test_df = df[df['day'] == first_day].reset_index(drop=True)
+
+        try:
+            # Create test environment
+            test_env = StockTradingEnvClass(
+                df=test_df,
+                stock_dim=stock_dim,
+                hmax=hmax,
+                initial_amount=initial_amount,
+                transaction_cost_pct=[transaction_cost_pct] * stock_dim,  # List of costs for each stock
+                buy_cost_pct=[transaction_cost_pct] * stock_dim,  # Buy costs
+                sell_cost_pct=[transaction_cost_pct] * stock_dim,  # Sell costs
+                reward_scaling=reward_scaling,
+                state_space=state_space,
+                action_space=action_space,
+                tech_indicator_list=tech_indicator_list,
+                print_verbosity=1,
+                trade_cooldown=base_trade_cooldown,  # Pass trade cooldown to test environment
+            )
+
+            # Try to reset the environment to see if it works
+            test_obs = test_env.reset()
+
+            if isinstance(test_obs, np.ndarray):
+                logger.info(f"Test environment observation shape: {test_obs.shape}")
+                logger.info(f"Test environment observation space: {test_env.observation_space}")
+                if hasattr(test_env, 'state'):
+                    logger.info(f"Test environment state size: {len(test_env.state)}")
+
+                # If observation shape doesn't match state_space, adjust state_space
+                if len(test_obs) != state_space:
+                    logger.warning(f"Test observation shape {len(test_obs)} doesn't match state_space {state_space}")
+                    if len(test_obs) > state_space:
+                        logger.info(f"Adjusting state_space to match test observation shape: {len(test_obs)}")
+                        state_space = len(test_obs)
+        except Exception as e:
+            logger.error(f"Error creating test environment: {e}")
+            traceback.print_exc()
+    except Exception as e:
+        logger.error(f"Error processing DataFrame: {e}")
+        traceback.print_exc()
+
+    # Create environment functions
+    for i in range(num_workers * num_envs_per_worker):
+        # Calculate a progressively increasing trade cooldown for each environment
+        # This prevents synchronized rapid trading across environments
+        env_index = i + 1  # Start from 1 to avoid division by zero
+        # Add additional cooldown based on environment index to create staggered cooldowns
+        env_trade_cooldown = base_trade_cooldown + (1000 * (i % 5))  # Add 0, 1000, 2000, 3000, 4000 steps in a cycle
+
+        # Increase the initial hold period as well
+        env_initial_hold = getattr(args, 'initial_forced_hold_period', 5000) + (500 * (i % 4))  # Add 0, 500, 1000, 1500 initial hold period
+
+        logger.info(f"Environment {i}: Setting trade_cooldown={env_trade_cooldown}, initial_hold={env_initial_hold}")
+
+        # Define a function that creates a new environment instance each time it's called
+        def make_env(idx=i, trade_cooldown=env_trade_cooldown, initial_hold=env_initial_hold):
+            try:
+                # Create basic environment parameters
+                env_config = {
+                    'df': df.copy(),
+                    'stock_dim': stock_dim,
+                    'hmax': hmax,
+                    'num_stock_shares': [0] * stock_dim,  # Start with no shares - REQUIRED parameter
+                    'action_space': action_space,  # Make sure this is passed!
+                    'tech_indicator_list': tech_indicator_list,
+                    'initial_amount': initial_amount,
+                    # 'transaction_cost_pct': transaction_cost_pct_list,  # Remove - not accepted by FinRL
+                    'buy_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
+                    'sell_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
+                    'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
+                    'state_space': state_space,  # Add the missing state_space parameter
+                    'print_verbosity': 1 if idx == 0 else 0,  # Only print verbose output for the first env
+                    'trade_cooldown': trade_cooldown,  # Use the environment-specific cooldown
+                    'debug_mode': idx == 0,  # Enable debug mode for first environment
+                    'initial_forced_hold_period': initial_hold  # Set the initial hold period
+                }
+
+                # Create the environment
+                base_env = StockTradingEnvClass(**env_config)
+
+                # Set environment ID for debugging
+                base_env.env_id = idx  # Add an env_id attribute for logging
+
+                # Wrap the environment to ensure consistent observation shape
+                wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
+
+                # Wrap with monitoring wrapper for metrics
+                return wrap_env_with_monitor(wrapped_env)
+            except Exception as e:
+                # Log the error but provide a fallback environment
+                logger.error(f"Error creating environment {idx}: {e}")
+
+                # Provide a fallback environment if creation fails
+                base_env = BaseStockTradingEnv(df, state_space=state_space, action_space=action_space)
+                # Set env_id for the fallback environment too
+                base_env.env_id = idx 
+                wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
+                return wrap_env_with_monitor(wrapped_env)
+
+        # Add the environment creation function to the list with proper closure handling
+        def env_fn(idx=i, trade_cooldown=env_trade_cooldown, initial_hold=env_initial_hold):
+            return make_env(idx, trade_cooldown, initial_hold)
+        env_list.append(env_fn)
+
+    # Create the vectorized environment
+    if use_subproc and (device is None or str(device).startswith('cpu')):
+        # Import the SubprocVecEnv from stable_baselines3
+        from stable_baselines3.common.vec_env import SubprocVecEnv
+        vec_env = SubprocVecEnv(env_list)
+        logger.info("Using SubprocVecEnv for parallel environment execution")
+    else:
+        if use_subproc and device is not None and not str(device).startswith('cpu'):
+            logger.info("SubprocVecEnv requested but running on GPU. Using DummyVecEnv instead for better GPU utilization.")
+        vec_env = DummyVecEnv(env_list)
+        logger.info("Using DummyVecEnv for environment vectorization")
+
+    return vec_env
+
 if __name__ == "__main__":
     main() 
