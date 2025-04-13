@@ -508,7 +508,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
             # Log detailed growth information for debugging at less frequent intervals
-            if current_step % 50000 == 0 or (trade_occurred and current_step % 5000 == 0):
+            if current_step % 100000 == 0 or (trade_occurred and current_step % 10000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
             growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0
             risk_adjusted_reward += growth_reward
@@ -810,13 +810,13 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 self.cumulative_risk += self.max_risk_per_trade
                 
             # Only log risk management metrics when there's a trade or periodically
-            if trade_occurred:
+            if trade_occurred and (current_step % 10000 == 0 or self.cumulative_risk % 0.01 < 0.001):
                 portfolio_value_str = f"{portfolio_value:.2f}" if portfolio_value is not None else "unknown"
                 logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
                            f"Portfolio value: {portfolio_value_str}")
         
-        # Every 1000 steps, log action distribution
-        if current_step % 10000 == 0:
+        # Log action distribution less frequently
+        if current_step % 50000 == 0:
             action_counts = {}
             for a in self.action_history[-1000:]:
                 if a is not None:
@@ -1310,7 +1310,7 @@ def train_dqn(env, args, callbacks=None):
     target_update_interval = args.target_update_interval
     
     # Create tensorboard callback
-    tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=1000)
+    tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=10000)
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -1400,7 +1400,7 @@ def train_ppo(env, args, callbacks=None):
     clip_range = args.clip_range
     
     # Create tensorboard callback
-    tb_callback = TensorboardCallback(verbose=1, model_name="PPO", debug_frequency=1000)
+    tb_callback = TensorboardCallback(verbose=1, model_name="PPO", debug_frequency=10000)
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -1489,7 +1489,7 @@ def train_a2c(env, args, callbacks=None):
     logger.info(f"Using entropy coefficient: {ent_coef} to encourage action exploration")
     
     # Create tensorboard callback
-    tb_callback = TensorboardCallback(verbose=1, model_name="A2C", debug_frequency=1000)
+    tb_callback = TensorboardCallback(verbose=1, model_name="A2C", debug_frequency=10000)
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -1627,7 +1627,7 @@ def train_sac(env, args, callbacks=None):
     target_update_interval = args.target_update_interval
     
     # Create tensorboard callback
-    tb_callback = TensorboardCallback(verbose=1, model_name="SAC", debug_frequency=1000)
+    tb_callback = TensorboardCallback(verbose=1, model_name="SAC", debug_frequency=10000)
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
