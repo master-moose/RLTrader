@@ -657,8 +657,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
 class TensorboardCallback(BaseCallback):
     """Custom callback for tracking metrics during training"""
     
-    def __init__(self, verbose=0):
+    def __init__(self, verbose=0, model_name=None, debug_frequency=250):
         super().__init__(verbose)
+        # Save model name for logging
+        self.model_name = model_name
+        
         # Environment metrics
         self.returns = []
         self.portfolio_values = []
@@ -679,12 +682,14 @@ class TensorboardCallback(BaseCallback):
         
         # Debug counter
         self.debug_steps = 0
-        self.debug_frequency = 250  # Increased frequency from 1000 to 250 steps
+        self.debug_frequency = debug_frequency  # Use the parameter value
         self.last_debug_output = 0
         
         # Add step timing for performance monitoring
         self.last_time = time.time()
         self.steps_since_last_log = 0
+        
+        logger.info(f"TensorboardCallback initialized for model {model_name} with debug frequency {debug_frequency}")
     
     def _on_step(self) -> bool:
         """Called at each step"""
@@ -1153,6 +1158,15 @@ def load_lstm_model(model_path):
     return None
 
 
+def create_checkpoint_dir(model_name):
+    """Create a directory for model checkpoints"""
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    checkpoint_dir = os.path.join('checkpoints', f"{model_name}_{timestamp}")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    logger.info(f"Created checkpoint directory: {checkpoint_dir}")
+    return checkpoint_dir
+
+
 def train_dqn(env, args, callbacks=None):
     """Train a DQN model with specified parameters."""
     # Create checkpoint directory
@@ -1201,9 +1215,10 @@ def train_dqn(env, args, callbacks=None):
     
     # Train model
     try:
+        logger.info(f"Starting DQN training for {args.timesteps} timesteps")
         model.learn(
             total_timesteps=args.timesteps,
-            callback=callback,
+            callback=callbacks,  # Fix: Use callbacks list instead of undefined callback
             tb_log_name="dqn_run",
             log_interval=25  # Log more frequently - every 25 updates
         )
@@ -1286,10 +1301,10 @@ def train_ppo(env, args, callbacks=None):
     
     # Train model with standard approach
     try:
-        logger.info(f"Training PPO model for {args.timesteps} timesteps...")
+        logger.info(f"Starting PPO training for {args.timesteps} timesteps")
         model.learn(
             total_timesteps=args.timesteps,
-            callback=callback,
+            callback=callbacks,  # Fix: Use callbacks list instead of undefined callback
             tb_log_name="ppo_run",
             log_interval=25  # Log more frequently - every 25 updates
         )
@@ -1385,10 +1400,10 @@ def train_a2c(env, args, callbacks=None):
     
     # Train model
     try:
-        logger.info(f"Training A2C model for {args.timesteps} timesteps...")
+        logger.info(f"Starting A2C training for {args.timesteps} timesteps")
         model.learn(
             total_timesteps=args.timesteps,
-            callback=callback,
+            callback=callbacks,  # Fix: Use callbacks list instead of undefined callback
             tb_log_name="a2c_run_1",  # Changed to include "1" to ensure uniqueness
             log_interval=25  # Log more frequently - every 25 updates
         )
@@ -1478,10 +1493,10 @@ def train_sac(env, args, callbacks=None):
     
     # Train model
     try:
-        logger.info(f"Training SAC model for {args.timesteps} timesteps...")
+        logger.info(f"Starting SAC training for {args.timesteps} timesteps")
         model.learn(
             total_timesteps=args.timesteps,
-            callback=callback,
+            callback=callbacks,  # Fix: Use callbacks list instead of undefined callback
             tb_log_name="sac_run_1",
             log_interval=25  # Log more frequently
         )
@@ -1779,16 +1794,17 @@ def main():
         
         # Train according to selected algorithm
         if args.finrl_model.lower() == "dqn":
-            trained_model = train_dqn(vec_env, args)
+            logger.info("Training DQN agent")
+            trained_model = train_dqn(vec_env, args, [resource_callback])  # Pass resource_callback
         elif args.finrl_model.lower() == "ppo":
-            trained_model = train_ppo(vec_env, args)
-        elif args.finrl_model.lower() == "a2c":
-            trained_model = train_a2c(vec_env, args)
+            logger.info("Training PPO agent")
+            trained_model = train_ppo(vec_env, args, [resource_callback])  # Pass resource_callback
         elif args.finrl_model.lower() == "sac":
-            trained_model = train_sac(vec_env, args)
-        else:
-            logger.error(f"Unknown model type: {args.finrl_model}")
-            return
+            logger.info("Training SAC agent")
+            trained_model = train_sac(vec_env, args, [resource_callback])  # Pass resource_callback
+        else:  # Default to A2C
+            logger.info("Training A2C agent")
+            trained_model = train_a2c(vec_env, args, [resource_callback])  # Pass resource_callback
         
         logger.info("Training completed successfully")
         
