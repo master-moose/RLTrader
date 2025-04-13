@@ -1050,6 +1050,231 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         return model
 
+def setup_finrl_import():
+    """Setup import for FinRL DRLAgent with version detection"""
+    global DRLAgent
+    
+    try:
+        # Try the new import path first (FinRL 0.3.7+)
+        from finrl.agents.stablebaselines3.models import DRLAgent
+        logger.info("Using FinRL 0.3.7+ import path for DRLAgent")
+        
+        # Try to detect API details
+        try:
+            from inspect import signature
+            init_sig = signature(DRLAgent.__init__)
+            logger.info(f"DRLAgent.__init__ signature: {init_sig}")
+        except Exception as e:
+            logger.warning(f"Could not inspect DRLAgent.__init__ signature: {e}")
+        
+        return DRLAgent
+    except ImportError:
+        try:
+            # Try the newest FinRL import path (as of 2024+)
+            from finrl.applications.agents.drl_agents import DRLAgent
+            logger.info("Using FinRL latest import path (applications.agents) for DRLAgent")
+            
+            # Try to detect API details
+            try:
+                from inspect import signature
+                init_sig = signature(DRLAgent.__init__)
+                logger.info(f"DRLAgent.__init__ signature: {init_sig}")
+            except Exception as e:
+                logger.warning(f"Could not inspect DRLAgent.__init__ signature: {e}")
+            
+            return DRLAgent
+        except ImportError:
+            try:
+                # Fall back to older path (FinRL <= 0.3.5)
+                from finrl.agents.drl_agent import DRLAgent
+                logger.info("Using FinRL <= 0.3.5 import path for DRLAgent")
+                
+                # Try to detect API details
+                try:
+                    from inspect import signature
+                    init_sig = signature(DRLAgent.__init__)
+                    logger.info(f"DRLAgent.__init__ signature: {init_sig}")
+                except Exception as e:
+                    logger.warning(f"Could not inspect DRLAgent.__init__ signature: {e}")
+                
+                return DRLAgent
+            except ImportError:
+                logger.error("Could not import DRLAgent from any known FinRL paths")
+                return None
+
+
+# Get the DRLAgent class
+OriginalDRLAgent = setup_finrl_import()
+
+# Create our own derived DRLAgent class to bypass patching
+class CustomDRLAgent:
+    """
+    A custom DRLAgent that bypasses the patching mechanism in Stable-Baselines3.
+    This avoids the gym.spaces.Sequence compatibility issue.
+    """
+    def __init__(self, env, verbose=1):
+        """
+        Initialize the agent with the given environment.
+        
+        Args:
+            env: The environment to use
+            verbose: Verbosity level
+        """
+        # Check if OriginalDRLAgent was successfully imported
+        if OriginalDRLAgent is None:
+            logger.error("Cannot initialize CustomDRLAgent - FinRL's DRLAgent not found")
+            raise ImportError("FinRL's DRLAgent could not be imported. Please install FinRL first.")
+            
+        # Set default net_arch attribute that might be missing from parent class
+        self.net_arch = [256, 256]
+        self.env = env
+        self.verbose = verbose
+        
+        # Initialize the original agent
+        try:
+            # Try with verbose parameter first
+            self.agent = OriginalDRLAgent(env=env, verbose=verbose)
+        except TypeError:
+            # Fall back to just env if verbose is not accepted
+            self.agent = OriginalDRLAgent(env=env)
+            logger.info("DRLAgent parent class doesn't accept verbose parameter, using default initialization")
+    
+    def get_model(self, model_name, model_kwargs=None):
+        """
+        Create model without applying any patching to the environment.
+        
+        Args:
+            model_name: Name of the RL model
+            model_kwargs: Arguments for the model
+            
+        Returns:
+            Model instance
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+            
+        # If we have the original agent, delegate to it with our wrapped methods
+        if hasattr(self, 'agent') and self.agent is not None:
+            try:
+                logger.info(f"Delegating model creation to original DRLAgent for {model_name}")
+                # Patch get_model to avoid patching
+                original_get_model = self.agent.get_model
+                
+                # Try to get the model from the original agent
+                model = original_get_model(model_name, model_kwargs)
+                return model
+            except Exception as e:
+                logger.warning(f"Error delegating to original agent: {e}")
+                # Fall through to our manual implementation
+        
+        # Import MODELS dictionary from finrl with better error handling
+        try:
+            # Try the main path first
+            from finrl.agents.stablebaselines3.models import MODELS
+            logger.info("Imported MODELS dictionary from finrl.agents.stablebaselines3.models")
+        except ImportError:
+            try:
+                # Try alternate path (newer versions)
+                from finrl.applications.agents.stablebaselines3.models import MODELS
+                logger.info("Imported MODELS dictionary from finrl.applications.agents.stablebaselines3.models")
+            except ImportError:
+                try:
+                    # Last resort for very old versions
+                    from finrl.model.models import MODELS
+                    logger.info("Imported MODELS dictionary from finrl.model.models")
+                except ImportError:
+                    raise ImportError("Could not import MODELS dictionary from any known FinRL paths")
+            
+        # Use the environment directly without patching
+        env = self.env
+        
+        # Add common params for all models
+        model_kwargs.update({
+            "env": env,
+            "verbose": self.verbose,
+            "policy": "MlpPolicy",
+            "policy_kwargs": {"net_arch": self.net_arch},
+        })
+        
+        # Get the model class
+        if model_name not in MODELS:
+            raise NotImplementedError(f"Model {model_name} not supported. Available models: {list(MODELS.keys())}")
+            
+        # Create model instance with original init method but with special handling for env
+        model_class = MODELS[model_name]
+        
+        # Special handling for different model types
+        if model_name.lower() == 'sac':
+            # SAC has different parameters - try to create it directly from Stable-Baselines3
+            try:
+                from stable_baselines3 import SAC
+                logger.info("Creating SAC model directly from stable_baselines3")
+                
+                # Add SAC-specific parameters if not present
+                if 'buffer_size' in model_kwargs and 'replay_buffer_class' not in model_kwargs:
+                    from stable_baselines3.common.buffers import ReplayBuffer
+                    model_kwargs['replay_buffer_class'] = ReplayBuffer
+                
+                # Create the model directly
+                model = SAC(**model_kwargs)
+                return model
+            except Exception as e:
+                logger.warning(f"Failed to create SAC directly, falling back to FinRL approach: {e}")
+                # Fall back to normal approach
+        
+        # Monkey patch the _wrap_env method to disable patching
+        original_wrap_env = model_class._wrap_env if hasattr(model_class, '_wrap_env') else None
+        
+        if original_wrap_env:
+            def no_patch_wrap_env(self, env, verbose=0, monitor_wrapper=True):
+                """Do not apply any patching to the environment"""
+                # Skip the patching completely - return env directly
+                return env
+                
+            # Apply monkey patch
+            model_class._wrap_env = no_patch_wrap_env
+        
+        # Create model
+        try:
+            logger.info(f"Creating {model_name} model with kwargs: {model_kwargs}")
+            model = model_class(**model_kwargs)
+        except TypeError as e:
+            logger.error(f"TypeError creating {model_name} model: {e}")
+            
+            # Special handling for common errors
+            if "unexpected keyword argument" in str(e):
+                # Identify problematic args and remove them
+                problematic_arg = str(e).split("unexpected keyword argument '")[1].split("'")[0]
+                logger.info(f"Removing problematic argument: {problematic_arg}")
+                if problematic_arg in model_kwargs:
+                    del model_kwargs[problematic_arg]
+                    # Try again with cleaned args
+                    model = model_class(**model_kwargs)
+            else:
+                # Log the model parameters and expected signature
+                try:
+                    from inspect import signature
+                    logger.info(f"Expected signature: {signature(model_class.__init__)}")
+                    logger.info(f"Model kwargs: {model_kwargs}")
+                except Exception:
+                    pass
+                raise
+        except Exception as e:
+            logger.error(f"Error creating {model_name} model: {e}")
+            # Log the model parameters and expected signature
+            try:
+                from inspect import signature
+                logger.info(f"Expected signature: {signature(model_class.__init__)}")
+                logger.info(f"Model kwargs: {model_kwargs}")
+            except Exception:
+                pass
+            raise
+        
+        # Restore original method
+        if original_wrap_env:
+            model_class._wrap_env = original_wrap_env
+        
+        return model
 
 def train_with_finrl(
     df,
