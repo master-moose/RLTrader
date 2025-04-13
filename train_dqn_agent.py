@@ -593,34 +593,63 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             
         return next_state, reward, done, info
         
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """
-        Override reset to initialize trading variables
+        Override the reset method to handle observation shape adjustment
+        during environment reset while supporting the seed parameter.
+        
+        Args:
+            seed: Random seed or list of seeds, one per env
+            options: Optional configuration for reset
+            
+        Returns:
+            numpy.ndarray: Observations from all environments
         """
-        self._last_trade_step = None
-        self._last_trade_price = {}
-        self.info_buffer = {}
-        self.current_step = 0
-        self.rapid_trade_attempts = 0
-        self.consecutive_attempts = 0
-        self.post_trade_frozen = False
-        self.frozen_until_step = 0
-        self.action_history = []
-        self.position_history = []
-        self.last_positions = []
-        self.oscillation_counter = 0
+        # Set up seeds if provided
+        if seed is not None:
+            if isinstance(seed, int):
+                seeds = [seed + idx for idx in range(self.num_envs)]
+            else:
+                seeds = seed
+            self._seeds = seeds
+        else:
+            self._seeds = [None] * self.num_envs
         
-        # Reset new tracking variables
-        self.last_position = None
-        self.last_action = None
-        self.last_trade_prices = {}
-        self.last_position_values = {}
+        # Store reset infos if environment returns them
+        self.reset_infos = [{} for _ in range(self.num_envs)]
         
-        # Ensure clean state
-        logger.info("Resetting PatchedStockTradingEnv - all trading variables initialized")
+        for env_idx in range(self.num_envs):
+            # Call reset with appropriate seed
+            maybe_options = {} if options is None else options
+            try:
+                # Try new-style reset (returns obs, info)
+                result = self.envs[env_idx].reset(seed=self._seeds[env_idx], **maybe_options)
+                
+                # Check if result is a tuple (obs, info)
+                if isinstance(result, tuple) and len(result) == 2:
+                    obs, info = result
+                    self.reset_infos[env_idx] = info
+                else:
+                    # Fall back to old-style reset (returns just obs)
+                    obs = result
+                    
+            except TypeError:
+                # Fallback for environments that don't accept seed
+                logger.warning(f"Environment {env_idx} reset() doesn't accept seed parameter, falling back")
+                obs = self.envs[env_idx].reset()
+                
+            # Log observation shape for the first environment
+            if env_idx == 0:
+                logger.info(f"Environment reset returned observation with shape: {np.shape(obs)}")
+                
+                # Check for shape mismatch
+                if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
+                    logger.warning(f"Observation shape mismatch in reset: {len(obs)} vs expected {self.observation_space.shape[0]}")
+            
+            # Store the observation (with dimension adjustment if needed)
+            self._save_obs(env_idx, obs)
         
-        # Call parent reset
-        return super().reset()
+        return self._obs_from_buf()
     
     def _calculate_reward(self, begin_total_asset, end_total_asset, attempted_trade_during_cooldown=False):
         """
@@ -795,25 +824,62 @@ class DimensionAdjustingVecEnv(DummyVecEnv):
                 if isinstance(obs, dict):
                     self.buf_obs[key][env_idx] = obs[key]
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
         """
         Override the reset method to handle observation shape adjustment
-        during environment reset.
-        """
-        for env_idx in range(self.num_envs):
-            obs = self.envs[env_idx].reset()
+        during environment reset while supporting the seed parameter.
+        
+        Args:
+            seed: Random seed or list of seeds, one per env
+            options: Optional configuration for reset
             
-            # Log the observation shape for the first environment
+        Returns:
+            numpy.ndarray: Observations from all environments
+        """
+        # Set up seeds if provided
+        if seed is not None:
+            if isinstance(seed, int):
+                seeds = [seed + idx for idx in range(self.num_envs)]
+            else:
+                seeds = seed
+            self._seeds = seeds
+        else:
+            self._seeds = [None] * self.num_envs
+        
+        # Store reset infos if environment returns them
+        self.reset_infos = [{} for _ in range(self.num_envs)]
+        
+        for env_idx in range(self.num_envs):
+            # Call reset with appropriate seed
+            maybe_options = {} if options is None else options
+            try:
+                # Try new-style reset (returns obs, info)
+                result = self.envs[env_idx].reset(seed=self._seeds[env_idx], **maybe_options)
+                
+                # Check if result is a tuple (obs, info)
+                if isinstance(result, tuple) and len(result) == 2:
+                    obs, info = result
+                    self.reset_infos[env_idx] = info
+                else:
+                    # Fall back to old-style reset (returns just obs)
+                    obs = result
+                    
+            except TypeError:
+                # Fallback for environments that don't accept seed
+                logger.warning(f"Environment {env_idx} reset() doesn't accept seed parameter, falling back")
+                obs = self.envs[env_idx].reset()
+                
+            # Log observation shape for the first environment
             if env_idx == 0:
                 logger.info(f"Environment reset returned observation with shape: {np.shape(obs)}")
                 
-                # Check if there's a shape mismatch with the observation space
+                # Check for shape mismatch
                 if isinstance(obs, np.ndarray) and len(obs) != self.observation_space.shape[0]:
                     logger.warning(f"Observation shape mismatch in reset: {len(obs)} vs expected {self.observation_space.shape[0]}")
             
             # Store the observation (with dimension adjustment if needed)
             self._save_obs(env_idx, obs)
-            
+        
         return self._obs_from_buf()
 
 # Add this class after the BaseStockTradingEnv
