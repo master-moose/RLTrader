@@ -242,8 +242,9 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.rapid_trade_attempts = 0
         self.consecutive_attempts = 0
         
-        # Force hold actions for initial period to prevent early rapid trades
-        self.initial_forced_hold_period = 2000  # Increased from 500 to 2000
+        # Force holding period during initialization
+        # Increased from default to allow better observation of market conditions
+        self.initial_forced_hold_period = kwargs.pop('initial_forced_hold_period', 5000)
         
         # Add frozen period after trades where only holds are allowed
         self.post_trade_frozen = False
@@ -545,16 +546,16 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Apply penalty for attempted rapid trading
         if attempted_trade_during_cooldown:
             # Apply an extremely severe penalty for rapid trading attempts
-            # Increase penalty to 500% of asset value
-            penalty = -5.0 * end_total_asset * self.reward_scaling
+            # Increase penalty to 1000% of asset value (stronger than before)
+            penalty = -10.0 * end_total_asset * self.reward_scaling
             
             # Increase penalty for consecutive attempts
             if self.consecutive_attempts > 20:
-                penalty *= 10.0  # 10x penalty for persistent attempts
+                penalty *= 20.0  # 20x penalty for persistent attempts (doubled)
             elif self.consecutive_attempts > 10:
-                penalty *= 5.0  # 5x penalty for many consecutive attempts
+                penalty *= 10.0  # 10x penalty for many consecutive attempts (doubled)
             elif self.consecutive_attempts > 5:
-                penalty *= 3.0  # Triple penalty for persistent attempts
+                penalty *= 5.0  # 5x penalty for persistent attempts (increased)
             
             # Ensure penalty is applied immediately in the reward
             base_reward += penalty
@@ -568,20 +569,28 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             
             # Check for oscillation patterns (buy-sell-buy-sell or sell-buy-sell-buy)
             if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
-                # Apply extremely severe oscillation penalty (even more than rapid trading)
-                oscillation_penalty = -15.0 * end_total_asset * self.reward_scaling
+                # Apply extremely severe oscillation penalty (even more than before)
+                oscillation_penalty = -50.0 * end_total_asset * self.reward_scaling
                 base_reward += oscillation_penalty
                 logger.warning(f"Applied oscillation penalty at step {self.current_step}: {oscillation_penalty:.6f}")
+                
+                # Extend frozen period even more drastically
+                self.post_trade_frozen = True
+                self.frozen_until_step = self.current_step + 30000  # 50% longer frozen period
                 
             # Detect less obvious oscillation (alternating positions with some holds in between)
             elif len(set(last_four)) > 1 and 0 in last_four and 2 in last_four:
                 # Count non-hold actions
                 non_hold_count = sum(1 for a in last_four if a != 1)
                 if non_hold_count >= 2:
-                    # Apply moderate oscillation penalty
-                    oscillation_penalty = -5.0 * end_total_asset * self.reward_scaling
+                    # Apply much stronger moderate oscillation penalty
+                    oscillation_penalty = -20.0 * end_total_asset * self.reward_scaling
                     base_reward += oscillation_penalty
                     logger.info(f"Applied moderate oscillation penalty: {oscillation_penalty:.6f}")
+                    
+                    # Also add a shorter frozen period for moderate oscillation
+                    self.post_trade_frozen = True
+                    self.frozen_until_step = self.current_step + 10000
         
         return base_reward
         
@@ -1416,7 +1425,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         env_trade_cooldown = base_trade_cooldown + (1000 * (i % 5))  # Add 0, 1000, 2000, 3000, 4000 steps in a cycle
         
         # Increase the initial hold period as well
-        env_initial_hold = 2000 + (500 * (i % 4))  # Add 0, 500, 1000, 1500 initial hold period
+        env_initial_hold = getattr(args, 'initial_forced_hold_period', 5000) + (500 * (i % 4))  # Add 0, 500, 1000, 1500 initial hold period
         
         logger.info(f"Environment {i}: Setting trade_cooldown={env_trade_cooldown}, initial_hold={env_initial_hold}")
         
@@ -2306,7 +2315,7 @@ def parse_args():
     parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps per update')
     parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs per update')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--reward_scaling', type=float, default=1e-4, help='Reward scaling factor')
+    parser.add_argument('--reward_scaling', type=float, default=1e-3, help='Reward scaling factor')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers')
     parser.add_argument('--num_envs_per_worker', type=int, default=1, help='Number of environments per worker')
     parser.add_argument('--normalize_observations', type=str, default='true', help='Whether to normalize observations')
@@ -2317,6 +2326,10 @@ def parse_args():
     # Add trade cooldown parameter
     parser.add_argument('--trade_cooldown', type=int, default=2000,
                       help='Number of steps to wait between trades (default: 2000)')
+    
+    # Add initial forced hold period parameter
+    parser.add_argument('--initial_forced_hold_period', type=int, default=5000,
+                      help='Number of steps to force hold at the beginning (default: 5000)')
     
     return parser.parse_args()
 
