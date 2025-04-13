@@ -225,7 +225,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
     def __init__(self, *args, **kwargs):
         self.debug_mode = kwargs.pop('debug_mode', False)
         # Increase default trade cooldown from 10 to 30 steps
-        self.trade_cooldown = kwargs.pop('trade_cooldown', 30)  # Default cooldown of 30 steps
+        self.trade_cooldown = kwargs.pop('trade_cooldown', 100)  # Default cooldown of 100 steps
         
         # Initialize trading tracking variables
         self._last_trade_step = None
@@ -358,10 +358,14 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         
         # Apply penalty for attempted rapid trading
         if attempted_trade_during_cooldown:
-            # Significant penalty to discourage rapid trading
-            rapid_trade_penalty = -0.01  # -1% of asset value
-            return base_reward + rapid_trade_penalty
-            
+            # Apply an extremely severe penalty for rapid trading attempts
+            # Increase from 50% to 90% penalty to absolutely discourage rapid trading
+            penalty = -0.9 * end_total_asset * self.reward_scaling
+            # Ensure penalty is applied immediately in the reward
+            base_reward += penalty
+            if self.debug_mode:
+                logger.info(f"Applied severe rapid trade penalty: {penalty:.6f}")
+        
         return base_reward
         
     def get_total_asset_value(self):
