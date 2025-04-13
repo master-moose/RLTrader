@@ -17,7 +17,7 @@ class CryptoTradingEnv(gymnasium.Env):
         df,
         window_size=100,
         initial_balance=10000,
-        commission=0.00075,  # Changed to 0.075%
+        transaction_fee=0.00075,  # Changed to transaction fee of 0.075%
         reward_scaling=0.01,
         use_position=True,
         oscillation_penalty=10.0,
@@ -40,8 +40,8 @@ class CryptoTradingEnv(gymnasium.Env):
             The number of previous time steps to include in the state
         initial_balance : float
             Starting balance in quote currency (e.g., USD)
-        commission : float
-            Trading commission as a decimal (e.g., 0.00075 for 0.075%)
+        transaction_fee : float
+            Trading fee as a decimal (e.g., 0.00075 for 0.075%)
         reward_scaling : float
             Scaling factor for the reward function
         use_position : bool
@@ -90,7 +90,7 @@ class CryptoTradingEnv(gymnasium.Env):
         self.df = df
         self.window_size = max(1, window_size)
         self.initial_balance = np.float32(max(100, initial_balance))  # Enforce reasonable minimum
-        self.commission = np.float32(max(0, min(0.1, commission)))  # Limit between 0 and 10%
+        self.transaction_fee = np.float32(max(0, min(0.1, transaction_fee)))  # Limit between 0 and 10%
         self.reward_scaling = np.float32(max(0.0001, min(1.0, reward_scaling)))  # Between 0.01% and 100%
         self.use_position = use_position
         self.oscillation_penalty = np.float32(max(0, oscillation_penalty))
@@ -206,7 +206,7 @@ class CryptoTradingEnv(gymnasium.Env):
         logger.info(
             f"Initialized environment with {total_features} features, "
             f"{num_technical_indicators} technical indicators, "
-            f"commission {self.commission*100:.3f}%, "
+            f"transaction fee {self.transaction_fee*100:.3f}%, "
             f"position size {self.position_size*100:.1f}%"
         )
     
@@ -370,10 +370,10 @@ class CryptoTradingEnv(gymnasium.Env):
             pnl = (price - entry_price) / entry_price
             # Calculate sale amount
             sale_amount = position_size * price
-            # Apply commission
-            commission_fee = sale_amount * self.commission
+            # Apply transaction fee
+            fee_amount = sale_amount * self.transaction_fee
             # Add to balance
-            net_sale_amount = sale_amount - commission_fee
+            net_sale_amount = sale_amount - fee_amount
             self.balance[0] += np.float32(net_sale_amount)
             # Log trade
             logger.debug(f"Closed LONG position at {price:.4f}: P&L {pnl*100:.2f}%, Amount {net_sale_amount:.2f}")
@@ -521,13 +521,13 @@ class CryptoTradingEnv(gymnasium.Env):
                 # Calculate sale amount
                 sale_amount = assets_to_sell * price
                 
-                # Apply commission
-                commission_fee = sale_amount * self.commission
-                # Ensure commission is reasonable
-                commission_fee = min(commission_fee, sale_amount * 0.5)  # Cap at 50% of sale
+                # Apply transaction fee
+                fee_amount = sale_amount * self.transaction_fee
+                # Ensure fee is reasonable
+                fee_amount = min(fee_amount, sale_amount * 0.5)  # Cap at 50% of sale
                 
-                # Add to balance (after commission)
-                self.balance[0] += np.float32(sale_amount - commission_fee)
+                # Add to balance (after fee)
+                self.balance[0] += np.float32(sale_amount - fee_amount)
                 
                 # Update assets owned
                 self.assets_owned[0] -= assets_to_sell
@@ -538,7 +538,7 @@ class CryptoTradingEnv(gymnasium.Env):
                 
                 # Record trade
                 self.trade_counts['sell'] += 1
-                logger.debug(f"SELL at {price:.4f}: {sale_amount:.2f} - {commission_fee:.2f} fee")
+                logger.debug(f"SELL at {price:.4f}: {sale_amount:.2f} - {fee_amount:.2f} fee")
         
         # BUY action
         elif action == 2:
@@ -552,13 +552,13 @@ class CryptoTradingEnv(gymnasium.Env):
                 # Calculate purchase amount
                 purchase_amount = min(units_to_buy * price, self.balance[0])
                 
-                # Apply commission
-                commission_fee = purchase_amount * self.commission
-                # Ensure commission is reasonable
-                commission_fee = min(commission_fee, purchase_amount * 0.5)  # Cap at 50% of purchase
+                # Apply transaction fee
+                fee_amount = purchase_amount * self.transaction_fee
+                # Ensure fee is reasonable
+                fee_amount = min(fee_amount, purchase_amount * 0.5)  # Cap at 50% of purchase
                 
-                # Recalculate assets bought after commission
-                assets_bought = (purchase_amount - commission_fee) / price
+                # Recalculate assets bought after fee
+                assets_bought = (purchase_amount - fee_amount) / price
                 
                 # Apply safety limits to prevent overflow
                 assets_bought = min(assets_bought, self.MAX_ASSET_UNITS)
@@ -584,7 +584,7 @@ class CryptoTradingEnv(gymnasium.Env):
                 
                 # Record trade
                 self.trade_counts['buy'] += 1
-                logger.debug(f"BUY at {price:.4f}: {assets_bought:.6f} units for {purchase_amount:.2f} - {commission_fee:.2f} fee")
+                logger.debug(f"BUY at {price:.4f}: {assets_bought:.6f} units for {purchase_amount:.2f} - {fee_amount:.2f} fee")
                 logger.debug(f"SL: {stop_loss_price:.4f} ({self.stop_loss_pct*100:.1f}%), TP: {take_profit_price:.4f} ({self.take_profit_pct*100:.1f}%)")
         
         # Record last action
