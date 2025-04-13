@@ -299,28 +299,41 @@ class CryptocurrencyTradingEnv(gym.Env):
             
             # Add a fixed bonus reward for selling regardless of profit/loss
             # This helps encourage the agent to take more sell actions
-            sell_bonus = 2.0  # Increased from 1.0 to 2.0 - double the fixed bonus for any sell action
+            sell_bonus = 3.0  # Increased from 2.0 to 3.0 - triple the fixed bonus for any sell action 
             reward += sell_bonus
             
             # Provide HIGHER rewards for proactive selling (before being forced)
             if original_action_type == action_type:  # This was a voluntary sell
-                proactive_bonus = 3.0  # Large bonus for proactive selling decisions
+                proactive_bonus = 4.0  # Increased from 3.0 to 4.0 for even stronger proactive sell incentive
                 reward += proactive_bonus
                 logger.info(f"Applied proactive sell bonus: +{proactive_bonus:.2f} at step {self.day}")
             # Log when forced sells happen
             else:
                 logger.warning(f"Forced sell at step {self.day} resulted in reward: {reward:.4f}")
         
-        # Add a small penalty for long holds to discourage excessive holding
-        if action_type == 1 and self.holding_counter > 3:  # Reduced from 5 to 3 - penalize holds even earlier
-            # Exponential penalty growth to strongly discourage long holds
-            hold_steps_over_limit = self.holding_counter - 3
-            hold_penalty = min(0.2 * (hold_steps_over_limit ** 1.5), 2.0)  # Stronger exponential growth with higher cap
+        # Add reward for buy actions to encourage more trading
+        elif action_type == 2:
+            # Add buy bonus to encourage more buying decisions
+            buy_bonus = 1.5  # New bonus for buy actions
+            reward += buy_bonus
+            logger.info(f"Applied buy bonus: +{buy_bonus:.2f} at step {self.day}")
+        
+        # Penalize holding to discourage excessive holding
+        elif action_type == 1:
+            # Reduce reward for holding (slight penalty)
+            hold_penalty = 0.2  # Small constant penalty for any hold action
             reward -= hold_penalty
             
-            # Log significant hold penalties
-            if hold_penalty > 0.1 or self.holding_counter > 5:  # Lower threshold to log more penalties
-                logger.warning(f"Applied hold penalty of {hold_penalty:.4f} after {self.holding_counter} steps of holding")
+            # Add a small penalty for long holds to discourage excessive holding
+            if self.holding_counter > 3:  # Penalize holds even earlier
+                # Exponential penalty growth to strongly discourage long holds
+                hold_steps_over_limit = self.holding_counter - 3
+                hold_penalty = min(0.2 * (hold_steps_over_limit ** 1.5), 2.0)  # Stronger exponential growth with higher cap
+                reward -= hold_penalty
+                
+                # Log significant hold penalties
+                if hold_penalty > 0.1 or self.holding_counter > 5:  # Lower threshold to log more penalties
+                    logger.warning(f"Applied hold penalty of {hold_penalty:.4f} after {self.holding_counter} steps of holding")
         
         # Clip reward to prevent extreme values, but with wider limits
         reward = np.clip(reward, -20.0, 20.0)  # Increased from -10.0/10.0 to -20.0/20.0
