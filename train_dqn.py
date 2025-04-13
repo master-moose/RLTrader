@@ -2053,11 +2053,13 @@ def main():
                         help="Trading commission (default: 0.001 or 0.1%)")
     parser.add_argument("--max_steps", type=int, default=20000,
                         help="Maximum steps per episode (default: 20000)")
+    parser.add_argument("--episode_length", type=int, default=None,
+                        help="Length of each episode in days (if None, defaults to 365 days or full dataset)")
     
     # Additional training parameters
     parser.add_argument("--learning_rate", type=float, default=0.0003, 
                         help="Learning rate")
-    parser.add_argument("--batch_size", type=int, default=2048, 
+    parser.add_argument("--batch_size", type=int, default=512, 
                         help="Batch size for training")
     parser.add_argument("--gamma", type=float, default=0.99, 
                         help="Discount factor")
@@ -2168,7 +2170,8 @@ def main():
         initial_balance=args.initial_balance,
         transaction_fee=args.commission,
         indicators=INDICATORS,
-        symbol=args.symbol
+        symbol=args.symbol,
+        episode_length=args.episode_length
     )
     
     # Log initial portfolio value
@@ -2201,7 +2204,8 @@ def main():
         "initial_balance": args.initial_balance,
         "transaction_fee": args.commission,
         "indicators": INDICATORS,
-        "symbol": args.symbol
+        "symbol": args.symbol,
+        "episode_length": args.episode_length
     }
     
     # Define function to create a wrapped environment
