@@ -2282,7 +2282,7 @@ def train_with_finrl(
             n_steps=n_steps,       # Larger batch size for better GPU utilization
             batch_size=batch_size, # Minibatch size for updates
             n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-            ent_coef=lambda progress: 0.05 * (1.0 - progress) + 0.01,  # Schedule from 0.05 to 0.01
+            ent_coef=0.01,  # Fixed value instead of schedule
             vf_coef=0.5,           # Reduced value function coefficient
             clip_range_vf=0.4,     # Enable value function clipping
             target_kl=0.02,        # Limit policy update size
@@ -2532,85 +2532,22 @@ def load_and_preprocess_market_data(args):
     return market_data, data_length
 
 def train_with_custom_dqn(args, market_data, data_length, device):
-    """Train a DQN agent using custom implementation."""
-    logger.info("Training with custom DQN implementation")
+    """
+    Train a custom DQN agent with the provided market data.
     
+    Args:
+        args: Command line arguments
+        market_data: DataFrame with market data
+        data_length: Length of market data
+        device: Device to use for training
+    
+    Returns:
+        Trained model or None
+    """
     # This would be a full implementation
     # For now, just return a placeholder
     logger.info("Custom DQN training not implemented yet, returning placeholder")
     return None
-
-def create_synthetic_data(tickers, start_date, end_date):
-    """
-    Create synthetic cryptocurrency data for training.
-    
-    Args:
-        tickers: List of cryptocurrency tickers
-        start_date: Start date for data generation
-        end_date: End date for data generation
-        
-    Returns:
-        DataFrame with synthetic market data
-    """
-    logger.info(f"Creating synthetic data for {tickers} from {start_date} to {end_date}")
-    
-    # Convert date strings to datetime objects
-    start = datetime.strptime(start_date, '%Y-%m-%d')
-    end = datetime.strptime(end_date, '%Y-%m-%d')
-    
-    # Generate date range
-    date_range = pd.date_range(start=start, end=end, freq='D')
-    
-    # Create empty dataframe
-    df_list = []
-    
-    # Generate synthetic data for each ticker
-    for ticker in tickers:
-        # Start with a base price
-        base_price = 10000 if ticker == 'BTC' else (2000 if ticker == 'ETH' else 500)
-        
-        # Add random walk with drift
-        np.random.seed(42)  # For reproducibility
-        returns = np.random.normal(0.001, 0.02, size=len(date_range))
-        
-        # Add some seasonality and trend
-        trend = np.linspace(0, 0.5, len(date_range))
-        seasonality = 0.1 * np.sin(np.linspace(0, 8 * np.pi, len(date_range)))
-        
-        # Combine components
-        price_factors = np.cumprod(1 + returns + trend * 0.001 + seasonality * 0.01)
-        prices = base_price * price_factors
-        
-        # Generate volume
-        volume = np.random.lognormal(10, 1, size=len(date_range)) * 1000
-        
-        # Create ticker dataframe
-        df_ticker = pd.DataFrame({
-            'date': date_range,
-            'tic': ticker,
-            'open': prices * 0.99,
-            'high': prices * 1.02,
-            'low': prices * 0.98,
-            'close': prices,
-            'volume': volume,
-            'day': date_range.day,
-            'month': date_range.month,
-            'year': date_range.year
-        })
-        
-        # Add to list
-        df_list.append(df_ticker)
-    
-    # Combine all tickers
-    df = pd.concat(df_list, ignore_index=True)
-    
-    # Set proper dtypes
-    df['date'] = pd.to_datetime(df['date'])
-    
-    # Sort by date and ticker
-    df = df.sort_values(['date', 'tic']).reset_index(drop=True)
-    
-    return df
 
 def ensure_technical_indicators(df, indicators):
     """
@@ -2818,10 +2755,35 @@ def main():
                     lstm_model = None
             except ImportError as e:
                 logger.error(f"Error importing required modules for LSTM: {e}")
+        
+        # Load existing data instead of generating synthetic data
+        if getattr(args, 'data_path', None):
+            logger.info(f"Loading market data from {args.data_path}")
+            try:
+                df = pd.read_csv(args.data_path)
+                logger.info(f"Loaded market data with shape {df.shape}")
                 
-        # Create synthetic data for training
-        df = create_synthetic_data(tickers, start_date, end_date)
-        logger.info(f"Created synthetic data with shape {df.shape}")
+                # Ensure date column is datetime
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+            except Exception as e:
+                logger.error(f"Failed to load market data: {e}")
+                logger.error(traceback.format_exc())
+                return
+        else:
+            logger.error("No data_path provided. Cannot proceed without market data.")
+            logger.error("Please provide --data_path argument pointing to your market data CSV file.")
+            return
+        
+        # Define necessary technical indicators
+        tech_indicators = [
+            'macd', 'rsi_14', 'cci_30', 'dx_30', 
+            'close_5_sma', 'close_10_sma', 'close_20_sma',
+            'volatility_30', 'volume_change'
+        ]
+        
+        # Ensure all technical indicators are present
+        df = ensure_technical_indicators(df, tech_indicators)
         
         # If we have a loaded LSTM model, add price predictions to data
         if lstm_model is not None and lstm_processor is not None:
@@ -2876,16 +2838,6 @@ def main():
                 logger.error(f"Error generating LSTM predictions: {e}")
                 logger.error(traceback.format_exc())
         
-        # Define necessary technical indicators
-        tech_indicators = [
-            'macd', 'rsi_14', 'cci_30', 'dx_30', 
-            'close_5_sma', 'close_10_sma', 'close_20_sma',
-            'volatility_30', 'volume_change'
-        ]
-        
-        # Ensure all technical indicators are present
-        df = ensure_technical_indicators(df, tech_indicators)
-        
         # Create a CryptocurrencyTradingEnv (our custom implementation)
         env_params = {
             'df': df,
@@ -2932,7 +2884,7 @@ def main():
                     n_steps=n_steps,       # Larger batch size for better GPU utilization
                     batch_size=batch_size, # Minibatch size for updates
                     n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-                    ent_coef=lambda progress: 0.05 * (1.0 - progress) + 0.01,  # Schedule from 0.05 to 0.01
+                    ent_coef=0.01,  # Fixed value instead of schedule
                     vf_coef=0.5,           # Reduced value function coefficient
                     clip_range_vf=0.4,     # Enable value function clipping
                     target_kl=0.02,        # Limit policy update size
@@ -2973,361 +2925,44 @@ def main():
                             logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
                         return True
                 
-                # Define callback to log metrics to tensorboard
-                class TensorboardCallback(BaseCallback):
-                    def __init__(self, verbose=0):
-                        super().__init__(verbose)
-                        # Episode tracking
-                        self.episode_rewards = []
-                        self.episode_lengths = []
-                        self.current_episode_reward = 0
-                        self.current_episode_length = 0
-                        
-                        # Portfolio tracking
-                        self.portfolio_values = []
-                        
-                        # Trade metrics tracking
-                        self.trade_count = 0
-                        self.successful_trades = 0
-                        self.failed_trades = 0
-                        self.total_profit = 0
-                        self.total_loss = 0
-                        self.action_counts = {'buy': 0, 'sell': 0, 'hold': 0}
-                        self.trade_returns = []
-                        self.trade_durations = []
-                        self.recent_trades = []  # List to track recent trades for trend analysis
-                        self.max_recent_trades = 100  # Maximum number of recent trades to keep
-                        
-                        # Position tracking
-                        self.current_position = 0
-                        self.entry_price = 0
-                        self.position_start_time = 0
-                        
-                        # Debug info
-                        self.debug_steps = 0
-                        self.last_debug_output = 0
-                        self.debug_frequency = 500  # Reduce logging frequency (was 5000)
-                        self.log_flush_frequency = 5000  # Flush logs more frequently (was 20000)
-                        
-                        logger.info("TensorboardCallback initialized - Will track trading metrics")
-                        print("TensorboardCallback initialized - Will track trading metrics and output to console")
-                    
-                    def _on_step(self):
-                        # Increment step counter for debugging
-                        self.debug_steps += 1
-                        
-                        # Debug output every N steps
-                        if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
-                            logger.info(f"Callback debugging at step {self.debug_steps}")
-                            print(f"\n--- Training progress: step {self.debug_steps} ---")
-                            
-                            # Print key metrics to console
-                            if len(self.episode_rewards) > 0:
-                                print(f"Recent reward mean: {np.mean(self.episode_rewards[-10:]):.4f}")
-                            
-                            if len(self.portfolio_values) > 0:
-                                print(f"Current portfolio value: {self.portfolio_values[-1]:.2f}")
-                            
-                            if self.trade_count > 0:
-                                win_rate = self.successful_trades / max(1, self.trade_count) * 100
-                                print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
-                                print(f"Action counts: {self.action_counts}")
-                            
-                            if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
-                                logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
-                            self.last_debug_output = self.debug_steps
-                        
-                        # Force tensorboard log flushing periodically
-                        if hasattr(self.logger, "dump_tabular") and self.debug_steps % self.log_flush_frequency == 0:
-                            self.logger.dump_tabular()
-                        
-                        # Track step reward
-                        if hasattr(self, 'locals') and 'rewards' in self.locals:
-                            rewards = self.locals['rewards']
-                            for i, reward in enumerate(rewards):
-                                # Update the current episode rewards
-                                self.current_episode_reward += reward
-                                self.current_episode_length += 1
-                                
-                                # Log environment info if available
-                                if 'infos' in self.locals and i < len(self.locals['infos']):
-                                    info = self.locals['infos'][i]
-                                    
-                                    # Initialize variables that might be used later to avoid UnboundLocalError
-                                    exit_price = 0
-                                    pnl = 0
-                                    trade_duration = 0
-                                    
-                                    # Track portfolio value
-                                    if 'portfolio_value' in info:
-                                        self.portfolio_values.append(info['portfolio_value'])
-                                        self.logger.record('portfolio/value', info['portfolio_value'])
-                                    
-                                    # Track position
-                                    if 'position' in info:
-                                        position = info['position']
-                                        self.logger.record('portfolio/position', position)
-                                        
-                                        # Position change detection for trade tracking
-                                        if position != self.current_position:
-                                            # If we had a previous position, this is a trade exit
-                                            if self.current_position != 0:
-                                                trade_duration = self.debug_steps - self.position_start_time
-                                                self.trade_durations.append(trade_duration)
-                                                
-                                                # Initialize variables that might be used later
-                                                exit_price = 0
-                                                pnl = 0
-                                                
-                                                # Check if we have a price to calculate P&L
-                                                if 'close' in info:
-                                                    exit_price = info['close']
-                                                    pnl = (exit_price - self.entry_price) * self.current_position
-                                                    self.trade_returns.append(pnl)
-                                                    
-                                                    # Track trade result
-                                                    if pnl > 0:
-                                                        self.successful_trades += 1
-                                                        self.total_profit += pnl
-                                                        if self.debug_steps % self.debug_frequency == 0:
-                                                            logger.info(f"Successful trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
-                                                    else:
-                                                        self.failed_trades += 1
-                                                        self.total_loss += abs(pnl)
-                                                        if self.debug_steps % self.debug_frequency == 0:
-                                                            logger.info(f"Failed trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
-                                    
-                                    # Add to recent trades for trend analysis
-                                    self.recent_trades.append({
-                                        'entry_price': self.entry_price,
-                                        'exit_price': exit_price if 'close' in info else 0,
-                                        'position': self.current_position,
-                                        'duration': trade_duration,
-                                        'pnl': pnl if 'close' in info else 0
-                                    })
-                                    
-                                    # Keep only the most recent trades
-                                    if len(self.recent_trades) > self.max_recent_trades:
-                                        self.recent_trades.pop(0)
-                            
-                                # If new position is non-zero, this is a trade entry
-                                if position != 0:
-                                    self.trade_count += 1
-                                    if 'close' in info:
-                                        self.entry_price = info['close']
-                                        if self.debug_steps % self.debug_frequency == 0:
-                                            logger.info(f"Trade entry: position={position}, price={self.entry_price:.4f}")
-                                    self.position_start_time = self.debug_steps
-                                
-                                self.current_position = position
-                            
-                            # Track action type
-                            if 'action_type' in info:
-                                action_type = info['action_type']
-                                if action_type in self.action_counts:
-                                    self.action_counts[action_type] += 1
-                                self.logger.record(f'actions/{action_type}', self.action_counts.get(action_type, 0))
-                                
-                                # Debug output
-                                if self.debug_steps % (self.debug_frequency * 10) == 0:
-                                    logger.info(f"Action counts: {self.action_counts}")
-                            
-                            # Track trade metrics
-                            if 'trade_count' in info:
-                                self.logger.record('trades/count', info['trade_count'])
-                            if 'profit_loss' in info:
-                                self.logger.record('trades/profit_loss', info['profit_loss'])
-                        
-                        # Check if episode is done
-                        dones = self.locals.get('dones', [False])
-                        
-                        for j, done in enumerate(dones):
-                            if done and j == i:  # Only process the done signal if it corresponds to the current reward
-                                # Add the episode statistics
-                                self.episode_rewards.append(self.current_episode_reward)
-                                self.episode_lengths.append(self.current_episode_length)
-                                
-                                # Log episode statistics
-                                self.logger.record('episode/reward', self.current_episode_reward)
-                                self.logger.record('episode/length', self.current_episode_length)
-                                
-                                # Calculate and log running statistics
-                                if len(self.episode_rewards) > 0:
-                                    self.logger.record('episode/mean_reward', np.mean(self.episode_rewards[-100:]))
-                                    self.logger.record('episode/mean_length', np.mean(self.episode_lengths[-100:]))
-                                
-                                if len(self.portfolio_values) > 0:
-                                    self.logger.record('portfolio/final_value', self.portfolio_values[-1])
-                                    self.logger.record('portfolio/mean_value', np.mean(self.portfolio_values[-100:]))
-                                
-                                # Log trading metrics
-                                if self.trade_count > 0:
-                                    # Calculate win rate
-                                    win_rate = self.successful_trades / max(1, self.trade_count)
-                                    self.logger.record('trades/win_rate', win_rate)
-                                    
-                                    # Debug output
-                                    logger.info(f"Episode complete - Trading stats: trades={self.trade_count}, win_rate={win_rate:.4f}")
-                                    
-                                    # Profit factor (total profit / total loss)
-                                    profit_factor = self.total_profit / max(1e-6, self.total_loss)  # Avoid div by zero
-                                    self.logger.record('trades/profit_factor', profit_factor)
-                                    
-                                    # Average trade metrics
-                                    if len(self.trade_returns) > 0:
-                                        avg_return = np.mean(self.trade_returns)
-                                        self.logger.record('trades/avg_return', avg_return)
-                                        
-                                        # Average returns of winning and losing trades
-                                        winning_returns = [r for r in self.trade_returns if r > 0]
-                                        losing_returns = [r for r in self.trade_returns if r <= 0]
-                                        
-                                        if winning_returns:
-                                            self.logger.record('trades/avg_win', np.mean(winning_returns))
-                                        if losing_returns:
-                                            self.logger.record('trades/avg_loss', np.mean(losing_returns))
-                                        
-                                    # Average trade duration
-                                    if len(self.trade_durations) > 0:
-                                        avg_duration = np.mean(self.trade_durations)
-                                        self.logger.record('trades/avg_duration', avg_duration)
-                                    
-                                    # Trading consistency - using standard deviation of recent returns
-                                    if len(self.trade_returns) > 5:
-                                        returns_std = np.std(self.trade_returns[-20:])
-                                        self.logger.record('trades/returns_std', returns_std)
-                                    
-                                    # Action distribution
-                                    total_actions = sum(self.action_counts.values())
-                                    if total_actions > 0:
-                                        for action, count in self.action_counts.items():
-                                            self.logger.record(f'actions/{action}_pct', count / total_actions)
-                                
-                                # Log running totals
-                                self.logger.record('trades/total_count', self.trade_count)
-                                self.logger.record('trades/successful', self.successful_trades)
-                                self.logger.record('trades/failed', self.failed_trades)
-                                self.logger.record('trades/total_profit', self.total_profit)
-                                self.logger.record('trades/total_loss', self.total_loss)
-                                
-                                # Recent performance trend (last 20 trades vs previous 20)
-                                if len(self.trade_returns) >= 40:
-                                    recent_returns = np.mean(self.trade_returns[-20:])
-                                    previous_returns = np.mean(self.trade_returns[-40:-20])
-                                    trend = recent_returns - previous_returns
-                                    self.logger.record('trades/trend', trend)
-                                
-                                # Reset episode tracking
-                                self.current_episode_reward = 0
-                                self.current_episode_length = 0
-                        
-                        return True
-                
-                callbacks = [GPUMonitorCallback(), TensorboardCallback()]
-                if args.verbose and torch.cuda.is_available():
-                    callbacks.append(GPUMonitorCallback())
+                # Initialize callbacks
+                gpu_monitor = GPUMonitorCallback()
+                tensorboard_callback = TensorboardCallback()
+                callbacks = [gpu_monitor, tensorboard_callback]
                 
                 model.learn(total_timesteps=total_timesteps, callback=callbacks, tb_log_name=args.finrl_model.lower())
-            else:
-                # Default to DQN for discrete action spaces, regardless of what was specified for --finrl_model
-                # SAC specifically doesn't support discrete action spaces, so we'll use DQN instead
-                from stable_baselines3 import DQN
-                logger.info(f"Using DQN model for discrete action space (ignoring requested {args.finrl_model} which doesn't support discrete actions)")
-                model = DQN(
-                    'MlpPolicy', 
-                    vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0001),
-                    gamma=getattr(args, 'gamma', 0.99),
-                    verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs"
-                )
-        else:
-            # For continuous action spaces, use algorithms that support them
-            if args.finrl_model.lower() == 'sac':
-                logger.info("Training with SAC model")
-                # Use stable-baselines3 SAC directly
-                model = SAC(
-                    'MlpPolicy', 
-                    vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0003),
-                    gamma=getattr(args, 'gamma', 0.99),
-                    verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs"
-                )
-            elif args.finrl_model.lower() == 'ppo':
-                logger.info("Training with PPO model")
-                model = PPO(
-                    'MlpPolicy', 
-                    vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0003),
-                    gamma=getattr(args, 'gamma', 0.99),
-                    verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs",
-                    # Explicitly set these to float values to avoid TypeError
-                    ent_coef=0.0,
-                    vf_coef=0.5
-                )
-            elif args.finrl_model.lower() == 'ddpg':
-                logger.info("Training with DDPG model")
-                model = DDPG(
-                    'MlpPolicy', 
-                    vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0003),
-                    gamma=getattr(args, 'gamma', 0.99),
-                    verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs"
-                )
-            else:
-                logger.info("Using default TD3 model")
-                model = TD3(
-                    'MlpPolicy', 
-                    vec_env,
-                    learning_rate=getattr(args, 'learning_rate', 0.0003),
-                    gamma=getattr(args, 'gamma', 0.99),
-                    verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs"
-                )
-        
-        # Train the model
-        total_timesteps = getattr(args, 'timesteps', 50000)
-        logger.info(f"Training for {total_timesteps} timesteps with {vec_env.num_envs} environments...")
-        
-        # Log GPU usage during training
-        class GPUMonitorCallback(BaseCallback):
-            def __init__(self, verbose=0):
-                super().__init__(verbose)
-                self.step_count = 0
-            
-            def _on_step(self):
-                self.step_count += 1
-                if self.step_count % 1000 == 0 and torch.cuda.is_available():
-                    allocated = torch.cuda.memory_allocated() / 1024**2
-                    reserved = torch.cuda.memory_reserved() / 1024**2
-                    logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
-                return True
-        
-        callbacks = [GPUMonitorCallback(), TensorboardCallback()]
-        if args.verbose and torch.cuda.is_available():
-            callbacks.append(GPUMonitorCallback())
-        
-        model.learn(total_timesteps=total_timesteps, callback=callbacks, tb_log_name=args.finrl_model.lower())
-        
-        # Save the model
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
-        os.makedirs(model_path, exist_ok=True)
-        model.save(f"{model_path}/model")
-        logger.info(f"Model saved to {model_path}/model")
-        
-        # Save arguments used for training
-        with open(f"{model_path}/training_args.json", 'w') as f:
-            json.dump(vars(args), f, indent=4)
-        logger.info(f"Training arguments saved to {model_path}/training_args.json")
+                
+                # Save the model
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
+                os.makedirs(model_path, exist_ok=True)
+                model.save(f"{model_path}/model")
+                logger.info(f"Model saved to {model_path}/model")
+                
+                # Save arguments used for training
+                with open(f"{model_path}/training_args.json", 'w') as f:
+                    json.dump(vars(args), f, indent=4)
+                logger.info(f"Training arguments saved to {model_path}/training_args.json")
     
     else:
         # Use our custom DQN implementation
-        # This section remains unchanged...
-        pass
+        logger.info("Using custom DQN implementation")
+        
+        # Load market data from provided path
+        if getattr(args, 'data_path', None):
+            logger.info(f"Loading market data from {args.data_path}")
+            try:
+                market_data = pd.read_csv(args.data_path)
+                logger.info(f"Loaded market data with shape {market_data.shape}")
+                
+                # Call the custom DQN training function
+                train_with_custom_dqn(args, market_data, len(market_data), device)
+            except Exception as e:
+                logger.error(f"Failed to load market data or train custom DQN: {e}")
+                logger.error(traceback.format_exc())
+        else:
+            logger.error("No data_path provided. Cannot proceed without market data.")
+            logger.error("Please provide --data_path argument pointing to your market data CSV file.")
     
     # Log total execution time
     logger.info(f"Total execution time: {time.time() - start_time:.2f} seconds")
