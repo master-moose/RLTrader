@@ -707,8 +707,19 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Log when trades occur
         if trade_occurred:
-            logger.info(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
-            logger.info(f"Portfolio value: {portfolio_value:.2f}, Price: {current_price if current_price is not None else 'unknown'}")
+            # Get portfolio value from environment or info
+            portfolio_value = None
+            if hasattr(self.env, 'portfolio_value'):
+                portfolio_value = self.env.portfolio_value
+            elif 'portfolio_value' in info:
+                portfolio_value = info['portfolio_value']
+                
+            if portfolio_value is not None:
+                logger.info(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+                logger.info(f"Portfolio value: {portfolio_value:.2f}, Price: {current_price if current_price is not None else 'unknown'}")
+            else:
+                logger.info(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+                logger.info(f"Price: {current_price if current_price is not None else 'unknown'}")
         
         # Every 1000 steps, log action distribution
         if current_step % 1000 == 0:
