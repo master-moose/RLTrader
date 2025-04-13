@@ -1528,6 +1528,27 @@ def train_a2c(env, args, callbacks=None):
     """
     logger.info("Setting up A2C model with parameters from command line")
     
+    # Verify environment observation space dimensions
+    obs_space = env.observation_space
+    logger.info(f"Environment observation space: {obs_space.shape}")
+    
+    # If using a vec environment, check if all envs have the same observation shape
+    if hasattr(env, 'num_envs') and env.num_envs > 1:
+        logger.info(f"Validating observation space for {env.num_envs} environments")
+        # For VecEnv, we need to check the observation space consistency
+        try:
+            # Reset to get an initial observation from all environments
+            obs = env.reset()
+            if isinstance(obs, np.ndarray):
+                logger.info(f"Reset observation shape: {obs.shape}")
+                # Should be (num_envs, *obs_space.shape)
+                expected_shape = (env.num_envs,) + obs_space.shape[1:]
+                if obs.shape != expected_shape:
+                    logger.warning(f"Observation shape mismatch! Expected {expected_shape}, got {obs.shape}")
+        except Exception as e:
+            logger.error(f"Error validating environment observation space: {e}")
+            logger.error(traceback.format_exc())
+    
     # Get parameters from args
     learning_rate = args.learning_rate
     gamma = args.gamma
@@ -1999,16 +2020,58 @@ def main():
         "take_profit_pct": take_profit_pct  # Add take profit percentage
     }
     
-    # Define function to create a wrapped environment
+    # First create a sample environment to determine the observation space
+    logger.info("Creating sample environment to determine observation space")
+    sample_env = CryptocurrencyTradingEnv(**env_kwargs)
+    sample_wrapped = SafeTradingEnvWrapper(
+        sample_env,
+        trade_cooldown=args.trade_cooldown,
+        max_history_size=100,
+        max_risk_per_trade=0.02,
+        take_profit_pct=take_profit_pct
+    )
+    
+    # Get the observation space from the sample environment
+    base_obs_dim = sample_env.observation_space.shape[0]
+    wrapped_obs_dim = sample_wrapped.observation_space.shape[0]
+    
+    logger.info(f"Base observation space dimension: {base_obs_dim}")
+    logger.info(f"Wrapped observation space dimension: {wrapped_obs_dim}")
+    
+    # Close the sample environments to free resources
+    try:
+        sample_wrapped.close()
+        sample_env.close()
+        logger.info("Sample environments closed successfully")
+    except Exception as e:
+        logger.warning(f"Error closing sample environments: {e}")
+    
+    # Define function to create a wrapped environment with consistent observation space
     def make_env():
         base_env = CryptocurrencyTradingEnv(**env_kwargs)
+        
+        # Ensure the base environment observation space matches the expected dimension
+        if base_env.observation_space.shape[0] != base_obs_dim:
+            logger.warning(f"Base environment observation dimension mismatch: expected {base_obs_dim}, got {base_env.observation_space.shape[0]}")
+            # Fix by recreating the environment
+            base_env = CryptocurrencyTradingEnv(**env_kwargs)
+        
         # Verify initial balance
         logger.info(f"Vector env initialized with balance: {base_env.portfolio_value if hasattr(base_env, 'portfolio_value') else 'unknown'}")
+        
         safe_env = SafeTradingEnvWrapper(
             base_env, 
             trade_cooldown=args.trade_cooldown,
+            max_history_size=100,  # Ensure this is consistent across all environments
+            max_risk_per_trade=0.02,  # Add missing parameter
             take_profit_pct=take_profit_pct
         )
+        
+        # Verify observation space dimension is consistent
+        if safe_env.observation_space.shape[0] != wrapped_obs_dim:
+            logger.error(f"Observation dimension mismatch: expected {wrapped_obs_dim}, got {safe_env.observation_space.shape[0]}")
+            # This should not happen if SafeTradingEnvWrapper behaves consistently
+        
         time_limit_env = TimeLimit(safe_env, max_episode_steps=args.max_steps)
         return Monitor(time_limit_env, "logs/monitor/")
     
