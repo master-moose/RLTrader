@@ -37,6 +37,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         max_holding_steps: int = 8,  # Reduced from 10 to 8 for even more frequent forced selling
         episode_length: int = None,  # New parameter for episode length (in days)
         randomize_start: bool = True,  # Whether to randomize episode start points
+        candles_per_day: int = 1,  # Number of candles per day (1 for daily, 96 for 15-min)
         **kwargs
     ):
         """
@@ -56,6 +57,7 @@ class CryptocurrencyTradingEnv(gym.Env):
             max_holding_steps: Maximum number of steps to hold a position before forced selling
             episode_length: Length of each episode in days (if None, uses entire dataset)
             randomize_start: Whether to randomize the start date for each episode
+            candles_per_day: Number of candles representing one day (1 for daily, 96 for 15-min)
         """
         self.df = df
         self.day = 0
@@ -67,23 +69,31 @@ class CryptocurrencyTradingEnv(gym.Env):
         self.reward_scaling = reward_scaling
         self.print_verbosity = print_verbosity
         self.randomize_start = randomize_start
+        self.candles_per_day = max(1, candles_per_day)  # Ensure at least 1 candle per day
         
-        # Default episode length to 90 days (3 months) if not specified and if enough data
-        self.total_days = len(df.index.unique())
+        # Calculate actual days in the dataset
+        total_candles = len(df.index.unique())
+        self.total_days = total_candles // self.candles_per_day
+        logger.info(f"Dataset has {total_candles} candles, representing {self.total_days} days with {self.candles_per_day} candles per day")
+        
+        # Default episode length to 365 days (1 year) if not specified and if enough data
         if episode_length is None:
-            # Use 90 days or the full dataset, whichever is smaller
-            self.episode_length = min(90, self.total_days)
+            # Use 365 days or the full dataset, whichever is smaller
+            self.episode_length = min(365, self.total_days)
         else:
             self.episode_length = min(episode_length, self.total_days)
             
         # Make sure episode length is at least 30 days
         self.episode_length = max(30, self.episode_length)
         
+        # Calculate episode length in candles
+        self.episode_length_candles = self.episode_length * self.candles_per_day
+        
         # Calculate maximum start day to ensure full episodes
-        self.max_start_day = self.total_days - self.episode_length
+        self.max_start_day = max(0, total_candles - self.episode_length_candles)
         self.start_day = 0
         
-        logger.info(f"Episode length set to {self.episode_length} days (out of {self.total_days} total days)")
+        logger.info(f"Episode length set to {self.episode_length} days ({self.episode_length_candles} candles) out of {self.total_days} days ({total_candles} candles)")
         
         # Handle lists or floats for transaction costs
         if isinstance(buy_cost_pct, list):
@@ -144,7 +154,8 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Randomize start day if configured
         if self.randomize_start and self.max_start_day > 0:
             self.start_day = np.random.randint(0, self.max_start_day)
-            logger.info(f"Starting new episode from day {self.start_day} (out of {self.total_days})")
+            actual_day = self.start_day // self.candles_per_day
+            logger.info(f"Starting new episode from candle {self.start_day} (day {actual_day}) out of {len(self.df.index.unique())} candles")
         else:
             self.start_day = 0
         
@@ -208,7 +219,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         previous_portfolio_value = self.portfolio_value
         
         # Check if episode is done (reached end of episode length or end of data)
-        episode_end = self.day >= (self.start_day + self.episode_length)
+        episode_end = self.day >= (self.start_day + self.episode_length_candles)
         data_end = self.day >= len(self.df.index.unique())
         
         if episode_end or data_end:
@@ -229,7 +240,8 @@ class CryptocurrencyTradingEnv(gym.Env):
                 # Penalize ending with assets
                 asset_penalty = 0.5  # Penalty for not selling before end
                 reward -= asset_penalty
-                logger.warning(f"Episode ended with {self.assets_owned[0]:.2f} assets - applying penalty: -{asset_penalty:.2f}")
+                actual_day = (self.day // self.candles_per_day)
+                logger.warning(f"Episode ended on candle {self.day} (day {actual_day}) with {self.assets_owned[0]:.2f} assets - applying penalty: -{asset_penalty:.2f}")
             
             info = self._get_info()
             info['end_reason'] = 'episode_length' if episode_end else 'data_end'
@@ -712,6 +724,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         """
         # Include current price in info
         current_price = self._get_current_price()
+        actual_day = self.day // self.candles_per_day
         
         return {
             'portfolio_value': self.portfolio_value,
@@ -719,6 +732,7 @@ class CryptocurrencyTradingEnv(gym.Env):
             'cost': self.cost,
             'trades': self.trades,
             'day': self.day,
+            'actual_day': actual_day,
             'close_price': current_price,
             'holding_counter': self.holding_counter,
             'forced_sells': self.forced_sells
@@ -732,7 +746,8 @@ class CryptocurrencyTradingEnv(gym.Env):
             mode: Rendering mode
         """
         if self.print_verbosity > 0 and self.day % self.print_verbosity == 0:
-            print(f"Day: {self.day}, Portfolio Value: {self.portfolio_value}")
+            actual_day = self.day // self.candles_per_day
+            print(f"Candle: {self.day}, Day: {actual_day}, Portfolio Value: {self.portfolio_value}")
 
 # Make the class available outside
 StockTradingEnv = CryptocurrencyTradingEnv 

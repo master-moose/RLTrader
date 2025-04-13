@@ -1797,17 +1797,15 @@ def train_a2c(env, args, callbacks=None):
     # Get parameters from args
     learning_rate = args.learning_rate
     gamma = args.gamma
-    n_steps = args.n_steps
     ent_coef = args.ent_coef
-    batch_size = args.batch_size
     
-    # Adjust n_steps for more frequent updates if not explicitly set by user
-    # Smaller n_steps leads to more frequent updates
-    if n_steps == 2048:  # If using the default value
-        n_steps = 16384  # Use larger value for cryptocurrency trading as requested
-        logger.info(f"Adjusting n_steps from default 2048 to {n_steps} for cryptocurrency trading")
+    # Set n_steps to represent 1 year of 15-min candles (96 candles per day * 365 days)
+    n_steps = 35040
+    # Set batch_size to 2048 as requested
+    batch_size = 2048
     
-    # Log batch size being used
+    # Log the updated parameters
+    logger.info(f"Using n_steps={n_steps} (1 year of 15-min candles: 96 candles/day * 365 days)")
     logger.info(f"Using batch size: {batch_size} for A2C training")
     
     # Increase entropy coefficient significantly to encourage exploration
@@ -2070,16 +2068,16 @@ def main():
     # Additional training parameters
     parser.add_argument("--learning_rate", type=float, default=0.0003, 
                         help="Learning rate")
-    parser.add_argument("--batch_size", type=int, default=512, 
-                        help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=2048, 
+                        help="Batch size for training (default: 2048)")
     parser.add_argument("--gamma", type=float, default=0.99, 
                         help="Discount factor")
     parser.add_argument("--seed", type=int, default=None, 
                         help="Random seed")
     
     # PPO/A2C-specific parameters
-    parser.add_argument("--n_steps", type=int, default=512, 
-                        help="Number of steps per update for PPO/A2C")
+    parser.add_argument("--n_steps", type=int, default=35040, 
+                        help="Number of steps per update for PPO/A2C (default: 35040, representing 1 year of 15-min data)")
     parser.add_argument("--ent_coef", type=float, default=0.01, 
                         help="Entropy coefficient for PPO/A2C")
     parser.add_argument("--n_epochs", type=int, default=10, 
@@ -2176,13 +2174,19 @@ def main():
     
     # Create base environment
     logger.info("Creating base environment")
+    # Calculate candles per day for 15-minute data
+    CANDLES_PER_DAY = 96  # 24 hours * 4 candles per hour for 15-minute data
+
     base_env = CryptocurrencyTradingEnv(
         df=data,
-        initial_balance=args.initial_balance,
-        transaction_fee=args.commission,
-        indicators=INDICATORS,
-        symbol=args.symbol,
-        episode_length=args.episode_length
+        initial_amount=args.initial_balance,
+        buy_cost_pct=args.commission,
+        sell_cost_pct=args.commission,
+        state_space=16,
+        tech_indicator_list=INDICATORS,
+        episode_length=args.episode_length,
+        randomize_start=True,
+        candles_per_day=CANDLES_PER_DAY  # Add parameter to correctly interpret 15-min data
     )
     
     # Log initial portfolio value
@@ -2212,11 +2216,12 @@ def main():
     logger.info("Creating vectorized environment")
     env_kwargs = {
         "df": data,
-        "initial_balance": args.initial_balance,
-        "transaction_fee": args.commission,
-        "indicators": INDICATORS,
-        "symbol": args.symbol,
-        "episode_length": args.episode_length
+        "initial_amount": args.initial_balance, 
+        "buy_cost_pct": args.commission,
+        "sell_cost_pct": args.commission,
+        "tech_indicator_list": INDICATORS,
+        "episode_length": args.episode_length,
+        "candles_per_day": CANDLES_PER_DAY  # Add parameter to correctly interpret 15-min data
     }
     
     # Define function to create a wrapped environment
