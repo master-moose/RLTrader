@@ -296,7 +296,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Detect action oscillation (buy-sell-buy-sell pattern)
         if len(self.action_history) >= 4:
             last_four = self.action_history[-4:]
-            # Check for buy-sell-buy-sell (2-0-2-0) or sell-buy-sell-buy (0-2-0-2) patterns
+            # Check for strict buy-sell-buy-sell (2-0-2-0) or sell-buy-sell-buy (0-2-0-2) patterns
             if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
                 logger.warning(f"Detected action oscillation at step {self.current_step}: {last_four}")
                 # Force hold for oscillation and add extended frozen period
@@ -567,10 +567,11 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         if len(self.action_history) >= 4:
             last_four = self.action_history[-4:]
             
-            # Check for oscillation patterns (buy-sell-buy-sell or sell-buy-sell-buy)
+            # Check for strict oscillation patterns (buy-sell-buy-sell or sell-buy-sell-buy)
             if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
-                # Apply extremely severe oscillation penalty (even more than before)
-                oscillation_penalty = -50.0 * end_total_asset * self.reward_scaling
+                # Apply extremely severe oscillation penalty
+                # Make sure this is a significant value even after scaling
+                oscillation_penalty = -50.0  # Direct penalty value instead of scaling by asset
                 base_reward += oscillation_penalty
                 logger.warning(f"Applied oscillation penalty at step {self.current_step}: {oscillation_penalty:.6f}")
                 
@@ -578,19 +579,18 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 self.post_trade_frozen = True
                 self.frozen_until_step = self.current_step + 30000  # 50% longer frozen period
                 
-            # Detect less obvious oscillation (alternating positions with some holds in between)
-            elif len(set(last_four)) > 1 and 0 in last_four and 2 in last_four:
-                # Count non-hold actions
-                non_hold_count = sum(1 for a in last_four if a != 1)
-                if non_hold_count >= 2:
-                    # Apply much stronger moderate oscillation penalty
-                    oscillation_penalty = -20.0 * end_total_asset * self.reward_scaling
-                    base_reward += oscillation_penalty
-                    logger.info(f"Applied moderate oscillation penalty: {oscillation_penalty:.6f}")
-                    
-                    # Also add a shorter frozen period for moderate oscillation
-                    self.post_trade_frozen = True
-                    self.frozen_until_step = self.current_step + 10000
+            # Only detect much more strict patterns of oscillation to reduce false positives
+            elif last_four in ([2, 0, 1, 0], [0, 2, 1, 2], [2, 1, 0, 1], [0, 1, 2, 1]) and len(set(last_four)) > 2:
+                # Only penalize if there's a clear pattern of buy/sell with at most one hold
+                # Apply moderate oscillation penalty
+                # Use a direct penalty value instead of asset-scaled penalty to ensure it's significant
+                oscillation_penalty = -20.0  # Direct penalty value 
+                base_reward += oscillation_penalty
+                logger.info(f"Applied moderate oscillation penalty: {oscillation_penalty:.6f}")
+                
+                # Also add a shorter frozen period for moderate oscillation
+                self.post_trade_frozen = True
+                self.frozen_until_step = self.current_step + 10000
         
         return base_reward
         
