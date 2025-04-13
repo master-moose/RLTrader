@@ -24,6 +24,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import gymnasium
+import traceback
 from gymnasium import spaces
 from gymnasium.wrappers import TimeLimit
 from stable_baselines3 import DQN, PPO, A2C
@@ -1188,6 +1189,7 @@ def train_ppo(env, args):
             lstm_model = load_lstm_model(args.lstm_model_path)
         
         # Create PPO model with enhanced architecture and stability parameters
+        # Use a proper feature extractor setup for LSTM integration
         policy_kwargs = dict(
             # Larger network dimensions
             net_arch=[
@@ -1204,11 +1206,8 @@ def train_ppo(env, args):
         
         # Add LSTM features if model was loaded
         if lstm_model is not None:
-            # Update to use LSTM features
+            # Update to use LSTM features through the feature extractor
             logger.info("Integrating pre-trained LSTM model into policy network")
-            policy_kwargs['lstm_hidden_size'] = 64
-            policy_kwargs['enable_critic_lstm'] = True
-            policy_kwargs['lstm_model'] = lstm_model
             
             # Create custom feature extractor that uses the pre-trained LSTM
             policy_kwargs['features_extractor_class'] = LSTMAugmentedFeatureExtractor
@@ -1351,6 +1350,9 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
         # Calculate input size from observation space
         input_size = int(np.prod(observation_space.shape))
         
+        # We need robust handling of the LSTM adapter
+        self.lstm_adapter = None
+        
         # Create neural network to process features
         self.feature_net = nn.Sequential(
             nn.Linear(input_size, 256),
@@ -1360,31 +1362,47 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
             nn.Linear(128, features_dim)
         )
         
+        logger.info(f"Created feature extractor with input size {input_size}, output size {features_dim}")
+        
     def forward(self, observations):
+        """Extract features using the feature network and augment with LSTM if available"""
         # Extract features using the feature network
         features = self.feature_net(observations.float())
         
         # If we have an LSTM model, use it to enhance features
         if self.lstm_model is not None:
-            # Format the observations for the LSTM
-            with torch.no_grad():
-                lstm_features = self.lstm_model.forward_features(observations.float())
-            
-            # Combine the features
-            if lstm_features is not None:
-                # Ensure compatible sizes
-                if lstm_features.shape[0] == features.shape[0]:
+            try:
+                # Format the observations for the LSTM
+                with torch.no_grad():
+                    # Try to forward features through the LSTM model
+                    if hasattr(self.lstm_model, 'forward_features'):
+                        lstm_features = self.lstm_model.forward_features(observations.float())
+                    else:
+                        # Fall back to regular forward if forward_features is not available
+                        lstm_features, _ = self.lstm_model(observations.float())
+                
+                # Combine the features if LSTM processing was successful
+                if lstm_features is not None and lstm_features.size(0) == features.size(0):
                     # For simplicity, average the LSTM features if multi-dimensional
                     if len(lstm_features.shape) > 2:
                         lstm_features = lstm_features.mean(dim=1)
                     
                     # Resize if needed
                     if lstm_features.shape[1] != features.shape[1]:
-                        lstm_adapter = nn.Linear(lstm_features.shape[1], features.shape[1])
-                        lstm_features = lstm_adapter(lstm_features)
+                        if self.lstm_adapter is None:
+                            # Lazily create adapter when we know the dimensions
+                            self.lstm_adapter = nn.Linear(
+                                lstm_features.shape[1], 
+                                features.shape[1]
+                            ).to(features.device)
+                        lstm_features = self.lstm_adapter(lstm_features)
                     
                     # Add LSTM features to our features (weighted addition)
                     features = features + 0.5 * lstm_features
+            except Exception as e:
+                # Log error but continue with base features to be resilient
+                logger.warning(f"Error using LSTM model in feature extraction: {e}")
+                # Continue with the base features
         
         return features
         
