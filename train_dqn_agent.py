@@ -315,7 +315,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Add rapid trade penalty to reward components if available
         if attempted_trade_during_cooldown:
             reward_components = info.get('reward_components', {})
-            reward_components['rapid_trade_penalty'] = -0.01
+            reward_components['rapid_trade_penalty'] = -0.9
             info['reward_components'] = reward_components
         
         # Enhance info dictionary
