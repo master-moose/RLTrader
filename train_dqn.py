@@ -1004,6 +1004,11 @@ class TensorboardCallback(BaseCallback):
         self.oscillation_count = 0
         self.same_price_trades = 0
         
+        # Forced sell tracking
+        self.forced_sells = 0  # Track total forced sells
+        self.holding_steps_histogram = {}  # Track distribution of holding periods
+        self.last_holding_counter = 0  # Track the last holding counter
+        
         # Debug counter
         self.debug_steps = 0
         self.debug_frequency = debug_frequency  # Use the parameter value
@@ -1034,6 +1039,8 @@ class TensorboardCallback(BaseCallback):
             cooldown_violations = 0
             oscillation_count = 0
             trade_count = 0
+            holding_counter = 0
+            forced_sells = 0
             
             if self.locals is not None:
                 # Get rewards if available
@@ -1043,6 +1050,35 @@ class TensorboardCallback(BaseCallback):
                 # Get info from environment
                 if 'infos' in self.locals and len(self.locals['infos']) > 0:
                     info = self.locals['infos'][0]
+                    
+                    # Track holding counter for forced sell monitoring
+                    if 'holding_counter' in info:
+                        holding_counter = info['holding_counter']
+                        self.last_holding_counter = holding_counter
+                        
+                        # Update holding steps histogram
+                        if holding_counter > 0:
+                            if holding_counter not in self.holding_steps_histogram:
+                                self.holding_steps_histogram[holding_counter] = 0
+                            self.holding_steps_histogram[holding_counter] += 1
+                            
+                        # Log holding counter to tensorboard
+                        if hasattr(self, 'logger') and self.logger is not None:
+                            self.logger.record('trades/holding_counter', holding_counter)
+                    
+                    # Track forced sells
+                    if 'forced_sells' in info:
+                        current_forced_sells = info['forced_sells']
+                        if current_forced_sells > self.forced_sells:
+                            # A new forced sell occurred
+                            new_forced_sells = current_forced_sells - self.forced_sells
+                            logger.warning(f"Detected {new_forced_sells} new forced sell(s), total: {current_forced_sells}")
+                            self.forced_sells = current_forced_sells
+                            
+                            # Record forced sells in tensorboard
+                            if hasattr(self, 'logger') and self.logger is not None:
+                                self.logger.record('trades/forced_sells', self.forced_sells)
+                    
                     if 'portfolio_value' in info:
                         portfolio_value = info['portfolio_value']
                         
@@ -1092,6 +1128,10 @@ class TensorboardCallback(BaseCallback):
             action_counts_str = ", ".join([f"{action}: {count}" for action, count in self.action_counts.items() if count > 0])
             action_str = f", Actions: [{action_counts_str}]" if action_counts_str else ""
             
+            # Add holding counter and forced sells to logs
+            holding_str = f", Holding counter: {self.last_holding_counter}"
+            forced_sells_str = f", Forced sells: {self.forced_sells}"
+            
             # Add portfolio growth reporting
             growth_str = ""
             if self.starting_portfolio is not None and portfolio_value is not None and self.starting_portfolio > 0:
@@ -1108,11 +1148,42 @@ class TensorboardCallback(BaseCallback):
             if hasattr(self.model, 'exploration') and hasattr(self.model.exploration, 'value'):
                 exploration_str = f", Exploration: {self.model.exploration.value:.4f}"
             
-            metrics_str = f"Trade count: {self.trade_count}, Cooldown violations: {self.cooldown_violations}, Oscillations: {self.oscillation_count}"
+            metrics_str = f"Trade count: {self.trade_count}, Forced sells: {self.forced_sells}, Cooldown violations: {self.cooldown_violations}"
+            
+            # Log action distributions more frequently to track progress
+            if self.debug_steps % (self.debug_frequency) == 0:
+                # Action distribution table for clearer visibility
+                total_actions = sum(self.action_counts.values())
+                action_table = "Action Distribution:\n"
+                action_table += "-" * 40 + "\n"
+                action_table += "| Action | Count | Percentage |\n"
+                action_table += "-" * 40 + "\n"
+                
+                for action_name, action_id in {"Sell": 0, "Hold": 1, "Buy": 2}.items():
+                    count = self.action_counts.get(action_id, 0)
+                    percentage = (count / max(1, total_actions)) * 100
+                    action_table += f"| {action_name} | {count} | {percentage:.1f}% |\n"
+                
+                action_table += "-" * 40
+                logger.info(action_table)
+                
+                # Log holding periods histogram if there's data
+                if self.holding_steps_histogram:
+                    holding_table = "Holding Period Distribution:\n"
+                    holding_table += "-" * 40 + "\n"
+                    holding_table += "| Steps | Count |\n"  
+                    holding_table += "-" * 40 + "\n"
+                    
+                    for steps in sorted(self.holding_steps_histogram.keys()):
+                        count = self.holding_steps_histogram[steps]
+                        holding_table += f"| {steps} | {count} |\n"
+                        
+                    holding_table += "-" * 40
+                    logger.info(holding_table)
             
             # Only log basic metrics to console every 5th interval to reduce verbosity
             if self.debug_steps % (self.debug_frequency * 5) == 0:
-                logger.info(f"Step {self.debug_steps}, {steps_per_second:.1f} steps/s{portfolio_str}{reward_str}{action_str}{exploration_str}{growth_str}")
+                logger.info(f"Step {self.debug_steps}, {steps_per_second:.1f} steps/s{portfolio_str}{reward_str}{action_str}{exploration_str}{growth_str}{holding_str}{forced_sells_str}")
                 logger.info(f"Training metrics: {metrics_str}")
                 
                 # Show exploration/exploitation stats if available
@@ -1229,6 +1300,28 @@ class TensorboardCallback(BaseCallback):
                                 if self.trade_count > 0:
                                     avg_profit = (self.total_profit - self.total_loss) / self.trade_count
                                     self.logger.record('trades/avg_profit', avg_profit)
+                        
+                        # Track forced sells
+                        if 'forced_sells' in info:
+                            forced_sells = info['forced_sells']
+                            if forced_sells > self.forced_sells:
+                                # A new forced sell occurred in this episode
+                                self.forced_sells = forced_sells
+                                self.logger.record('trades/forced_sells', self.forced_sells)
+                                logger.warning(f"Episode ended with {self.forced_sells} total forced sells")
+                        
+                        # Track holding counter at episode end
+                        if 'holding_counter' in info:
+                            end_holding = info['holding_counter']
+                            self.logger.record('trades/episode_end_holding', end_holding)
+                            
+                        # Track episode ending portfolio growth
+                        if self.starting_portfolio is not None and self.starting_portfolio > 0:
+                            final_growth_pct = ((portfolio_value / self.starting_portfolio) - 1.0) * 100
+                            self.logger.record('portfolio/episode_end_growth_pct', final_growth_pct)
+                        
+                        # Log episode completion with portfolio value
+                        logger.info(f"Episode complete, reward: {reward:.2f}, portfolio: {portfolio_value:.2f}")
         
         return True
 
@@ -1354,13 +1447,25 @@ def train_dqn(env, args, callbacks=None):
     learning_rate = args.learning_rate
     batch_size = args.batch_size
     gamma = args.gamma
-    exploration_fraction = args.exploration_fraction
-    exploration_initial_eps = args.exploration_initial_eps
-    exploration_final_eps = args.exploration_final_eps
+    
+    # Override exploration parameters to increase exploration
+    # This encourages the agent to try more diverse actions including sell actions
+    exploration_fraction = 0.4  # Default is often 0.1, increasing to 0.4 extends exploration period
+    exploration_initial_eps = 1.0  # Start with 100% random actions
+    exploration_final_eps = 0.1  # Maintain higher exploration even after training
+    
+    # Get other parameters from args if not overridden
+    exploration_fraction = args.exploration_fraction if hasattr(args, 'exploration_fraction') and args.exploration_fraction > 0.1 else exploration_fraction
+    exploration_initial_eps = args.exploration_initial_eps if hasattr(args, 'exploration_initial_eps') else exploration_initial_eps
+    exploration_final_eps = args.exploration_final_eps if hasattr(args, 'exploration_final_eps') else exploration_final_eps
     target_update_interval = args.target_update_interval
     
-    # Create tensorboard callback
-    tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=10000)
+    # Log the exploration parameters for clarity
+    logger.info(f"Using exploration parameters: initial_eps={exploration_initial_eps}, "
+               f"final_eps={exploration_final_eps}, fraction={exploration_fraction}")
+    
+    # Create tensorboard callback with more frequent debugging
+    tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=5000)
     
     # Create checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -1371,18 +1476,21 @@ def train_dqn(env, args, callbacks=None):
         save_vecnormalize=True,
     )
     
+    # Add resource check callback
+    resource_callback = ResourceCheckCallback(check_interval=10000, verbose=1)
+    
     # Combine all callbacks
-    all_callbacks = [tb_callback, checkpoint_callback]
+    all_callbacks = [tb_callback, checkpoint_callback, resource_callback]
     if callbacks:
         all_callbacks.extend(callbacks)
     
-    # Create the model with parameters from args
+    # Create the model with enhanced parameters for better exploration
     model = DQN(
         "MlpPolicy",
         env,
         buffer_size=buffer_size,
         learning_rate=learning_rate,
-        learning_starts=1000,
+        learning_starts=5000,  # Increased from 1000 to collect more random samples
         batch_size=batch_size,
         tau=1.0,
         gamma=gamma,
@@ -1395,6 +1503,11 @@ def train_dqn(env, args, callbacks=None):
         verbose=1,
         tensorboard_log="./logs/dqn/"
     )
+    
+    # Log detailed model configuration
+    logger.info(f"DQN model configured with exploration_fraction={exploration_fraction}, "
+               f"initial_eps={exploration_initial_eps}, final_eps={exploration_final_eps}, "
+               f"buffer_size={buffer_size}, learning_rate={learning_rate}, batch_size={batch_size}")
     
     # Load model from checkpoint if specified
     if args.load_model:
