@@ -1059,6 +1059,9 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 self._wrapper_position_history = []
                 self._wrapper_last_position = 0
             
+            # Check if a trade occurred using the info dictionary
+            trade_occurred = info.get('trade_occurred', False)
+            
             if hasattr(self, '_wrapper_last_position') and trade_occurred:
                 if self._wrapper_last_position != current_position:
                     # Position changed - record it
@@ -1088,7 +1091,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                             self._wrapper_trade_cooldown = min(500, self._wrapper_trade_cooldown * 2)
                     
                     # Check for same trade price
-                    if hasattr(self, '_last_price') and trade_occurred:
+                    if hasattr(self, '_last_price'):
                         current_price = info.get('close', None)
                         if current_price is not None and self._last_price is not None:
                             if abs(current_price - self._last_price) < 0.001:
@@ -2799,6 +2802,10 @@ def main():
     end_date = args.end_date
     logger.info(f"Training period: {start_date} to {end_date}")
     
+    # Calculate data length (needed for metrics)
+    data_length = len(market_data) if market_data is not None else 0
+    logger.info(f"Total data length: {data_length}")
+    
     # Create the training environment
     try:
         if args.use_finrl:
@@ -2813,8 +2820,6 @@ def main():
             )
         else:
             # Train with our custom DQN implementation
-            data_length = len(market_data)
-            logger.info(f"Total data length: {data_length}")
             train_with_custom_dqn(args, market_data, data_length, device)
     except Exception as e:
         logger.error(f"Training failed: {e}")
