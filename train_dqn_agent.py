@@ -1635,7 +1635,238 @@ def train_with_finrl(
                 # Add regularization to Q-function
                 'buffer_size': 300000  # Larger buffer for better experience retention
             })
+    
+    # Add custom callbacks for monitoring
+    class TensorboardCallback(BaseCallback):
+        def __init__(self, verbose=0):
+            super(TensorboardCallback, self).__init__(verbose)
+            self.debug_steps = 0
+            self.debug_frequency = 1000  # Debug every 1000 steps
+            self.last_debug_output = 0
             
+            # Portfolio tracking
+            self.portfolio_values = []
+            
+            # Trade tracking
+            self.trade_count = 0
+            self.successful_trades = 0
+            self.total_profit = 0
+            self.total_loss = 0
+            
+            # Tracking data for debugging
+            self.action_counts = {'buy': 0, 'hold': 0, 'sell': 0}
+            self.episode_rewards = []
+            self.step_rewards = []
+            
+            # Trade analysis
+            self.trade_returns = []
+            self.trade_durations = []
+            self.recent_trades = []  # List to track recent trades for trend analysis
+            self.max_recent_trades = 100  # Maximum number of recent trades to keep
+            self.rapid_trade_threshold = 200  # Doubled to further discourage rapid trading
+            self.rapid_trades_detected = 0
+            self.rapid_trade_attempts = 0  # Track attempts separately from actual trades
+            self.frozen_period_enforced = 0  # Track number of times frozen period was enforced
+            self.last_trade_step = 0
+            self.same_price_trades = 0  # Count trades at exactly the same price (problematic)
+            self.last_trade_price = None
+            
+            # Position tracking
+            self.current_position = 0
+            self.position_start_time = 0
+            self.entry_price = 0
+            
+            # Add oscillation tracking
+            self.oscillation_count = 0
+            self.action_history = []
+            
+            # Set up more frequent log flushing
+            self.log_flush_frequency = 5000  # Flush logs more frequently
+            
+            logger.info("Enhanced TensorboardCallback initialized with oscillation detection")
+        
+        def _on_step(self):
+            # Increment step counter for debugging
+            self.debug_steps += 1
+            
+            # Debug output every N steps
+            if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
+                logger.info(f"Callback debugging at step {self.debug_steps}")
+                print(f"\n--- Training progress: step {self.debug_steps} ---")
+                
+                # Print key metrics to console
+                if len(self.episode_rewards) > 0:
+                    print(f"Recent reward mean: {np.mean(self.episode_rewards[-10:]):.4f}")
+                
+                if len(self.portfolio_values) > 0:
+                    print(f"Current portfolio value: {self.portfolio_values[-1]:.2f}")
+                
+                if self.trade_count > 0:
+                    win_rate = self.successful_trades / max(1, self.trade_count) * 100
+                    print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
+                    print(f"Action counts: {self.action_counts}")
+                    if self.rapid_trades_detected > 0 or self.rapid_trade_attempts > 0:
+                        print(f"WARNING: {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} attempts! {self.same_price_trades} at same price!")
+                        print(f"Frozen periods enforced: {self.frozen_period_enforced}")
+                    # Add oscillation info
+                    print(f"Oscillation count: {self.oscillation_count}")
+                
+                if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
+                    # Log a sample of the info dictionary to understand what's available
+                    logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
+                self.last_debug_output = self.debug_steps
+            
+            # Force tensorboard log flushing periodically
+            if hasattr(self.logger, "dump_tabular") and self.debug_steps % self.log_flush_frequency == 0:
+                self.logger.dump_tabular()
+            
+            # Track step reward
+            if self.locals is not None and 'rewards' in self.locals:
+                for i, reward in enumerate(self.locals['rewards']):
+                    self.step_rewards.append(reward)
+                    
+                    # Log environment info if available
+                    if 'infos' in self.locals and i < len(self.locals['infos']):
+                        info = self.locals['infos'][i]
+                        
+                        # Initialize variables that might be used later to avoid UnboundLocalError
+                        exit_price = 0
+                        pnl = 0
+                        trade_duration = 0
+
+                        # Track portfolio value
+                        if 'portfolio_value' in info:
+                            self.portfolio_values.append(info['portfolio_value'])
+                            self.logger.record('portfolio/value', info['portfolio_value'])
+                        
+                        # Track rapid trade attempts from environment
+                        if 'rapid_trade_attempts' in info:
+                            attempts = info['rapid_trade_attempts']
+                            if attempts > self.rapid_trade_attempts:
+                                # Only log when the number increases
+                                if attempts % 10 == 0:  # Log periodically
+                                    logger.warning(f"Environment reported {attempts} rapid trade attempts")
+                                self.rapid_trade_attempts = attempts
+                                self.logger.record('trades/rapid_trade_attempts', attempts)
+                        
+                        # Record if this step was an enforced hold
+                        if 'enforced_hold' in info:
+                            self.logger.record('environment/enforced_hold', 1 if info['enforced_hold'] else 0)
+                        
+                        # Record cooldown remaining
+                        if 'cooldown_remaining' in info:
+                            self.logger.record('environment/cooldown_remaining', info['cooldown_remaining'])
+                        
+                        # Record if in frozen period
+                        if 'in_frozen_period' in info and info['in_frozen_period']:
+                            self.frozen_period_enforced += 1
+                            self.logger.record('environment/frozen_period', 1)
+                        
+                        # Track oscillation count from environment
+                        if 'oscillation_counter' in info:
+                            osc_count = info['oscillation_counter']
+                            if osc_count > self.oscillation_count:
+                                self.oscillation_count = osc_count
+                                self.logger.record('environment/oscillation_count', osc_count)
+                        
+                        # Track position
+                        if 'position' in info:
+                            position = info['position']
+                            
+                            # Position change detection for trade tracking
+                            if position != self.current_position:
+                                # If we had a previous position, this is a trade exit
+                                if self.current_position != 0:
+                                    trade_duration = self.debug_steps - self.position_start_time
+                                    self.trade_durations.append(trade_duration)
+                                    
+                                    # Check for rapid trading
+                                    steps_since_last_trade = self.debug_steps - self.last_trade_step
+                                    if steps_since_last_trade < self.rapid_trade_threshold:
+                                        self.rapid_trades_detected += 1
+                                        logger.warning(f"Rapid trade detected! Only {steps_since_last_trade} steps since last trade.")
+                                    
+                                    # Initialize variables that might be used later
+                                    exit_price = 0
+                                    pnl = 0
+                                    
+                                    # Calculate trade profit/loss if price info available
+                                    if 'close' in info:
+                                        exit_price = info['close']
+                                        
+                                        # Check for same price trades (sign of environment issues)
+                                        if self.last_trade_price is not None and abs(exit_price - self.last_trade_price) < 0.0001:
+                                            self.same_price_trades += 1
+                                            logger.warning(f"Same price trade detected! Price: {exit_price:.2f}")
+                                        
+                                        self.last_trade_price = exit_price
+                                        pnl = (exit_price - self.entry_price) * self.current_position
+                                        self.trade_returns.append(pnl)
+                                        
+                                        # Track trade result
+                                        self.trade_count += 1
+                                        if pnl > 0:
+                                            self.successful_trades += 1
+                                            self.total_profit += pnl
+                                        else:
+                                            self.total_loss += abs(pnl)
+                                        
+                                        # Log trade details
+                                        logger.info(f"Trade exit: position={position}, price={exit_price:.4f}, pnl={pnl:.2f}, duration={trade_duration}")
+                                        
+                                        # Record trade metrics
+                                        self.logger.record('trades/count', self.trade_count)
+                                        self.logger.record('trades/win_rate', self.successful_trades / max(1, self.trade_count))
+                                        self.logger.record('trades/profit_factor', self.total_profit / max(1e-6, self.total_loss))
+                                        self.logger.record('trades/duration', trade_duration)
+                                        self.logger.record('trades/pnl', pnl)
+                                
+                                # This is a new trade entry
+                                if position != 0:
+                                    self.current_position = position
+                                    self.position_start_time = self.debug_steps
+                                    self.last_trade_step = self.debug_steps
+                                    
+                                    if 'close' in info:
+                                        self.entry_price = info['close']
+                                        logger.info(f"Trade entry: position={position}, price={self.entry_price:.4f}")
+                                else:
+                                    # Exit to flat position
+                                    self.current_position = 0
+                            
+                        # Track actions based on info
+                        if 'action_type' in info:
+                            action_type = info['action_type']
+                            if action_type in self.action_counts:
+                                self.action_counts[action_type] += 1
+                            self.logger.record(f'actions/{action_type}', 1)
+                            
+                            # Store action history for oscillation detection
+                            if action_type == 'buy':
+                                self.action_history.append(2)
+                            elif action_type == 'sell':
+                                self.action_history.append(0)
+                            else:  # hold
+                                self.action_history.append(1)
+                                
+                            # Keep history to a reasonable size
+                            if len(self.action_history) > 20:
+                                self.action_history = self.action_history[-20:]
+                                
+                            # Check for oscillation patterns
+                            if len(self.action_history) >= 6:  # Require longer history for stricter detection
+                                # Only count as oscillation if we see multiple cycles in a row
+                                # E.g., buy-sell-buy-sell or sell-buy-sell-buy for at least 6 actions
+                                strict_pattern1 = self.action_history[-6:] == [2, 0, 2, 0, 2, 0]  # buy-sell-buy-sell-buy-sell
+                                strict_pattern2 = self.action_history[-6:] == [0, 2, 0, 2, 0, 2]  # sell-buy-sell-buy-sell-buy
+                                
+                                if strict_pattern1 or strict_pattern2:
+                                    logger.warning(f"Severe oscillation pattern detected in callback: {self.action_history[-6:]}")
+                                    self.oscillation_count += 1
+                                    self.logger.record('environment/oscillation_detected', 1)
+            
+            return True
+    
     # Use the enhanced callback
     callback = TensorboardCallback()
     
