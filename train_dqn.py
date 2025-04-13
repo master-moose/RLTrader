@@ -1235,7 +1235,16 @@ def train_ppo(env, args):
 
 
 def train_a2c(env, args):
-    """Train an A2C agent"""
+    """
+    Train an A2C agent.
+    
+    Parameters:
+        env: The training environment
+        args: Arguments from command line
+        
+    Returns:
+        Trained model
+    """
     logger.info("Starting A2C training...")
     
     # Create directories for checkpoints and logs
@@ -1280,6 +1289,18 @@ def train_a2c(env, args):
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     
+    # Create A2C-specific policy_kwargs
+    policy_kwargs = {}
+    
+    # Add LSTM feature extractor if provided
+    lstm_model = None
+    if args.lstm_model_path:
+        lstm_model = load_lstm_model(args.lstm_model_path)
+        
+    if lstm_model is not None:
+        policy_kwargs["features_extractor_class"] = LSTMAugmentedFeatureExtractor
+        policy_kwargs["features_extractor_kwargs"] = {"lstm_model": lstm_model}
+        
     logger.info(f"Creating A2C model with n_steps={args.n_steps}, using device={device}")
     from stable_baselines3 import A2C
     model = A2C(
@@ -1298,7 +1319,6 @@ def train_a2c(env, args):
         verbose=1 if args.verbose else 0,
         tensorboard_log=tensorboard_log_dir,
         device=device,
-        # Include LSTM feature extractor if provided
         policy_kwargs=policy_kwargs,
     )
     
