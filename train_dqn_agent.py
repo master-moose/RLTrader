@@ -1399,8 +1399,8 @@ def prepare_crypto_data_for_finrl(market_data, primary_timeframe):
     Prepare cryptocurrency data for FinRL format.
     
     Args:
-        market_data: Dictionary containing market data for different timeframes
-        primary_timeframe: The primary timeframe to use for training
+        market_data: Dictionary of DataFrames by timeframe
+        primary_timeframe: Primary timeframe to use
         
     Returns:
         DataFrame in FinRL format
@@ -2435,101 +2435,115 @@ def train_with_finrl(
         raise
 
 def setup_logging():
-    """Configure and return a logger for the application."""
-    log_format = '%(asctime)s - %(levelname)s - %(message)s'
-    logging.basicConfig(level=logging.INFO, format=log_format)
-    return logging.getLogger()
+    """Configure logging."""
+    import logging
+    
+    # Create logs directory if it doesn't exist
+    os.makedirs('./logs', exist_ok=True)
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Create a formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Add file handler
+    file_handler = logging.FileHandler('./logs/training.log')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # Add stream handler for console output
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    return logger
 
 logger = setup_logging()
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Train a DQN agent for cryptocurrency trading")
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
-    parser.add_argument('--device', type=str, default='cuda', help='Device to use (cuda, cpu)')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    import argparse
     
-    # Data parameters
-    parser.add_argument('--start_date', type=str, default='2020-01-01', help='Start date for training data')
-    parser.add_argument('--end_date', type=str, default='2021-01-01', help='End date for training data')
-    parser.add_argument('--tickers', type=str, default='BTC', help='Comma-separated list of tickers to trade')
-    
-    # Model parameters
-    parser.add_argument('--use_finrl', action='store_true', help='Use FinRL environment and models')
-    parser.add_argument('--finrl_model', type=str, choices=['sac', 'ppo', 'ddpg', 'td3'], default='ppo', 
-                        help='FinRL model type to use')
-    parser.add_argument('--lstm_model_path', type=str, default=None, 
-                        help='Path to pre-trained LSTM model to use for predictions')
-    
-    # Training parameters
-    parser.add_argument('--timesteps', type=int, default=1000000, help='Number of timesteps to train for')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for parallel training')
-    parser.add_argument('--num_envs_per_worker', type=int, default=1, 
-                        help='Number of environments per worker')
-    parser.add_argument('--use_subproc_vecenv', action='store_true', 
-                        help='Use SubprocVecEnv instead of DummyVecEnv')
+    parser = argparse.ArgumentParser(description='Train a DQN agent for cryptocurrency trading')
     
     # Environment parameters
-    parser.add_argument('--initial_balance', type=float, default=10000.0, 
-                        help='Initial balance for the trading agent')
-    parser.add_argument('--transaction_fee', type=float, default=0.001, 
-                        help='Transaction fee as a fraction of the transaction amount')
+    parser.add_argument('--use_finrl', action='store_true', help='Use FinRL framework for environments and agents')
+    parser.add_argument('--finrl_model', type=str, default='ppo', help='FinRL model to use (ppo, a2c, ddpg, td3, sac)')
+    parser.add_argument('--start_date', type=str, default='2018-01-01', help='Start date for data')
+    parser.add_argument('--end_date', type=str, default='2021-12-31', help='End date for data')
+    parser.add_argument('--tickers', type=str, default='BTC', help='Comma-separated list of tickers')
+    parser.add_argument('--lstm_model_path', type=str, help='Path to pre-trained LSTM model for market predictions')
+    parser.add_argument('--data_path', type=str, help='Path to preprocessed market data file')
     
-    # PPO specific parameters
-    parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps per update for PPO')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for PPO')
-    parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs for PPO')
+    # Training parameters
+    parser.add_argument('--device', type=str, default='cpu', help='Device to use for training (cpu, cuda:0, etc.)')
+    parser.add_argument('--initial_balance', type=float, default=1000000.0, help='Initial balance for trading environment')
+    parser.add_argument('--timesteps', type=int, default=50000, help='Number of timesteps to train')
     parser.add_argument('--learning_rate', type=float, default=0.0003, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--n_steps', type=int, default=2048, help='Number of steps per update')
+    parser.add_argument('--n_epochs', type=int, default=10, help='Number of epochs per update')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--reward_scaling', type=float, default=1e-4, help='Reward scaling factor')
-    parser.add_argument('--normalize_observations', type=str, default='true', 
-                        help='Whether to normalize observations (true/false)')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of parallel workers')
+    parser.add_argument('--num_envs_per_worker', type=int, default=1, help='Number of environments per worker')
+    parser.add_argument('--normalize_observations', type=str, default='true', help='Whether to normalize observations')
+    
+    # Debugging/verbosity
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
     return parser.parse_args()
 
 def load_and_preprocess_market_data(args):
-    """Load and preprocess market data for training."""
-    logger.info("Loading market data...")
+    """
+    Load market data from the specified source and preprocess it.
     
-    # This function would normally load data from files or APIs
-    # For this implementation, we'll create synthetic data
-    
-    # Get tickers
-    if hasattr(args, 'tickers'):
-        if isinstance(args.tickers, str):
-            tickers = args.tickers.split(',')
-        else:
-            tickers = args.tickers
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        Preprocessed market data
+    """
+    # Load data from specified file
+    if args.data_path:
+        logger.info(f"Loading market data from {args.data_path}")
+        try:
+            # Try to load as CSV first
+            if args.data_path.endswith('.csv'):
+                df = pd.read_csv(args.data_path)
+                logger.info(f"Loaded CSV market data with shape {df.shape}")
+            # Then try HDF5 format
+            elif args.data_path.endswith('.h5') or args.data_path.endswith('.hdf5'):
+                logger.info(f"Loading HDF5 market data from {args.data_path}")
+                # Read the first key in the HDF5 file
+                with pd.HDFStore(args.data_path, mode='r') as store:
+                    # Get keys - they typically start with '/'
+                    keys = store.keys()
+                    if not keys:
+                        raise ValueError(f"No datasets found in HDF5 file {args.data_path}")
+                    
+                    # Try to load the '15m' timeframe first as it has the most data
+                    if '/15m' in keys:
+                        df = store['/15m']
+                        logger.info(f"Loaded 15m timeframe data with shape {df.shape}")
+                    else:
+                        # Otherwise, load the first key
+                        first_key = keys[0]
+                        df = store[first_key]
+                        logger.info(f"Loaded {first_key} timeframe data with shape {df.shape}")
+            else:
+                raise ValueError(f"Unsupported file format: {args.data_path}")
+            
+            return df
+        except Exception as e:
+            logger.error(f"Failed to load market data: {e}")
+            logger.error(traceback.format_exc())
+            return None
     else:
-        tickers = ['BTC']
-    
-    # Create synthetic data
-    market_data = {}
-    for timeframe in ['1h', '4h', '1d']:
-        # Create a DataFrame with basic OHLCV data
-        data_length = 50000  # Number of candlesticks
-        
-        df = pd.DataFrame({
-            'open': np.random.normal(1000, 100, data_length),
-            'high': np.random.normal(1050, 100, data_length),
-            'low': np.random.normal(950, 100, data_length),
-            'close': np.random.normal(1000, 100, data_length),
-            'volume': np.random.normal(1000, 200, data_length)
-        })
-        
-        # Ensure high is the highest price
-        df['high'] = np.maximum(df['high'], np.maximum(df['open'], df['close']))
-        # Ensure low is the lowest price
-        df['low'] = np.minimum(df['low'], np.minimum(df['open'], df['close']))
-        
-        # Create a datetime index
-        start_date = pd.to_datetime(args.start_date) if hasattr(args, 'start_date') else pd.to_datetime('2018-01-01')
-        freq = '1H' if timeframe == '1h' else '4H' if timeframe == '4h' else 'D'
-        df.index = pd.date_range(start=start_date, periods=data_length, freq=freq)
-        
-        market_data[timeframe] = df
-    
-    logger.info(f"Created synthetic market data with {data_length} data points")
-    return market_data, data_length
+        logger.error("No data_path provided. Cannot load market data.")
+        return None
 
 def train_with_custom_dqn(args, market_data, data_length, device):
     """
