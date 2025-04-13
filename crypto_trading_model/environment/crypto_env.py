@@ -6,6 +6,7 @@ Major fixes in this version:
 2. Improved forced sell mechanism with better logging
 3. Added detailed tracking of holding periods
 4. Significantly increased hold penalties to combat perpetual holding issue
+5. Further strengthened hold penalties and reduced max holding period
 """
 
 # Don't import the actual module which has dependencies we might not have
@@ -40,7 +41,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         action_space: int = 3,
         reward_scaling: float = 1e-4,
         print_verbosity: int = 0,
-        max_holding_steps: int = 8,
+        max_holding_steps: int = 5,
         episode_length: int = None,
         randomize_start: bool = True,
         candles_per_day: int = 1,
@@ -376,7 +377,7 @@ class CryptocurrencyTradingEnv(gym.Env):
             # If holding assets, don't reward for price appreciation
             # Calculate what the portfolio value would be if the price hadn't changed
             # The agent should only be rewarded/penalized for explicit trades, not market movements during holds
-            hold_penalty = 1.0  # Significantly increased from 0.2 to 1.0 - much higher penalty for any hold action
+            hold_penalty = 2.0  # Increased from 1.0 to 2.0 - much higher penalty for any hold action
             
             # Add additional hold penalty based on cash ratio - penalize more when holding a large portion of portfolio in assets
             balance_penalty = 0.0
@@ -435,18 +436,18 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Penalize holding to discourage excessive holding
         elif action_type == 1:
             # Reduce reward for holding (significant penalty)
-            hold_penalty = 1.0  # Increased from 0.2 to 1.0 - much higher penalty for any hold action
+            hold_penalty = 2.0  # Increased from 1.0 to 2.0 - much higher penalty for any hold action
             reward -= hold_penalty
             
             # Add a small penalty for long holds to discourage excessive holding
-            if self.holding_counter > 3:  # Penalize holds even earlier
+            if self.holding_counter > 2:  # Penalize holds even earlier (reduced from 3 to 2)
                 # Exponential penalty growth to strongly discourage long holds
-                hold_steps_over_limit = self.holding_counter - 3
-                hold_penalty = min(0.5 * (hold_steps_over_limit ** 2.0), 5.0)  # Much stronger exponential growth with higher cap
+                hold_steps_over_limit = self.holding_counter - 2
+                hold_penalty = min(1.0 * (hold_steps_over_limit ** 2.5), 10.0)  # Stronger exponential growth with higher cap
                 reward -= hold_penalty
                 
                 # Log significant hold penalties
-                if hold_penalty > 0.1 or self.holding_counter > 5:  # Lower threshold to log more penalties
+                if hold_penalty > 0.1 or self.holding_counter > 3:  # Lower threshold to log more penalties
                     logger.warning(f"Applied hold penalty of {hold_penalty:.4f} after {self.holding_counter} steps of holding")
         
         # Clip reward to prevent extreme values, but with wider limits

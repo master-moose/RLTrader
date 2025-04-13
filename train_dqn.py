@@ -185,30 +185,33 @@ class AntiHoldPolicy(DQNPolicy):  # Change from stable_baselines3.dqn.policies.D
     reducing its Q-value during action selection.
     """
     
-    def __init__(self, *args, hold_action_bias=-1.0, **kwargs):
+    def __init__(self, *args, hold_action_bias=-3.0, **kwargs):
         """Initialize the anti-hold policy with a bias against the hold action"""
         super().__init__(*args, **kwargs)
         self.hold_action_bias = hold_action_bias
         self.hold_action = 1  # The action index for hold
     
     def _predict(self, obs, deterministic=True):
-        """Override prediction to apply a bias against the hold action"""
+        """
+        Overrides the parent class _predict method to apply a bias against holding.
+        This method reduces the Q-value of the hold action to discourage the agent from holding.
+        """
         q_values = self.q_net(obs)
         
-        # Apply bias against the hold action
+        # Apply a negative bias to the hold action's Q-value
+        # Use a stronger bias (-3.0 instead of -1.0) to more strongly discourage holding
         q_values[:, self.hold_action] += self.hold_action_bias
         
-        # Get actions following the normal process
+        # Get the actions using the modified Q-values
         actions = q_values.argmax(dim=1).reshape(-1)
-        
         return actions, q_values
 
 class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for trading environments that adds safeguards against:
     1. Rapid trading (enforces a cooldown period)
-    2. Action oscillation (prevents rapid buy-sell patterns)
-    3. Risk management (adjusts position sizes based on risk parameters)
+    2. Action oscillation (detects and prevents buy-sell-buy patterns)
+    3. Risk management (enforces position sizing based on risk)
     """
     
     def __init__(self, env, trade_cooldown=TRADE_COOLDOWN_PERIOD, max_history_size=100, max_risk_per_trade=0.02, take_profit_pct=0.03):
@@ -225,26 +228,20 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Risk management parameters - relax constraints to allow more trading
         self.max_risk_per_trade = max_risk_per_trade * 1.5  # Increase maximum risk per trade
-        self.target_risk_reward_ratio = 0.5  # Further reduced from 1.0 to 0.5 - much less strict
+        self.target_risk_reward_ratio = 0.3  # Further reduced from 0.5 to 0.3 - much less strict
         self.risk_adjusted_position_sizing = True  # Use risk-adjusted position sizing
         self.cumulative_risk = 0.0  # Track cumulative risk across open positions
-        self.max_cumulative_risk = 0.25  # Increased from 0.15 to 0.25 - allow much more risk
+        self.max_cumulative_risk = 0.3  # Increased from 0.25 to 0.3 - allow more risk
         self.risk_per_position = {}  # Track risk per position
         
         # Take profit parameters
         self.take_profit_pct = take_profit_pct
-        self.last_take_profit_price = None
         
         # Trading history tracking
         self.last_trade_step = -self.trade_cooldown  # Start with cooldown already passed
         self.last_trade_price = None
         self.action_history = []
         self.position_history = []
-        self.previous_position = 0  # Initial position is flat (no assets)
-        self.current_position = 0
-        self.max_history_size = max_history_size
-        self.oscillation_count = 0
-        self.same_price_trades = 0
         
         # Track consecutive actions for consistency rewards
         self.consecutive_holds = 0
@@ -656,17 +653,15 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             self.hold_duration += 1
             
             # Apply larger constant hold penalty
-            hold_penalty = 0.5  # Increased from 0.1 to 0.5 - much higher penalty for any hold
+            hold_penalty = 0.8  # Increased from 0.5 to 0.8 - even higher penalty for any hold
             risk_adjusted_reward -= hold_penalty
             
-            # Remove the small bonus for short-term holds to discourage any holding
-            
             # Add penalty for excessive holding after early training - lower threshold and higher penalty
-            if self.consecutive_holds > 5:  # Reduced from 10 to 5
+            if self.consecutive_holds > 3:  # Reduced from 5 to 3
                 # Gradually increasing penalty for excessive holding (more aggressive)
-                hold_penalty = min((self.consecutive_holds - 5) * 0.05, 5.0)  # Much more aggressive penalty 
+                hold_penalty = min((self.consecutive_holds - 3) * 0.1, 10.0)  # Much more aggressive penalty 
                 risk_adjusted_reward -= hold_penalty
-                if self.consecutive_holds % 10 == 0:  # Reduced from 20 to 10
+                if self.consecutive_holds % 5 == 0:  # Reduced from 10 to 5
                     logger.warning(f"Excessive holding penalty: -{hold_penalty:.4f} after {self.consecutive_holds} consecutive holds")
         else:
             self.consecutive_holds = 0
@@ -674,8 +669,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Reward for taking actions (not just holding)
         if self.action_history and self.action_history[-1] != 1:  # not a hold action
             # Give reward for exploring buying and selling
-            if current_step < 20000:  # Throughout a longer early training period
-                action_bonus = 0.2  # Increased from 0.05 to 0.2
+            if current_step < 30000:  # Throughout a longer early training period
+                action_bonus = 0.5  # Increased from 0.2 to 0.5
                 risk_adjusted_reward += action_bonus
                 if current_step % 5000 == 0:
                     logger.info(f"Applying action exploration bonus: +{action_bonus:.2f} at step {current_step}")
@@ -760,7 +755,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         target_price = current_price * 1.04 if current_price is not None else None
         
         # Check risk-reward ratio before allowing a trade - significantly relax this constraint
-        if action != 1 and current_price is not None:  # Not a hold action
+        # Only perform this check early in training
+        if current_step < 5000 and action != 1 and current_price is not None:  # Not a hold action in early training
             # Calculate risk-reward ratio for this potential trade
             risk_reward = self._calculate_risk_reward_ratio(
                 current_price, 
@@ -770,141 +766,35 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             )
             
             # Only block trades with extremely unfavorable risk-reward ratio
-            if risk_reward < self.target_risk_reward_ratio * 0.1:  # Further reduced threshold to 10% of target 
+            if risk_reward < self.target_risk_reward_ratio * 0.05:  # Further reduced threshold
                 logger.debug(f"Risk-reward ratio {risk_reward:.2f} far below target {self.target_risk_reward_ratio:.2f}, forcing hold")
                 action = 1  # Force hold if risk-reward is extremely unfavorable
                 
-        # Check if we're in a cooldown period - but make it much shorter
-        in_cooldown = (current_step - self.last_trade_step) < self.current_cooldown
-        attempted_trade_during_cooldown = False
-        
-        # Remove cooldown for almost all training steps
-        if current_step > 50 and self.current_cooldown > 0:  # Reduced from 100 to 50
-            # After initial training, set cooldown to zero
+        # Completely disable cooldown after initial training
+        if current_step > 30:  # Very early training
             self.current_cooldown = 0  # Remove cooldown completely to encourage trading
         
-        if in_cooldown and action != 1:  # Not a hold action during cooldown
-            attempted_trade_during_cooldown = True
-            action = 1  # Force hold action
-            self.forced_actions += 1
-            
-            if self.forced_actions % 100 == 0:  # Reduce log frequency to avoid spamming
-                logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
-                              f"{current_step - self.last_trade_step}/{self.min_cooldown} steps since last trade")
-    
         # Store previous position for change detection
         self.previous_position = self.current_position
         
-        # Determine if we're in a trade cooldown period - use adjusted cooldown
-        in_cooldown = (current_step - self.last_trade_step) < self.min_cooldown
-        attempted_trade_during_cooldown = False
-        
-        # Get current price for advanced checks
-        current_price = None
-        if hasattr(self.env, '_get_current_price'):
-            current_price = self.env._get_current_price()
-            
-        # Advanced early-stage check for valid price changes before allowing trades
-        # Almost completely disable these checks to allow more trading
-        min_profit_violation = False
-        strict_price_requirement = False
-        
-        if current_price is not None and self.last_trade_price is not None:
-            price_change_pct = abs(current_price - self.last_trade_price) / self.last_trade_price
-            
-            # Require minimal price movements to allow much more trading
-            required_movement = 0.0001  # Significantly reduced to allow almost all trades
-            
-            # Only enforce in the very early stages of training
-            if current_step < 10:  # Reduced from 50 to 10
-                required_movement = 0.0005  # Reduced from 0.001 to 0.0005
-            
-            if price_change_pct < required_movement and action != 1:
-                strict_price_requirement = True
-                logger.debug(f"Enforcing hold: price movement {price_change_pct:.4f}% < required {required_movement:.4f}%")
-                action = 1  # Force hold
-            
-        # Check for min profit threshold violations - but be even more lenient
-        if current_price is not None:
-            # If trying to sell, check if price is higher than last buy
-            if action == 0 and self.last_buy_price is not None:
-                profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
-                
-                # Allow selling at a loss much more frequently
-                min_profit = -0.005  # Allow selling at a loss by default (up to 0.5% loss)
-                if current_step < 500:  # Reduced from 1000 to 500
-                    min_profit = -0.002  # Allow smaller losses early in training
-                
-                # Start allowing larger selling at a loss after initial stage
-                if current_step > 1000 and random.random() < 0.6:
-                    # 60% chance to ignore profit threshold after step 1000 (increased from 30% to 60%)
-                    min_profit = -0.02  # Allow selling at up to 2% loss (increased from 1% to 2%)
-                
-                if profit_pct < min_profit:
-                    min_profit_violation = True
-                    logger.debug(f"Prevented selling at loss/small profit: {profit_pct:.4f}% at step {current_step}")
-            
-            # If trying to buy, check if price is lower than last sell
-            elif action == 2 and self.last_sell_price is not None:
-                discount_pct = (self.last_sell_price - current_price) / self.last_sell_price
-                
-                # Allow buying at worse prices more frequently
-                min_discount = -0.005  # Allow buying at worse prices by default (up to 0.5% worse)
-                if current_step < 500:  # Reduced from 1000 to 500
-                    min_discount = -0.002  # Allow smaller worse buys early in training
-                
-                # Start allowing some buying at worse prices after initial stage
-                if current_step > 1000 and random.random() < 0.6:
-                    # 60% chance to ignore discount threshold after step 1000 (increased from 30% to 60%)
-                    min_discount = -0.02  # Allow buying at up to 2% worse price (increased from 1% to 2%)
-                
-                if discount_pct < min_discount:
-                    min_profit_violation = True
-                    logger.debug(f"Prevented buying too close to last sell: -{discount_pct:.4f}% at step {current_step}")
-        
-        # Handle cooldown violations
-        if in_cooldown and action != 1:  # Not a hold action
-            # Track violation attempt
-            attempted_trade_during_cooldown = True
-            
-            # Force a hold action
-            action = 1
-            self.forced_actions += 1
-            
-            if self.forced_actions % 100 == 0:  # Reduce log frequency to avoid spamming
-                logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
-                              f"{current_step - self.last_trade_step}/{self.min_cooldown} steps since last trade")
-        
-        # Also force hold for min profit violations and price movement requirements
-        if min_profit_violation or strict_price_requirement:
-            action = 1
-        
-        # Only add oscillation checks if we're having oscillation problems
-        # Check for oscillation patterns and adjust cooldown if needed - but make penalties less severe
-        if len(self.action_history) > 4:
+        # Disable oscillation checks after early training to allow more action freedom
+        if current_step > 10000 and len(self.action_history) > 4:
+            # Only apply oscillation controls in the most extreme cases
             last_four = self.action_history[-4:]
             
-            # Apply progressive penalty for oscillatory behavior - but only for very clear oscillation patterns
-            if last_four and (
-                last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
+            # Apply progressive penalty for oscillatory behavior - but only for very clear oscillation
+            # that repeats multiple times
+            if (last_four == [2, 0, 2, 0] and self.action_history[-8:-4] == [2, 0, 2, 0]) or \
+               (last_four == [0, 2, 0, 2] and self.action_history[-8:-4] == [0, 2, 0, 2]):
                 
-                # Force hold action for the next several steps but only for obvious oscillation
+                # Force hold action only for severe repeated oscillation
                 action = 1
                 
                 # Count the oscillation
                 self.oscillation_count += 1
                 
-                # Extend cooldown for severe oscillation cases - but make it less aggressive
-                if self.oscillation_count > 5:
-                    # Extend cooldown period for severe oscillation
-                    extended_cooldown = min(self.oscillation_count * 15, 500)  # Reduced from 20 to 15 and 1000 to 500
-                    self.last_trade_step = current_step - self.min_cooldown + extended_cooldown
-                    logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
-        
-        # Remove early training stabilization to allow more trading
-        if current_step < 10 and action != 1 and current_step % 2 != 0:  # Reduced from 25 to 10 and from 3 to 2
-            logger.debug(f"Early training stability: forcing hold at step {current_step}")
-            action = 1  # Force hold action during early training except every 2nd step
+                # Log the oscillation
+                logger.warning(f"Forced hold due to severe repeated oscillation at step {current_step}")
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -1008,8 +898,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if len(self.action_window) > self.window_size:
             old_action = self.action_window.pop(0)
         
-        # Log action distribution periodically
-        if self.total_actions % 1000 == 0:
+        # Log action distribution more frequently to monitor hold behavior
+        if self.total_actions % 500 == 0:  # Reduced from 1000 to 500
             window_counts = {}
             for a in self.action_window:
                 window_counts[a] = window_counts.get(a, 0) + 1
@@ -1022,549 +912,213 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             logger.info(f"Action distribution (last {len(self.action_window)} steps): {window_counts}")
             logger.info(f"Portfolio growth: {portfolio_growth:.4f} (starting: {self.starting_portfolio:.2f}, current: {self.env.portfolio_value:.2f})")
             
-            # Detect and warn about persistent hold pattern
-            if window_counts.get(1, 0) > 0.9 * len(self.action_window):
+            # Detect and warn about persistent hold pattern with a lower threshold
+            if window_counts.get(1, 0) > 0.7 * len(self.action_window):  # Reduced from 0.9 to 0.7
                 logger.warning(f"PERSISTENT HOLD PATTERN DETECTED: {window_counts.get(1, 0)}/{len(self.action_window)} actions are hold")
-        
-        # Calculate additional penalties - but make them less severe
-        additional_penalty = 0.0
-        
-        # Penalty for attempted trades during cooldown - reduce penalty
-        if attempted_trade_during_cooldown:
-            cooldown_penalty = OSCILLATION_PENALTY * (0.3 + min(self.cooldown_violations, 10) / 15)  # Reduced from 0.5 to 0.3 and 10 to 15
-            additional_penalty -= cooldown_penalty
-            self.cooldown_violations += 1
-            if self.cooldown_violations % 5 == 0:
-                logger.warning(f"Applied cooldown violation penalty: {cooldown_penalty:.2f} " 
-                              f"(#{self.cooldown_violations})")
-            
-            # Add cooldown violation to info dict
-            info['cooldown_violation'] = True
-        
-        # Penalty for oscillations - reduce penalty
-        if len(self.action_history) >= 4:
-            last_four = self.action_history[-4:]
-            
-            if last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]:
-                # Increase oscillation penalty exponentially based on count - but make it less severe
-                oscillation_penalty = OSCILLATION_PENALTY * (0.7 + min(self.oscillation_count, 5) ** 1.3)  # Reduced from 1.0 to 0.7 and 1.5 to 1.3
-                additional_penalty -= oscillation_penalty
-                logger.warning(f"Applied oscillation penalty: {oscillation_penalty:.2f} (#{self.oscillation_count})")
                 
-                # Add oscillation detection to info dict
-                info['oscillation_detected'] = True
+        # Calculate risk-adjusted rewards after action is taken
+        risk_adjusted_reward = self._calculate_risk_rewards(reward, info, trade_occurred, current_step)
         
-        # Penalty for same-price trades - reduce penalty 
-        if trade_occurred and current_price is not None and self.last_trade_price is not None:
-            # Check if trade price is very close to the last trade price
-            if abs(current_price - self.last_trade_price) < 0.0001:
-                self.same_price_trades += 1
-                same_price_penalty = SAME_PRICE_TRADE_PENALTY * (0.7 + min(self.same_price_trades, 5))  # Reduced from 1.0 to 0.7
-                additional_penalty -= same_price_penalty
-                logger.warning(f"Same price trade detected! Penalty: {same_price_penalty:.2f} (#{self.same_price_trades})")
-                
-                # Add same-price trade to info dict
-                info['same_price_trade'] = True
-        
-        # Update last trade info if a trade occurred
-        if trade_occurred:
-            self.last_trade_step = current_step
-            self.last_trade_price = current_price
-            
-            # Track buy/sell prices for profit calculation
-            if action == 2:  # Buy
-                self.last_buy_price = current_price
-            elif action == 0:  # Sell
-                self.last_sell_price = current_price
-                
-            # Update info dict
-            info['trade'] = True
-            
-            # Reset cooldown violation count after successful trade
-            if self.cooldown_violations > 0:
-                logger.info(f"Resetting cooldown violation count from {self.cooldown_violations} to 0")
-                self.cooldown_violations = 0
-        
-        # Apply any penalties to the reward
-        reward += additional_penalty
-        
-        # Apply risk-aware reward adjustments
-        reward = self._calculate_risk_rewards(reward, info, trade_occurred, current_step)
-        
-        # Add reward bonus for take profit sells
-        if take_profit_triggered:
-            take_profit_bonus = 5.0  # Bonus for successful take profit strategy
-            reward += take_profit_bonus
-            logger.info(f"Applied additional take profit bonus in wrapper: +{take_profit_bonus:.2f}")
-        
-        # Add consistency rewards
-        if self.last_action is not None:
-            if action == self.last_action:
-                # Reward consistent actions (staying in a position or holding)
-                consistency_reward = 0.05  # Small bonus for consistency
-                
-                # Additional bonus for holding - reduce this to encourage more trading
-                if action == 1:  # Hold
-                    consistency_reward += 0.01  # Reduced from 0.03 to 0.01
-                    
-                reward += consistency_reward
-        
-        # Update last action
-        self.last_action = action
-        
-        # Curriculum learning - scale down rewards in early training, but for a shorter period
-        if self.training_progress < 0.1:  # Reduced from 0.2 to 0.1
-            reward *= 0.7  # Less reduction, changed from 0.5 to 0.7
-        
-        # Augment observation with action history and risk metrics
-        augmented_observation = self._augment_observation(observation)
-        
-        # Add training progress to info dict
-        info['training_progress'] = self.training_progress
-        info['action_taken'] = action
-        
-        # Add portfolio metrics to info
-        if hasattr(self.env, 'portfolio_value'):
-            info['portfolio_growth_pct'] = ((self.env.portfolio_value / self.starting_portfolio) - 1.0) * 100
-            info['highest_portfolio'] = self.highest_portfolio
-        
-        return augmented_observation, reward, terminated, truncated, info
+        return observation, risk_adjusted_reward, terminated, truncated, info
 
 
 class TensorboardCallback(BaseCallback):
-    """Custom callback for tracking metrics during training"""
+    """
+    Custom callback for tracking metrics.
+    This callback tracks detailed metrics about trading performance and logs them to TensorBoard.
+    """
     
     def __init__(self, verbose=0, model_name=None, debug_frequency=250):
-        super().__init__(verbose)
-        # Save model name for logging
-        self.model_name = model_name
+        """Initialize the callback with options for logging frequency and model name"""
+        super(TensorboardCallback, self).__init__(verbose)
+        self.debug_frequency = debug_frequency
+        self.model_name = model_name if model_name else "model"
         
-        # Environment metrics
-        self.returns = []
-        self.portfolio_values = []
-        self.episode_rewards = []
+        # Initialize metrics
+        self.episode_count = 0
         self.trade_count = 0
-        self.successful_trades = 0
+        self.last_trades = deque(maxlen=100)  # Track last 100 trades for analysis
+        self.portfolio_values = []
         
-        # Enhanced portfolio tracking
-        self.starting_portfolio = None
-        self.highest_portfolio = 0.0
-        self.growth_rates = []
-        self.drawdowns = []
+        # Action tracking
+        self.action_counts = {"sell": 0, "hold": 0, "buy": 0}
+        self.consecutive_holds = 0
+        self.max_consecutive_holds = 0
+        self.hold_action_frequency = 0.0
         
-        # Trading metrics
-        self.trade_returns = []
-        self.total_profit = 0.0
-        self.total_loss = 0.0
-        self.action_counts = {0: 0, 1: 0, 2: 0}  # Sell, Hold, Buy
-        self.episode_action_counts = {0: 0, 1: 0, 2: 0}  # Track actions per episode
+        # Hold metrics tracking
+        self.hold_durations = []  # List to track holding periods
+        self.current_hold_duration = 0
+        self.hold_histogram = {i: 0 for i in range(0, 21)}  # For holding periods 0-20+
         
-        # Safety metrics
-        self.cooldown_violations = 0
-        self.oscillation_count = 0
-        self.same_price_trades = 0
+        # Force sell tracking
+        self.forced_sells = 0
         
-        # Forced sell tracking
-        self.forced_sells = 0  # Track total forced sells
-        self.take_profit_sells = 0  # Track total take profit sells
-        self.holding_steps_histogram = {}  # Track distribution of holding periods
-        self.last_holding_counter = 0  # Track the last holding counter
+        # Portfolio metrics
+        self.initial_portfolio = None
+        self.max_portfolio = 0.0
+        self.min_portfolio = float('inf')
         
-        # Take profit tracking
-        self.take_profit_ratios = []  # Track profit percentages on take profit sells
-        self.take_profit_returns = []  # Track returns from take profit sells
+        # Oscillation metrics
+        self.oscillation_counts = 0
+        self.actions_sequence = []  # Track sequence of actions
         
-        # Debug counter
-        self.debug_steps = 0
-        self.debug_frequency = debug_frequency  # Use the parameter value
-        self.last_debug_output = 0
+        # Extra metrics for hold analysis
+        self.hold_penalties = []
+        self.average_hold_penalty = 0.0
+        self.total_holds = 0
+        self.hold_ratio = 0.0
         
-        # Add step timing for performance monitoring
-        self.last_time = time.time()
-        self.steps_since_last_log = 0
-        
-        logger.info(f"TensorboardCallback initialized for model {model_name} with debug frequency {debug_frequency}")
-        
-        # Cash balance tracking
-        self.cash_ratios = []
-        self.cash_ratio_min = 1.0
-        self.cash_ratio_max = 0.0
-        self.optimal_cash_ratio_count = 0  # Times within 0.3-0.7 range
-        self.balanced_portfolio_steps = 0
+        logger.info("TensorboardCallback initialized")
     
     def _on_step(self) -> bool:
-        """Called at each step"""
-        self.debug_steps += 1
-        self.steps_since_last_log += 1
+        """
+        Log metrics on each step.
+        This is called at every step of the environment.
+        """
+        # Skip processing if we don't have the model yet
+        if self.model is None:
+            return True
         
-        # Debug output every N steps
-        if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
-            self.last_debug_output = self.debug_steps
-            current_time = time.time()
-            time_elapsed = current_time - self.last_time
-            steps_per_second = self.steps_since_last_log / time_elapsed if time_elapsed > 0 else 0
+        # Extract information from the environment
+        # Cast from VecEnv wrapper if needed
+        if hasattr(self.model.get_env(), 'envs'):
+            env = self.model.get_env().envs[0]
+        else:
+            env = self.model.get_env()
             
-            # Get current portfolio value if available
-            portfolio_value = None
-            reward = None
-            action_counts = {}
-            cooldown_violations = 0
-            oscillation_count = 0
-            trade_count = 0
-            holding_counter = 0
-            forced_sells = 0
-            take_profit_sells = 0
+        # Extract wrapper env if available
+        if hasattr(env, 'env'):
+            env = env.env
             
-            if self.locals is not None:
-                # Get rewards if available
-                if 'rewards' in self.locals and len(self.locals['rewards']) > 0:
-                    reward = self.locals['rewards'][0]
+        # Unwrap to get the base environment and any wrapper class
+        safe_wrapper = None
+        base_env = None
+        current_env = env
+        
+        # Find the SafeTradingEnvWrapper and base environment
+        while hasattr(current_env, 'env'):
+            if isinstance(current_env, SafeTradingEnvWrapper):
+                safe_wrapper = current_env
+            current_env = current_env.env
+            if not hasattr(current_env, 'env'):
+                base_env = current_env
+                break
+        
+        # Get information from SafeTradingEnvWrapper if available
+        if safe_wrapper is not None:
+            hold_penalty = 0.0
+            if hasattr(safe_wrapper, 'consecutive_holds'):
+                self.consecutive_holds = safe_wrapper.consecutive_holds
+                self.max_consecutive_holds = max(self.max_consecutive_holds, self.consecutive_holds)
                 
-                # Get info from environment
-                if 'infos' in self.locals and len(self.locals['infos']) > 0:
-                    info = self.locals['infos'][0]
+                # Track hold penalties
+                if self.consecutive_holds > 0:
+                    # Calculate estimated penalty
+                    base_penalty = 0.8  # From the wrapper
+                    if self.consecutive_holds > 3:
+                        additional = min((self.consecutive_holds - 3) * 0.1, 10.0)
+                        hold_penalty = base_penalty + additional
+                    else:
+                        hold_penalty = base_penalty
                     
-                    # Track holding counter for forced sell monitoring
-                    if 'holding_counter' in info:
-                        holding_counter = info['holding_counter']
-                        self.last_holding_counter = holding_counter
-                        
-                        # Update holding steps histogram
-                        if holding_counter > 0:
-                            if holding_counter not in self.holding_steps_histogram:
-                                self.holding_steps_histogram[holding_counter] = 0
-                            self.holding_steps_histogram[holding_counter] += 1
-                            
-                        # Log holding counter to tensorboard
-                        if hasattr(self, 'logger') and self.logger is not None:
-                            self.logger.record('trades/holding_counter', holding_counter)
-                    
-                    # Track forced sells
-                    if 'forced_sells' in info:
-                        current_forced_sells = info['forced_sells']
-                        if current_forced_sells > self.forced_sells:
-                            # A new forced sell occurred
-                            new_forced_sells = current_forced_sells - self.forced_sells
-                            logger.warning(f"Detected {new_forced_sells} new forced sell(s), total: {current_forced_sells}")
-                            self.forced_sells = current_forced_sells
-                            
-                            # Record forced sells in tensorboard
-                            if hasattr(self, 'logger') and self.logger is not None:
-                                self.logger.record('trades/forced_sells', self.forced_sells)
-                    
-                    # Track take profit sells
-                    if 'take_profit_sells' in info:
-                        current_take_profit_sells = info['take_profit_sells']
-                        if current_take_profit_sells > self.take_profit_sells:
-                            # A new take profit sell occurred
-                            new_take_profit_sells = current_take_profit_sells - self.take_profit_sells
-                            logger.warning(f"Detected {new_take_profit_sells} new take profit sell(s), total: {current_take_profit_sells}")
-                            self.take_profit_sells = current_take_profit_sells
-                            
-                            # Calculate the profit ratio if we have entry and current price
-                            if 'entry_price' in info and 'close_price' in info and info['entry_price'] is not None:
-                                profit_pct = ((info['close_price'] - info['entry_price']) / info['entry_price']) * 100
-                                self.take_profit_ratios.append(profit_pct)
-                                
-                                # Record profit percentage
-                                if hasattr(self, 'logger') and self.logger is not None:
-                                    self.logger.record('trades/take_profit_pct', profit_pct)
-                            
-                            # Record take profit sells in tensorboard
-                            if hasattr(self, 'logger') and self.logger is not None:
-                                self.logger.record('trades/take_profit_sells', self.take_profit_sells)
-                                if len(self.take_profit_ratios) > 0:
-                                    self.logger.record('trades/avg_take_profit_pct', np.mean(self.take_profit_ratios))
-                    
-                    if 'portfolio_value' in info:
-                        portfolio_value = info['portfolio_value']
-                        
-                        # Initialize starting portfolio on first collection
-                        if self.starting_portfolio is None:
-                            self.starting_portfolio = portfolio_value
-                            
-                        # Calculate growth from starting value
-                        if self.starting_portfolio > 0:
-                            growth_pct = ((portfolio_value / self.starting_portfolio) - 1.0) * 100
-                            self.growth_rates.append(growth_pct)
-                            
-                            # Track highest portfolio value
-                            if portfolio_value > self.highest_portfolio:
-                                self.highest_portfolio = portfolio_value
-                                
-                            # Calculate drawdown from peak
-                            if self.highest_portfolio > 0:
-                                drawdown_pct = ((self.highest_portfolio - portfolio_value) / self.highest_portfolio) * 100
-                                self.drawdowns.append(drawdown_pct)
-                                
-                    if 'cooldown_violation' in info:
-                        cooldown_violations = info.get('cooldown_violation', False)
-                    if 'oscillation_detected' in info:
-                        oscillation_count = info.get('oscillation_detected', False)
-                    if 'action' in info:
-                        action = info['action']
-                        if action in self.action_counts:
-                            self.action_counts[action] += 1
-                            self.episode_action_counts[action] += 1
-                    if 'trade' in info:
-                        trade_count = info.get('trade', False)
-                        
-                    # Track additional metrics if available
-                    if 'portfolio_growth_pct' in info:
-                        portfolio_growth = info['portfolio_growth_pct']
-                        if hasattr(self, 'logger') and self.logger is not None:
-                            self.logger.record('portfolio/growth_pct', portfolio_growth)
-                            
-                    if 'highest_portfolio' in info:
-                        highest = info['highest_portfolio']
-                        if hasattr(self, 'logger') and self.logger is not None:
-                            self.logger.record('portfolio/highest_value', highest)
-                    
-                    # Track cash ratio metrics if available
-                    if 'cash_ratio' in info:
-                        cash_ratio = info['cash_ratio']
-                        self.cash_ratios.append(cash_ratio)
-                        
-                        # Update min/max values
-                        self.cash_ratio_min = min(self.cash_ratio_min, cash_ratio)
-                        self.cash_ratio_max = max(self.cash_ratio_max, cash_ratio)
-                        
-                        # Track balanced portfolio metrics
-                        if 0.3 <= cash_ratio <= 0.7:
-                            self.optimal_cash_ratio_count += 1
-                            self.balanced_portfolio_steps += 1
-                            
-                        # Log cash ratio information to tensorboard
-                        if hasattr(self, 'logger') and self.logger is not None:
-                            self.logger.record('portfolio/cash_ratio', cash_ratio)
-                            
-                            # Calculate average cash ratio (over last 100 steps)
-                            if len(self.cash_ratios) > 0:
-                                recent_ratios = self.cash_ratios[-min(100, len(self.cash_ratios)):]
-                                avg_cash_ratio = sum(recent_ratios) / len(recent_ratios)
-                                self.logger.record('portfolio/avg_cash_ratio', avg_cash_ratio)
-                            
-                            # Log balance quality metric (1.0 when in optimal range, 0.0 when far from optimal)
-                            if cash_ratio < 0.3:
-                                balance_quality = cash_ratio / 0.3  # Scales from 0 to 1 as ratio goes from 0 to 0.3
-                            elif cash_ratio > 0.7:
-                                balance_quality = 1.0 - min(1.0, (cash_ratio - 0.7) / 0.3)  # Scales from 1 to 0 as ratio goes from 0.7 to 1.0
-                            else:
-                                balance_quality = 1.0  # Optimal range
-                                
-                            self.logger.record('portfolio/balance_quality', balance_quality)
-                            
-                            # Log percentage of steps with balanced portfolio
-                            if self.debug_steps > 0:
-                                balanced_pct = self.balanced_portfolio_steps / self.debug_steps * 100
-                                self.logger.record('portfolio/balanced_portfolio_pct', balanced_pct)
+                    self.hold_penalties.append(hold_penalty)
+                    self.average_hold_penalty = sum(self.hold_penalties) / len(self.hold_penalties)
             
-            # Print comprehensive stats
-            portfolio_str = f", Portfolio: {portfolio_value:.2f}" if portfolio_value is not None else ""
-            reward_str = f", Reward: {reward:.4f}" if reward is not None else ""
-            action_counts_str = ", ".join([f"{action}: {count}" for action, count in self.action_counts.items() if count > 0])
-            action_str = f", Actions: [{action_counts_str}]" if action_counts_str else ""
-            
-            # Add holding counter and forced sells to logs
-            holding_str = f", Holding counter: {self.last_holding_counter}"
-            forced_sells_str = f", Forced sells: {self.forced_sells}"
-            
-            # Add portfolio growth reporting
-            growth_str = ""
-            if self.starting_portfolio is not None and portfolio_value is not None and self.starting_portfolio > 0:
-                growth_pct = ((portfolio_value / self.starting_portfolio) - 1.0) * 100
-                growth_str = f", Growth: {growth_pct:.2f}%"
+            # Track action distribution
+            if hasattr(safe_wrapper, 'action_counts'):
+                self.action_counts["sell"] = safe_wrapper.action_counts.get(0, 0)
+                self.action_counts["hold"] = safe_wrapper.action_counts.get(1, 0)
+                self.action_counts["buy"] = safe_wrapper.action_counts.get(2, 0)
                 
-                # Add drawdown info if we have peak data
-                if self.highest_portfolio > 0:
-                    drawdown = ((self.highest_portfolio - portfolio_value) / self.highest_portfolio) * 100
-                    growth_str += f", Drawdown: {drawdown:.2f}%"
-            
-            # Show exploration rate
-            exploration_str = ""
-            if hasattr(self.model, 'exploration') and hasattr(self.model.exploration, 'value'):
-                exploration_str = f", Exploration: {self.model.exploration.value:.4f}"
-            
-            metrics_str = f"Trade count: {self.trade_count}, Forced sells: {self.forced_sells}, Cooldown violations: {self.cooldown_violations}"
-            
-            # Log action distributions more frequently to track progress
-            if self.debug_steps % (self.debug_frequency) == 0:
-                # Action distribution table for clearer visibility
                 total_actions = sum(self.action_counts.values())
-                action_table = "Action Distribution:\n"
-                action_table += "-" * 40 + "\n"
-                action_table += "| Action | Count | Percentage |\n"
-                action_table += "-" * 40 + "\n"
-                
-                if total_actions == 0:
-                    # Try to extract actions directly from environments if we're not getting them in info
-                    self._extract_actions_from_envs()
-                    total_actions = sum(self.action_counts.values())
-                
-                for action_name, action_id in {"Sell": 0, "Hold": 1, "Buy": 2}.items():
-                    count = self.action_counts.get(action_id, 0)
-                    percentage = (count / max(1, total_actions)) * 100
-                    action_table += f"| {action_name} | {count} | {percentage:.1f}% |\n"
-                
-                action_table += "-" * 40
-                logger.info(action_table)
-                
-                # Log holding periods histogram if there's data
-                if self.holding_steps_histogram:
-                    holding_table = "Holding Period Distribution:\n"
-                    holding_table += "-" * 40 + "\n"
-                    holding_table += "| Steps | Count |\n"  
-                    holding_table += "-" * 40 + "\n"
+                if total_actions > 0:
+                    self.hold_action_frequency = self.action_counts["hold"] / total_actions
+                    self.hold_ratio = self.action_counts["hold"] / max(1, self.action_counts["sell"] + self.action_counts["buy"])
                     
-                    for steps in sorted(self.holding_steps_histogram.keys()):
-                        count = self.holding_steps_histogram[steps]
-                        holding_table += f"| {steps} | {count} |\n"
-                        
-                    holding_table += "-" * 40
-                    logger.info(holding_table)
-            
-            # Only log basic metrics to console every 5th interval to reduce verbosity
-            if self.debug_steps % (self.debug_frequency * 5) == 0:
-                logger.info(f"Step {self.debug_steps}, {steps_per_second:.1f} steps/s{portfolio_str}{reward_str}{action_str}{exploration_str}{growth_str}{holding_str}{forced_sells_str}")
-                logger.info(f"Training metrics: {metrics_str}")
+            # Track oscillation counts
+            if hasattr(safe_wrapper, 'oscillation_count'):
+                self.oscillation_counts = safe_wrapper.oscillation_count
                 
-                # Show exploration/exploitation stats if available
-                if hasattr(self.model, 'exploration') and hasattr(self.model.exploration, 'value'):
-                    logger.info(f"Exploration rate: {self.model.exploration.value:.4f}")
-            
-            # Log key metrics to tensorboard
-            if hasattr(self, 'logger') and self.logger is not None:
-                self.logger.record('training/steps_per_second', steps_per_second)
-                # Record number of steps per action
-                for action, count in self.action_counts.items():
-                    self.logger.record(f'actions/action_{action}_count', count)
-                
-                # Record portfolio metrics if available
-                if portfolio_value is not None:
-                    self.logger.record('portfolio/current_value', portfolio_value)
-                    
-                    # Record growth metrics
-                    if self.starting_portfolio is not None and self.starting_portfolio > 0:
-                        growth_pct = ((portfolio_value / self.starting_portfolio) - 1.0) * 100
-                        self.logger.record('portfolio/growth_percent', growth_pct)
-                        
-                        # Record highest value and drawdown
-                        self.logger.record('portfolio/highest_value', self.highest_portfolio)
-                        if self.highest_portfolio > 0:
-                            drawdown = ((self.highest_portfolio - portfolio_value) / self.highest_portfolio) * 100
-                            self.logger.record('portfolio/drawdown_percent', drawdown)
-            
-            # Reset counter for steps since last log
-            self.steps_since_last_log = 0
-            self.last_time = current_time
+            # Track action sequence
+            if hasattr(safe_wrapper, 'action_history') and len(safe_wrapper.action_history) > 0:
+                self.actions_sequence = safe_wrapper.action_history[-20:]  # Last 20 actions
         
-        # Log rewards when episodes complete
-        if self.locals is not None and 'dones' in self.locals and 'rewards' in self.locals:
-            for i, done in enumerate(self.locals['dones']):
-                if done:
-                    reward = self.locals['rewards'][i]
-                    self.episode_rewards.append(reward)
-                    self.logger.record('rewards/episodic_reward', reward)
+        # Extract information from base environment
+        if base_env is not None and hasattr(base_env, 'holding_counter'):
+            self.current_hold_duration = base_env.holding_counter
+            
+            # Track forced sells
+            if hasattr(base_env, 'forced_sells'):
+                self.forced_sells = base_env.forced_sells
+                
+            # Update hold duration histogram
+            if self.current_hold_duration > 0:
+                bucket = min(self.current_hold_duration, 20)  # Cap at 20+
+                self.hold_histogram[bucket] = self.hold_histogram.get(bucket, 0) + 1
+                
+            # When not holding (hold_counter is 0), we just completed a holding period
+            if self.current_hold_duration == 0 and len(self.hold_durations) < self.current_hold_duration:
+                self.hold_durations.append(self.current_hold_duration)
+        
+        # Log to TensorBoard on regular intervals
+        if self.num_timesteps % self.debug_frequency == 0 and self.verbose > 0:
+            # Log standard metrics
+            self.logger.record("environment/trade_count", self.trade_count)
+            self.logger.record("environment/episode_count", self.episode_count)
+            
+            # Portfolio metrics
+            if hasattr(base_env, 'portfolio_value'):
+                portfolio_value = base_env.portfolio_value
+                self.portfolio_values.append(portfolio_value)
+                
+                # Initialize initial portfolio if not set
+                if self.initial_portfolio is None:
+                    self.initial_portfolio = portfolio_value
                     
-                    # If info dict available, extract additional metrics
-                    if 'infos' in self.locals and len(self.locals['infos']) > i:
-                        info = self.locals['infos'][i]
-                        
-                        # Track portfolio value
-                        if 'portfolio_value' in info:
-                            portfolio_value = info['portfolio_value']
-                            self.portfolio_values.append(portfolio_value)
-                            self.logger.record('portfolio/value', portfolio_value)
-                            
-                            # Track episode ending portfolio growth
-                            if self.starting_portfolio is not None and self.starting_portfolio > 0:
-                                final_growth_pct = ((portfolio_value / self.starting_portfolio) - 1.0) * 100
-                                self.logger.record('portfolio/episode_end_growth_pct', final_growth_pct)
-                            
-                            # Log episode completion with portfolio value
-                            logger.info(f"Episode complete, reward: {reward:.2f}, portfolio: {portfolio_value:.2f}")
-                        
-                        # Track cooldown violations
-                        if 'cooldown_violation' in info and info['cooldown_violation']:
-                            self.cooldown_violations += 1
-                            self.logger.record('safety/cooldown_violations', self.cooldown_violations)
-                        
-                        # Track oscillations
-                        if 'oscillation_detected' in info and info['oscillation_detected']:
-                            self.oscillation_count += 1
-                            self.logger.record('safety/oscillation_count', self.oscillation_count)
-                        
-                        # Track same price trades
-                        if 'same_price_trade' in info and info['same_price_trade']:
-                            self.same_price_trades += 1
-                            self.logger.record('safety/same_price_trades', self.same_price_trades)
-                        
-                        # Track actions if available
-                        if 'action' in info:
-                            action = info['action']
-                            if action in self.action_counts:
-                                self.action_counts[action] += 1
-                                self.episode_action_counts[action] += 1
-                                
-                                # Calculate action distribution
-                                total_actions = sum(self.action_counts.values())
-                                if total_actions > 0:
-                                    distribution = self.action_counts[action] / total_actions * 100
-                                    self.logger.record(f'actions/distribution_{action}_percent', distribution)
-                        
-                        if 'trade' in info and info['trade']:
-                            self.trade_count += 1
-                            self.logger.record('trades/count', self.trade_count)
-                            
-                            # Trade metrics if available
-                            if 'trade_profit' in info:
-                                trade_profit = info['trade_profit']
-                                if trade_profit > 0:
-                                    self.successful_trades += 1
-                                    self.total_profit += trade_profit
-                                else:
-                                    self.total_loss += abs(trade_profit)
-                                    
-                                self.logger.record('trades/profit', trade_profit)
-                                self.logger.record('trades/successful', self.successful_trades)
-                                self.logger.record('trades/total_profit', self.total_profit)
-                                self.logger.record('trades/total_loss', self.total_loss)
-                                
-                                # Calculate win rate and profit factor
-                                if self.trade_count > 0:
-                                    win_rate = (self.successful_trades / self.trade_count) * 100
-                                    self.logger.record('trades/win_rate', win_rate)
-                                    
-                                if self.total_loss > 0:
-                                    profit_factor = self.total_profit / max(self.total_loss, 1e-6)
-                                    self.logger.record('trades/profit_factor', profit_factor)
-                                    
-                                # Calculate average profit per trade
-                                if self.trade_count > 0:
-                                    avg_profit = (self.total_profit - self.total_loss) / self.trade_count
-                                    self.logger.record('trades/avg_profit', avg_profit)
-                        
-                        # Track forced sells
-                        if 'forced_sells' in info:
-                            forced_sells = info['forced_sells']
-                            if forced_sells > self.forced_sells:
-                                # A new forced sell occurred in this episode
-                                self.forced_sells = forced_sells
-                                self.logger.record('trades/forced_sells', self.forced_sells)
-                                logger.warning(f"Episode ended with {self.forced_sells} total forced sells")
-                        
-                        # Track holding counter at episode end
-                        if 'holding_counter' in info:
-                            end_holding = info['holding_counter']
-                            self.logger.record('trades/episode_end_holding', end_holding)
-                            
-                        # Track episode ending portfolio growth
-                        if self.starting_portfolio is not None and self.starting_portfolio > 0:
-                            final_growth_pct = ((portfolio_value / self.starting_portfolio) - 1.0) * 100
-                            self.logger.record('portfolio/episode_end_growth_pct', final_growth_pct)
-                        
-                        # Log episode completion with portfolio value
-                        logger.info(f"Episode complete, reward: {reward:.2f}, portfolio: {portfolio_value:.2f}")
+                # Update min/max portfolio values
+                self.max_portfolio = max(self.max_portfolio, portfolio_value)
+                self.min_portfolio = min(self.min_portfolio, portfolio_value)
+                
+                # Calculate and log portfolio performance
+                portfolio_growth = (portfolio_value - self.initial_portfolio) / self.initial_portfolio if self.initial_portfolio > 0 else 0
+                self.logger.record("portfolio/value", portfolio_value)
+                self.logger.record("portfolio/growth", portfolio_growth)
+                self.logger.record("portfolio/max_value", self.max_portfolio)
+            
+            # Action distribution
+            self.logger.record("actions/sell_count", self.action_counts["sell"])
+            self.logger.record("actions/hold_count", self.action_counts["hold"])
+            self.logger.record("actions/buy_count", self.action_counts["buy"])
+            self.logger.record("actions/hold_ratio", self.hold_ratio)
+            self.logger.record("actions/hold_frequency", self.hold_action_frequency)
+            
+            # Holding metrics
+            self.logger.record("holding/consecutive_holds", self.consecutive_holds)
+            self.logger.record("holding/max_consecutive_holds", self.max_consecutive_holds)
+            self.logger.record("holding/current_duration", self.current_hold_duration)
+            self.logger.record("holding/average_hold_penalty", self.average_hold_penalty)
+            
+            # Force sell and oscillation metrics
+            self.logger.record("trading/forced_sells", self.forced_sells)
+            self.logger.record("trading/oscillation_count", self.oscillation_counts)
+            
+            # More detailed holding histogram
+            for duration, count in self.hold_histogram.items():
+                self.logger.record(f"holding_histogram/duration_{duration}", count)
+                
+            # Log action sequence pattern (converted to string representation)
+            if len(self.actions_sequence) > 0:
+                action_pattern = ''.join([str(a) for a in self.actions_sequence[-10:]])
+                # Can't log strings directly, so log the pattern as a 'categorical' value
+                self.logger.record(f"actions/recent_pattern", hash(action_pattern) % 1000)
+                
+                # Check for problematic patterns like long holds
+                hold_sequences = [len(list(g)) for k, g in itertools.groupby(self.actions_sequence) if k == 1]
+                if hold_sequences:
+                    self.logger.record("actions/longest_hold_sequence", max(hold_sequences))
+            
+            self.logger.dump(self.num_timesteps)
         
         return True
     
@@ -1767,15 +1321,7 @@ def check_resources():
 
 def train_dqn(env, args, callbacks=None):
     """
-    Train a DQN agent for cryptocurrency trading
-    
-    Args:
-        env: Training environment
-        args: Command line arguments
-        callbacks: List of callbacks for training
-        
-    Returns:
-        Trained DQN model
+    Train a DQN model for trading.
     """
     logger.info("Setting up DQN model with parameters from command line")
     
@@ -1838,7 +1384,7 @@ def train_dqn(env, args, callbacks=None):
         exploration_fraction=exploration_fraction,
         exploration_initial_eps=exploration_initial_eps,
         exploration_final_eps=exploration_final_eps,
-        policy_kwargs={"net_arch": [256, 256], "hold_action_bias": -2.0},  # Apply a -2.0 penalty to hold action
+        policy_kwargs={"net_arch": [256, 256], "hold_action_bias": -4.0},  # Increase penalty from -2.0 to -4.0
         verbose=1,
         tensorboard_log="./logs/dqn/"
     )
