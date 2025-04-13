@@ -34,7 +34,9 @@ class CryptocurrencyTradingEnv(gym.Env):
         action_space: int = 3,
         reward_scaling: float = 1e-4,
         print_verbosity: int = 0,
-        max_holding_steps: int = 50,  # New parameter for maximum holding period
+        max_holding_steps: int = 30,  # Reduced from 50 to 30 for faster forced selling
+        episode_length: int = None,  # New parameter for episode length (in days)
+        randomize_start: bool = True,  # Whether to randomize episode start points
         **kwargs
     ):
         """
@@ -52,6 +54,8 @@ class CryptocurrencyTradingEnv(gym.Env):
             reward_scaling: Scaling factor for rewards
             print_verbosity: Frequency of printing info during execution
             max_holding_steps: Maximum number of steps to hold a position before forced selling
+            episode_length: Length of each episode in days (if None, uses entire dataset)
+            randomize_start: Whether to randomize the start date for each episode
         """
         self.df = df
         self.day = 0
@@ -62,6 +66,24 @@ class CryptocurrencyTradingEnv(gym.Env):
         self.action_space_size = action_space
         self.reward_scaling = reward_scaling
         self.print_verbosity = print_verbosity
+        self.randomize_start = randomize_start
+        
+        # Default episode length to 90 days (3 months) if not specified and if enough data
+        self.total_days = len(df.index.unique())
+        if episode_length is None:
+            # Use 90 days or the full dataset, whichever is smaller
+            self.episode_length = min(90, self.total_days)
+        else:
+            self.episode_length = min(episode_length, self.total_days)
+            
+        # Make sure episode length is at least 30 days
+        self.episode_length = max(30, self.episode_length)
+        
+        # Calculate maximum start day to ensure full episodes
+        self.max_start_day = self.total_days - self.episode_length
+        self.start_day = 0
+        
+        logger.info(f"Episode length set to {self.episode_length} days (out of {self.total_days} total days)")
         
         # Handle lists or floats for transaction costs
         if isinstance(buy_cost_pct, list):
@@ -112,7 +134,14 @@ class CryptocurrencyTradingEnv(gym.Env):
         if seed is not None:
             np.random.seed(seed)
         
-        self.day = 0
+        # Randomize start day if enabled
+        if self.randomize_start and self.max_start_day > 0:
+            self.start_day = np.random.randint(0, self.max_start_day)
+            logger.info(f"Starting new episode from day {self.start_day} (out of {self.total_days})")
+        else:
+            self.start_day = 0
+            
+        self.day = self.start_day
         self.portfolio_value = self.initial_amount
         self.assets_owned = [0] * self.stock_dim
         self.cost = 0
@@ -145,6 +174,34 @@ class CryptocurrencyTradingEnv(gym.Env):
         self.day += 1
         previous_portfolio_value = self.portfolio_value
         
+        # Check if episode is done (reached end of episode length or end of data)
+        episode_end = self.day >= (self.start_day + self.episode_length)
+        data_end = self.day >= len(self.df.index.unique())
+        
+        if episode_end or data_end:
+            # End of episode
+            terminated = True
+            truncated = False
+            self.state = self._get_observation()
+            
+            # Calculate final reward with potential bonus for ending with cash instead of assets
+            reward = 0
+            
+            # Add bonus for ending episode with no assets (encourages selling before end)
+            if self.assets_owned[0] == 0:
+                cash_bonus = 1.0  # Bonus for ending with cash
+                reward += cash_bonus
+                logger.info(f"Episode ended with no assets - applying cash bonus: +{cash_bonus:.2f}")
+            else:
+                # Penalize ending with assets
+                asset_penalty = 0.5  # Penalty for not selling before end
+                reward -= asset_penalty
+                logger.warning(f"Episode ended with {self.assets_owned[0]:.2f} assets - applying penalty: -{asset_penalty:.2f}")
+            
+            info = self._get_info()
+            info['end_reason'] = 'episode_length' if episode_end else 'data_end'
+            return self.state, reward, terminated, truncated, info
+        
         # Get data for current day
         if self.day >= len(self.df.index.unique()):
             # End of data
@@ -174,7 +231,9 @@ class CryptocurrencyTradingEnv(gym.Env):
             if self.holding_counter >= self.max_holding_steps:
                 action_type = 0  # Force sell
                 self.forced_sells += 1
-                logger.info(f"Forcing sell at step {self.day} after holding for {self.holding_counter} steps")
+                # Force a sell of ALL assets (not partial) when we hit the max holding period
+                max_sell_pct = 1.0  # Sell 100% of position when forced
+                logger.warning(f"Forcing FULL sell at step {self.day} after holding for {self.holding_counter} steps")
         else:
             # Reset counter if we don't have assets
             self.holding_counter = 0
@@ -195,10 +254,29 @@ class CryptocurrencyTradingEnv(gym.Env):
         reward = (self.portfolio_value - previous_portfolio_value) * self.reward_scaling
         
         # Add extra reward for sells (action_type 0) to encourage selling
+        # Give even higher reward for sells
         if action_type == 0 and self.assets_owned[0] >= 0:
             # Apply a multiplier to rewards from sell actions
-            sell_reward_multiplier = 1.5  # 50% bonus for sell actions
+            sell_reward_multiplier = 2.0  # Increased from 1.5 to 2.0 for stronger sell incentive
             reward = reward * sell_reward_multiplier
+            
+            # Add a fixed bonus reward for selling regardless of profit/loss
+            # This helps encourage the agent to take more sell actions
+            sell_bonus = 0.5  # Fixed bonus for any sell action
+            reward += sell_bonus
+            
+            # Log when forced sells happen
+            if original_action_type != action_type:
+                logger.warning(f"Forced sell at step {self.day} resulted in reward: {reward:.4f}")
+        
+        # Add a small penalty for long holds to discourage excessive holding
+        if action_type == 1 and self.holding_counter > 10:  # If holding for more than 10 steps
+            hold_penalty = min(0.05 * (self.holding_counter - 10), 0.5)  # Gradually increasing penalty
+            reward -= hold_penalty
+            
+            # Log significant hold penalties
+            if hold_penalty > 0.2:
+                logger.warning(f"Applied hold penalty of {hold_penalty:.4f} after {self.holding_counter} steps of holding")
         
         # Clip reward to prevent extreme values, but with wider limits
         reward = np.clip(reward, -20.0, 20.0)  # Increased from -10.0/10.0 to -20.0/20.0
@@ -243,13 +321,27 @@ class CryptocurrencyTradingEnv(gym.Env):
             if i + 1 < self.state_space:
                 observation[i + 1] = min(self.assets_owned[i], 1e6)  # Clip for stability
         
+        # Add holding counter information to the observation - normalized between 0 and 1
+        # This helps the agent learn about holding duration
+        if self.stock_dim + 2 < self.state_space:
+            holding_counter_normalized = min(self.holding_counter / self.max_holding_steps, 1.0)
+            observation[self.stock_dim + 2] = holding_counter_normalized
+            
+            # Add a warning signal as holding approaches max limit
+            if self.holding_counter > 0.8 * self.max_holding_steps:
+                # Create a stronger signal as we get closer to forced sell
+                sell_urgency = (self.holding_counter - 0.8 * self.max_holding_steps) / (0.2 * self.max_holding_steps)
+                observation[self.stock_dim + 3] = sell_urgency
+            else:
+                observation[self.stock_dim + 3] = 0.0
+        
         # Add market data
         data_index = min(self.day, len(self.df.index.unique()) - 1)
         current_date = self.df.index.unique()[data_index]
         current_data = self.df[self.df.index == current_date]
         
         # Add price data
-        offset = self.stock_dim + 1  # Start after portfolio value and assets owned
+        offset = self.stock_dim + 4  # Start after portfolio value, assets owned, and holding counter
         
         # Add prices and technical indicators
         if not current_data.empty:
@@ -305,8 +397,14 @@ class CryptocurrencyTradingEnv(gym.Env):
             # Only sell if we actually own assets
             if self.assets_owned[asset_index] > 0:
                 # Calculate sell amount with position sizing
-                # Increased sell ratio to allow larger sells - now up to 90% of position
-                max_sell_pct = 0.9  # Increased from 0.5 to 0.9
+                # Check if this is a forced sell action (from max holding time)
+                if self.holding_counter >= self.max_holding_steps:
+                    # If it's a forced sell, sell the entire position
+                    max_sell_pct = 1.0  # Sell 100%
+                else:
+                    # Normal sell - use the standard position sizing
+                    max_sell_pct = 0.9  # Increased from 0.5 to 0.9
+                    
                 sell_amount = min(
                     self.assets_owned[asset_index], 
                     self.assets_owned[asset_index] * max_sell_pct
