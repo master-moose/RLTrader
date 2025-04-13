@@ -1553,7 +1553,7 @@ def main():
     # Create base environment
     logger.info("Creating base environment")
     base_env = CryptocurrencyTradingEnv(
-        data=data,
+        df=data,
         initial_balance=args.initial_balance,
         transaction_fee=args.commission,
         indicators=INDICATORS,
@@ -1579,7 +1579,7 @@ def main():
     # Create vectorized environment
     logger.info("Creating vectorized environment")
     env_kwargs = {
-        "data": data,
+        "df": data,
         "initial_balance": args.initial_balance,
         "transaction_fee": args.commission,
         "indicators": INDICATORS,
