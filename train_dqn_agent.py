@@ -224,8 +224,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
     """
     def __init__(self, *args, **kwargs):
         self.debug_mode = kwargs.pop('debug_mode', False)
-        # Increase default trade cooldown from 10 to 30 steps
-        self.trade_cooldown = kwargs.pop('trade_cooldown', 100)  # Default cooldown of 100 steps
+        # Increase default trade cooldown from 100 to 500 steps
+        self.trade_cooldown = kwargs.pop('trade_cooldown', 500)  # Increased cooldown to 500 steps
         
         # Initialize trading tracking variables
         self._last_trade_step = None
@@ -237,6 +237,10 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         
         # Initialize current step counter
         self.current_step = 0
+        
+        # Add counters for rapid trading attempts
+        self.rapid_trade_attempts = 0
+        self.consecutive_attempts = 0
         
         super().__init__(*args, **kwargs)
         
@@ -257,6 +261,10 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             self.current_step - self._last_trade_step if self._last_trade_step is not None else float('inf')
         )
         
+        # Always log cooldown status at regular intervals to debug
+        if self.current_step % 1000 == 0:
+            logger.debug(f"Steps since last trade: {steps_since_last_trade}/{self.trade_cooldown} at step {self.current_step}")
+        
         # Check if the agent is attempting to trade during cooldown
         attempted_trade_during_cooldown = False
         if steps_since_last_trade < self.trade_cooldown:
@@ -276,7 +284,20 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                     # For scalar actions in discrete space
                     actions = 1  # Hold action
                 
-                logger.debug(f"Enforcing trade cooldown: {steps_since_last_trade}/{self.trade_cooldown} steps since last trade")
+                # Increment counters for rapid trading attempts
+                self.rapid_trade_attempts += 1
+                self.consecutive_attempts += 1
+                
+                # Log at increased severity if many consecutive attempts
+                if self.consecutive_attempts > 10:
+                    logger.warning(f"CRITICAL: Multiple consecutive trade attempts during cooldown: {self.consecutive_attempts}")
+                elif self.consecutive_attempts > 5:
+                    logger.warning(f"Enforcing trade cooldown: {steps_since_last_trade}/{self.trade_cooldown} steps since last trade")
+                else:
+                    logger.debug(f"Enforcing trade cooldown: {steps_since_last_trade}/{self.trade_cooldown} steps since last trade")
+        else:
+            # Reset consecutive attempts counter when not in cooldown
+            self.consecutive_attempts = 0
         
         # Call parent step method
         next_state, reward, done, info = super().step(actions)
@@ -292,7 +313,18 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         new_holdings = self.state[1:self.stock_dim+1]
         trade_occurred = not np.array_equal(current_holdings, new_holdings)
         
+        # Force cooldown even if a trade somehow got through
+        # This is a double-safeguard if the model tries to bypass the cooldown mechanism
         if trade_occurred:
+            # Check if this trade happened too soon after the last one
+            force_cooldown = steps_since_last_trade < self.trade_cooldown
+            
+            if force_cooldown:
+                # If trade happened during cooldown (shouldn't happen but adding as safety)
+                logger.warning(f"Trade somehow executed during cooldown! Applying extreme penalty")
+                # Apply a much more extreme penalty
+                reward -= 10.0 * end_total_asset * self.reward_scaling
+            
             # Update last trade step
             self._last_trade_step = self.current_step
             
@@ -300,9 +332,15 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             for i in range(self.stock_dim):
                 if current_holdings[i] != new_holdings[i]:
                     # Trade occurred for this asset
-                    self._last_trade_price[i] = self.state[self.stock_dim + 1 + i * self.feature_dimension]
+                    old_price = self._last_trade_price.get(i, None)
+                    new_price = self.state[self.stock_dim + 1 + i * self.feature_dimension]
+                    self._last_trade_price[i] = new_price
                     
-                    if self.debug_mode and self.current_step % 500 == 0:
+                    # Check for same-price trades (could indicate a problem)
+                    if old_price is not None and abs(old_price - new_price) < 0.0001:
+                        logger.warning(f"Same price trade detected at step {self.current_step}: asset {i} at price {new_price:.4f}")
+                    
+                    if self.debug_mode or self.current_step % 500 == 0:
                         change = new_holdings[i] - current_holdings[i]
                         action_type = "BUY" if change > 0 else "SELL"
                         logger.info(f"Trade detected at step {self.current_step}: {action_type} asset {i} at price {self._last_trade_price[i]:.4f}")
@@ -311,11 +349,12 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         info['cooldown_remaining'] = max(0, self.trade_cooldown - steps_since_last_trade)
         info['enforced_hold'] = steps_since_last_trade < self.trade_cooldown
         info['attempted_rapid_trade'] = attempted_trade_during_cooldown
+        info['rapid_trade_attempts'] = self.rapid_trade_attempts
         
         # Add rapid trade penalty to reward components if available
         if attempted_trade_during_cooldown:
             reward_components = info.get('reward_components', {})
-            reward_components['rapid_trade_penalty'] = -0.9
+            reward_components['rapid_trade_penalty'] = -1.5  # Increased penalty
             info['reward_components'] = reward_components
         
         # Enhance info dictionary
@@ -339,6 +378,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self._last_trade_price = {}
         self.info_buffer = {}
         self.current_step = 0
+        self.rapid_trade_attempts = 0
+        self.consecutive_attempts = 0
         return super().reset()
     
     def _calculate_reward(self, begin_total_asset, end_total_asset, attempted_trade_during_cooldown=False):
@@ -359,11 +400,17 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Apply penalty for attempted rapid trading
         if attempted_trade_during_cooldown:
             # Apply an extremely severe penalty for rapid trading attempts
-            # Increase from 50% to 90% penalty to absolutely discourage rapid trading
-            penalty = -0.9 * end_total_asset * self.reward_scaling
+            # Increase from 90% to 150% penalty to absolutely discourage rapid trading
+            penalty = -1.5 * end_total_asset * self.reward_scaling
+            
+            # Increase penalty for consecutive attempts
+            if self.consecutive_attempts > 5:
+                penalty *= 2.0  # Double penalty for persistent attempts
+            
             # Ensure penalty is applied immediately in the reward
             base_reward += penalty
-            if self.debug_mode:
+            
+            if self.debug_mode or self.consecutive_attempts > 5:
                 logger.info(f"Applied severe rapid trade penalty: {penalty:.6f}")
         
         return base_reward
@@ -1052,6 +1099,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     logger.info("Using hardcoded crypto exchange maker/taker fees: 0.075%")
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
     
+    # Set trade cooldown explicitly
+    trade_cooldown = getattr(args, 'trade_cooldown', 500)
+    logger.info(f"Setting trade cooldown to {trade_cooldown} steps")
+    
     # Calculate maximum number of shares to trade per step (hmax)
     if 'close' in df.columns:
         avg_price = df['close'].mean()
@@ -1173,7 +1224,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     'sell_cost_pct': [transaction_cost_pct] * stock_dim,  # Pass as list
                     'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
                     'state_space': state_space,  # Add the missing state_space parameter
-                    'print_verbosity': 1 if idx == 0 else 0  # Only print verbose output for the first env
+                    'print_verbosity': 1 if idx == 0 else 0,  # Only print verbose output for the first env
+                    'trade_cooldown': trade_cooldown,  # Explicitly set the trade cooldown
+                    'debug_mode': idx == 0  # Enable debug mode for first environment
                 }
                 
                 # Create the environment
@@ -1749,8 +1802,9 @@ def train_with_finrl(
             self.trade_durations = []
             self.recent_trades = []  # List to track recent trades for trend analysis
             self.max_recent_trades = 100  # Maximum number of recent trades to keep
-            self.rapid_trade_threshold = 5  # Consider trades within 5 steps as rapid
+            self.rapid_trade_threshold = 20  # Consider trades within 20 steps as rapid (increased from 5)
             self.rapid_trades_detected = 0
+            self.rapid_trade_attempts = 0  # Track attempts separately from actual trades
             self.last_trade_step = 0
             self.same_price_trades = 0  # Count trades at exactly the same price (problematic)
             self.last_trade_price = None
@@ -1786,8 +1840,8 @@ def train_with_finrl(
                     win_rate = self.successful_trades / max(1, self.trade_count) * 100
                     print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
                     print(f"Action counts: {self.action_counts}")
-                    if self.rapid_trades_detected > 0:
-                        print(f"WARNING: {self.rapid_trades_detected} rapid trades detected! {self.same_price_trades} at same price!")
+                    if self.rapid_trades_detected > 0 or self.rapid_trade_attempts > 0:
+                        print(f"WARNING: {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} rapid trade attempts! {self.same_price_trades} at same price!")
                 
                 if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
                     # Log a sample of the info dictionary to understand what's available
@@ -1817,6 +1871,24 @@ def train_with_finrl(
                             self.portfolio_values.append(info['portfolio_value'])
                             self.logger.record('portfolio/value', info['portfolio_value'])
                         
+                        # Track rapid trade attempts from environment
+                        if 'rapid_trade_attempts' in info:
+                            attempts = info['rapid_trade_attempts']
+                            if attempts > self.rapid_trade_attempts:
+                                # Only log when the number increases
+                                if attempts % 10 == 0:  # Log periodically
+                                    logger.warning(f"Environment reported {attempts} rapid trade attempts")
+                                self.rapid_trade_attempts = attempts
+                                self.logger.record('trades/rapid_trade_attempts', attempts)
+                        
+                        # Record if this step was an enforced hold
+                        if 'enforced_hold' in info:
+                            self.logger.record('environment/enforced_hold', 1 if info['enforced_hold'] else 0)
+                        
+                        # Record cooldown remaining
+                        if 'cooldown_remaining' in info:
+                            self.logger.record('environment/cooldown_remaining', info['cooldown_remaining'])
+                        
                         # Track position
                         if 'position' in info:
                             position = info['position']
@@ -1832,7 +1904,7 @@ def train_with_finrl(
                                     steps_since_last_trade = self.debug_steps - self.last_trade_step
                                     if steps_since_last_trade < self.rapid_trade_threshold:
                                         self.rapid_trades_detected += 1
-                                        if self.rapid_trades_detected % 10 == 0:  # Log every 10th rapid trade
+                                        if self.rapid_trades_detected % 5 == 0:  # Log every 5th rapid trade
                                             logger.warning(f"Rapid trade detected! Only {steps_since_last_trade} steps since last trade.")
                                     
                                     # Initialize variables that might be used later
@@ -1846,7 +1918,7 @@ def train_with_finrl(
                                         # Check for same price trades (sign of environment issues)
                                         if self.last_trade_price is not None and abs(exit_price - self.last_trade_price) < 0.0001:
                                             self.same_price_trades += 1
-                                            if self.same_price_trades % 10 == 0:  # Log every 10th same-price trade
+                                            if self.same_price_trades % 5 == 0:  # Log every 5th same-price trade
                                                 logger.warning(f"Same price trade detected! Price: {exit_price:.2f}")
                                         
                                         self.last_trade_price = exit_price
@@ -1926,12 +1998,19 @@ def train_with_finrl(
                             self.episode_rewards.append(ep_rew)
                             self.logger.record('episode/reward', ep_rew)
                             
-                            # Reset rapid trade counter at episode end
+                            # Record trade metrics at episode end
                             if self.rapid_trades_detected > 0:
-                                logger.warning(f"Episode ended with {self.rapid_trades_detected} rapid trades detected")
+                                logger.warning(f"Episode ended with {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} attempts")
                                 self.logger.record('trades/rapid_trades', self.rapid_trades_detected)
                                 self.logger.record('trades/same_price_trades', self.same_price_trades)
-                                
+                            
+                            # Record trade win rate
+                            if self.trade_count > 0:
+                                win_rate = self.successful_trades / max(1, self.trade_count) * 100
+                                self.logger.record('trades/win_rate', win_rate)
+                                if self.total_loss > 0:
+                                    self.logger.record('trades/profit_factor', self.total_profit / max(1e-6, self.total_loss))
+                        
             return True  # Continue training
     
     # Create the TensorboardCallback
@@ -2051,6 +2130,10 @@ def parse_args():
     
     # Debugging/verbosity
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
+    
+    # Add trade cooldown parameter
+    parser.add_argument('--trade_cooldown', type=int, default=500,
+                      help='Number of steps to wait between trades (default: 500)')
     
     return parser.parse_args()
 
