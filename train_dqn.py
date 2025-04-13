@@ -71,11 +71,11 @@ logger = logging.getLogger(__name__)
 # Define technical indicators to ensure they're included in the environment
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
 
-# Constants for trading safeguards - ADJUSTING FOR MORE AGGRESSIVE TRADING
-TRADE_COOLDOWN_PERIOD = 5  # Reduced from 15 to 5 - allows much more frequent trading
-OSCILLATION_PENALTY = 50.0  # Reduced from 120.0 to 50.0 - much less penalty for oscillation
-SAME_PRICE_TRADE_PENALTY = 100.0  # Reduced from 250.0 to 100.0
-MAX_TRADE_FREQUENCY = 0.30  # Increased from 0.20 to 0.30 - allow up to 30% of steps to be trades
+# Constants for trading safeguards - ADJUSTING FOR MORE BALANCED TRADING
+TRADE_COOLDOWN_PERIOD = 3  # Further reduced from 5 to 3 - allows even more frequent trading
+OSCILLATION_PENALTY = 20.0  # Further reduced from 50.0 to 20.0 - much less penalty for oscillation
+SAME_PRICE_TRADE_PENALTY = 40.0  # Further reduced from 100.0 to 40.0
+MAX_TRADE_FREQUENCY = 0.50  # Increased from 0.30 to 0.50 - allow up to 50% of steps to be trades
 
 # Class for LSTM feature extraction
 class LSTMFeatureExtractor(BaseFeaturesExtractor):
@@ -524,23 +524,23 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Apply risk-aware reward adjustments
         risk_adjusted_reward = reward
         
-        # Add portfolio growth reward (significant boost)
+        # Add portfolio growth reward (significant boost but less than before)
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
             # Log detailed growth information for debugging at less frequent intervals
             if current_step % 10000 == 0 or (trade_occurred and current_step % 10000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
-            growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0
+            growth_reward = min(growth_pct * 2.0, 2.0)  # Reduced from 3.0 to 2.0 to be less dominant
             risk_adjusted_reward += growth_reward
             
             # Extra reward for achieving new highs
             if self.portfolio_growth_rate > 0:
-                new_high_reward = min(self.portfolio_growth_rate * 5.0, 1.0)
+                new_high_reward = min(self.portfolio_growth_rate * 3.0, 0.5)  # Reduced from 5.0 to 3.0 and max from 1.0 to 0.5
                 risk_adjusted_reward += new_high_reward
         
         # Add drawdown penalty - but make it much less severe
-        if self.max_drawdown > 0.15:  # Only penalize significant drawdowns (>15%)
-            drawdown_penalty = self.max_drawdown * 2.0  # Less severe penalty (reduced from 5.0)
+        if self.max_drawdown > 0.25:  # Only penalize significant drawdowns (increased from 0.15 to 0.25)
+            drawdown_penalty = self.max_drawdown * 1.0  # Less severe penalty (reduced from 2.0 to 1.0)
             risk_adjusted_reward -= drawdown_penalty
         
         # Add hold bonus during early training, but also add holding penalty for extended periods
@@ -548,24 +548,30 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             self.consecutive_holds += 1
             self.hold_duration += 1
             
-            # Small bonus for short-term holds early in training
-            if current_step < 5000 and self.consecutive_holds <= 10:  # Reduced from 10000 to 5000
-                hold_bonus = min(self.consecutive_holds * 0.01, 0.3)
+            # Small bonus for short-term holds early in training (reduced)
+            if current_step < 3000 and self.consecutive_holds <= 5:  # Reduced from 5000 to 3000 and from 10 to 5
+                hold_bonus = min(self.consecutive_holds * 0.005, 0.1)  # Reduced from 0.01 to 0.005 and from 0.3 to 0.1
                 risk_adjusted_reward += hold_bonus
-            # Add penalty for excessive holding after early training - make this more aggressive
-            elif current_step >= 5000 and self.consecutive_holds > 20:  # Reduced from 30 to 20
-                # Gradually increasing penalty for excessive holding
-                hold_penalty = min((self.consecutive_holds - 20) * 0.01, 1.0)  # Increased from 0.005 to 0.01
+            # Add penalty for excessive holding after early training
+            elif current_step >= 3000 and self.consecutive_holds > 30:  # Increased from 20 to 30
+                # Gradually increasing penalty for excessive holding (less aggressive)
+                hold_penalty = min((self.consecutive_holds - 30) * 0.005, 0.5)  # Reduced from 0.01 to 0.005 and max from 1.0 to 0.5
                 risk_adjusted_reward -= hold_penalty
                 if self.consecutive_holds % 50 == 0:
                     logger.warning(f"Excessive holding penalty: -{hold_penalty:.4f} after {self.consecutive_holds} consecutive holds")
         else:
             self.consecutive_holds = 0
         
-        # Add profit streak bonus - reward successful trade streaks more generously
+        # Reward for taking actions (not just holding)
+        if self.action_history and self.action_history[-1] != 1:  # not a hold action
+            # Give reward for exploring buying and selling
+            if current_step < 10000:  # Early in training
+                risk_adjusted_reward += 0.05  # Small bonus to encourage exploration
+        
+        # Add profit streak bonus - less generous to avoid over-optimizing
         if trade_occurred and 'trade_profit' in info and info['trade_profit'] > 0:
             self.successful_trade_streak += 1
-            streak_bonus = min(self.successful_trade_streak * 0.10, 2.0)  # Doubled bonus and max cap
+            streak_bonus = min(self.successful_trade_streak * 0.05, 1.0)  # Reduced from 0.10 to 0.05 and from 2.0 to 1.0
             risk_adjusted_reward += streak_bonus
             self.max_successful_streak = max(self.max_successful_streak, self.successful_trade_streak)
             logger.debug(f"Trade streak bonus: +{streak_bonus:.4f} (streak: {self.successful_trade_streak})")
@@ -641,7 +647,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         stop_loss_price = current_price * 0.98 if current_price is not None else None
         target_price = current_price * 1.04 if current_price is not None else None
         
-        # Check risk-reward ratio before allowing a trade
+        # Check risk-reward ratio before allowing a trade, but be less strict
         if action != 1 and current_price is not None:  # Not a hold action
             # Calculate risk-reward ratio for this potential trade
             risk_reward = self._calculate_risk_reward_ratio(
@@ -651,10 +657,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 stop_loss_price
             )
             
-            # Only allow trades with favorable risk-reward ratio
-            if risk_reward < self.target_risk_reward_ratio:
-                logger.debug(f"Risk-reward ratio {risk_reward:.2f} below target {self.target_risk_reward_ratio:.2f}, forcing hold")
-                action = 1  # Force hold if risk-reward is unfavorable
+            # Only block trades with very unfavorable risk-reward ratio
+            if risk_reward < self.target_risk_reward_ratio * 0.5:  # Reduced threshold by half
+                logger.debug(f"Risk-reward ratio {risk_reward:.2f} far below target {self.target_risk_reward_ratio:.2f}, forcing hold")
+                action = 1  # Force hold if risk-reward is extremely unfavorable
                 
         # Check if we're in a cooldown period
         in_cooldown = (current_step - self.last_trade_step) < self.current_cooldown
@@ -689,31 +695,36 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             price_change_pct = abs(current_price - self.last_trade_price) / self.last_trade_price
             
             # Require larger price movements early in training but be more lenient later
-            required_movement = self.min_profit_threshold
+            required_movement = self.min_profit_threshold * 0.5  # Reduced by half to allow more trades
             
             # More strict requirements depending on training stage, but make strict period shorter
-            if current_step < 300:  # Reduced from 500 to 300
-                required_movement = 0.01  # Reduced from 0.02 to 0.01
-            elif current_step < 1000:  # Reduced from 2000 to 1000
+            if current_step < 150:  # Reduced from 300 to 150
                 required_movement = 0.005  # Reduced from 0.01 to 0.005
-            elif current_step < 3000:  # Reduced from 5000 to 3000
-                required_movement = 0.003  # Reduced from 0.005 to 0.003
+            elif current_step < 500:  # Reduced from 1000 to 500
+                required_movement = 0.002  # Reduced from 0.005 to 0.002
+            elif current_step < 1500:  # Reduced from 3000 to 1500
+                required_movement = 0.001  # Reduced from 0.003 to 0.001
             
             if price_change_pct < required_movement and action != 1:
                 strict_price_requirement = True
                 logger.debug(f"Enforcing hold: price movement {price_change_pct:.4f}% < required {required_movement:.4f}%")
                 action = 1  # Force hold
             
-        # Check for min profit threshold violations - but make this less strict
+        # Check for min profit threshold violations - but be much more lenient
         if current_price is not None:
             # If trying to sell, check if price is higher than last buy
             if action == 0 and self.last_buy_price is not None:
                 profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
                 
-                # Increase profit threshold early in training - but be more lenient
-                min_profit = self.min_profit_threshold
-                if current_step < 2000:  # Reduced from 5000 to 2000
-                    min_profit = 0.005  # Reduced from 0.01 to 0.005
+                # Allow selling at a loss more frequently, especially after early training
+                min_profit = self.min_profit_threshold * 0.25  # Drastically reduced to allow more trading
+                if current_step < 1000:  # Reduced from 2000 to 1000
+                    min_profit = 0.002  # Reduced from 0.005 to 0.002
+                
+                # Start allowing some selling at a loss after initial stage
+                if current_step > 5000 and random.random() < 0.3:
+                    # 30% chance to ignore profit threshold after step 5000
+                    min_profit = -0.01  # Allow selling at up to 1% loss
                 
                 if profit_pct < min_profit:
                     min_profit_violation = True
@@ -723,10 +734,15 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             elif action == 2 and self.last_sell_price is not None:
                 discount_pct = (self.last_sell_price - current_price) / self.last_sell_price
                 
-                # Increase discount threshold early in training - but be more lenient
-                min_discount = self.min_profit_threshold
-                if current_step < 2000:  # Reduced from 5000 to 2000
-                    min_discount = 0.005  # Reduced from 0.01 to 0.005
+                # Allow buying at worse prices more frequently
+                min_discount = self.min_profit_threshold * 0.25  # Drastically reduced
+                if current_step < 1000:  # Reduced from 2000 to 1000
+                    min_discount = 0.002  # Reduced from 0.005 to 0.002
+                
+                # Start allowing some buying at worse prices after initial stage
+                if current_step > 5000 and random.random() < 0.3:
+                    # 30% chance to ignore discount threshold after step 5000
+                    min_discount = -0.01  # Allow buying at up to 1% worse price
                 
                 if discount_pct < min_discount:
                     min_profit_violation = True
@@ -772,10 +788,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     self.last_trade_step = current_step - self.min_cooldown + extended_cooldown
                     logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
-        # Early training stabilization - make this period much shorter
-        if current_step < 50 and action != 1 and current_step % 5 != 0:  # Reduced from 100 to 50 and from 20 to 5
+        # Early training stabilization - make this period much shorter and more permissive
+        if current_step < 25 and action != 1 and current_step % 3 != 0:  # Reduced from 50 to 25 and from 5 to 3
             logger.debug(f"Early training stability: forcing hold at step {current_step}")
-            action = 1  # Force hold action during early training except every 5th step
+            action = 1  # Force hold action during early training except every 3rd step
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
