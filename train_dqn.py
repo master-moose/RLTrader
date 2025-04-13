@@ -1478,11 +1478,22 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
             try:
                 # Format the observations for the LSTM
                 with torch.no_grad():
-                    # Try to forward features through the LSTM model
-                    if hasattr(self.lstm_model, 'forward_features'):
+                    # Check if we need to format observations for the LSTM model
+                    if hasattr(self.lstm_model, 'timeframes'):
+                        # This is a multi-timeframe model
+                        if hasattr(observations, 'items'):
+                            # Observations is already a dictionary
+                            lstm_features = self.lstm_model(observations)
+                        else:
+                            # Create a dictionary with a single timeframe (assuming '15m' as default)
+                            formatted_obs = {'15m': observations.float().unsqueeze(1)}
+                            lstm_features = self.lstm_model(formatted_obs)
+                    elif hasattr(self.lstm_model, 'forward_features'):
+                        # Use dedicated feature extraction method if available
                         lstm_features = self.lstm_model.forward_features(observations.float())
                     else:
                         # Fall back to regular forward if forward_features is not available
+                        # and the model accepts tensor input directly
                         lstm_features, _ = self.lstm_model(observations.float())
                 
                 # Combine the features if LSTM processing was successful
