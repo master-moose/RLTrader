@@ -44,6 +44,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         episode_length: int = None,
         randomize_start: bool = True,
         candles_per_day: int = 1,
+        take_profit_pct: float = 0.03,  # Default 3% take profit
         **kwargs
     ):
         """
@@ -64,6 +65,7 @@ class CryptocurrencyTradingEnv(gym.Env):
             episode_length: Length of each episode in days (if None, uses entire dataset)
             randomize_start: Whether to randomize the start date for each episode
             candles_per_day: Number of candles representing one day (1 for daily, 96 for 15-min)
+            take_profit_pct: Take profit percentage
         """
         self.df = df
         self.day = 0
@@ -137,6 +139,12 @@ class CryptocurrencyTradingEnv(gym.Env):
         
         # Add a safety maximum for portfolio value (increased from 100x to 200x initial amount)
         self.max_portfolio_value = self.initial_amount * 200
+        
+        # Take profit tracking
+        self.take_profit_pct = take_profit_pct
+        self.entry_price = None
+        self.take_profit_price = None
+        self.take_profit_sells = 0
         
         logger.info(f"Created CryptocurrencyTradingEnv with {self.stock_dim} assets")
     
@@ -271,20 +279,43 @@ class CryptocurrencyTradingEnv(gym.Env):
             # If action space is different, interpret based on number of actions
             action_type = action % 3  # Simplified to 3 basic actions
         
-        # Force a sell action if we've been holding for too long and have assets
+        # Get current price for take profit check
+        current_date = self.df.index.unique()[self.day]
+        current_data = self.df[self.df.index == current_date]
+        current_price = current_data.iloc[0]['close']
+        
+        # Check for take profit condition if we have assets and an entry price
         original_action_type = action_type
         prev_assets = self.assets_owned[0]
+        take_profit_triggered = False
         
-        # Only force a sell if we have assets and have been holding them for too long
+        if self.assets_owned[0] > 0 and self.entry_price is not None and self.take_profit_price is not None:
+            # Check if the current price exceeds our take profit target
+            if current_price >= self.take_profit_price:
+                # Force a sell action
+                action_type = 0  # Sell
+                take_profit_triggered = True
+                self.take_profit_sells += 1
+                
+                profit_pct = (current_price - self.entry_price) / self.entry_price * 100
+                logger.warning(
+                    f"TAKE PROFIT TRIGGERED: Original action {original_action_type}, "
+                    f"Current price {current_price:.4f} >= take profit price {self.take_profit_price:.4f} "
+                    f"(profit: {profit_pct:.2f}%)"
+                )
+        
+        # Force a sell action if we've been holding for too long and have assets
+        force_time_sell = False
         if self.assets_owned[0] > 0:
             self.holding_counter += 1
             # Log holding counter more frequently to track progress toward forced sell
             if self.holding_counter >= 4 or self.holding_counter % 2 == 0:  # Start logging from 4+ steps
                 logger.info(f"Holding assets for {self.holding_counter}/{self.max_holding_steps} steps (forced sell threshold)")
             
-            # Force a sell if holding counter exceeds threshold
-            if self.holding_counter >= self.max_holding_steps:
+            # Force a sell if holding counter exceeds threshold AND take profit wasn't already triggered
+            if self.holding_counter >= self.max_holding_steps and not take_profit_triggered:
                 # Force sell with explicit logging that we're overriding the action
+                force_time_sell = True
                 logger.warning(
                     f"FORCING SELL: Original action {original_action_type}, "
                     f"but holding for {self.holding_counter} steps (max: {self.max_holding_steps})"
@@ -299,19 +330,28 @@ class CryptocurrencyTradingEnv(gym.Env):
         else:
             # Reset counter if we don't have assets
             self.holding_counter = 0
+            self.entry_price = None
+            self.take_profit_price = None
         
         # Execute the trade
         self._trade(action_type)
         
-        # Reset counter if position has changed (we sold or bought)
-        if action_type == 0 and self.assets_owned[0] < prev_assets:
-            # Reset counter after selling
-            self.holding_counter = 0
-            logger.info(f"Sold assets at step {self.day}, resetting holding counter to 0")
-        elif action_type == 2 and self.assets_owned[0] > prev_assets:
+        # Update entry price and take profit targets after a buy action
+        if action_type == 2 and self.assets_owned[0] > prev_assets:
+            # Set entry price and take profit targets
+            self.entry_price = current_price
+            self.take_profit_price = current_price * (1 + self.take_profit_pct)
+            logger.info(f"Set entry price to {self.entry_price:.4f} and take profit target to {self.take_profit_price:.4f} (target gain: {self.take_profit_pct*100:.1f}%)")
+            
             # Start counter after buying
             self.holding_counter = 1
             logger.info(f"Bought assets at step {self.day}, setting holding counter to 1")
+        elif action_type == 0 and self.assets_owned[0] < prev_assets:
+            # Reset counter and targets after selling
+            self.holding_counter = 0
+            self.entry_price = None
+            self.take_profit_price = None
+            logger.info(f"Sold assets at step {self.day}, resetting holding counter to 0 and clearing price targets")
         
         # Calculate reward as change in portfolio value
         self.portfolio_value = self._calculate_portfolio_value()
@@ -341,14 +381,19 @@ class CryptocurrencyTradingEnv(gym.Env):
             sell_bonus = 6.0  # Doubled from 3.0 to 6.0 - much higher fixed bonus for any sell action 
             reward += sell_bonus
             
+            # Provide HIGHER rewards for take profit selling
+            if take_profit_triggered:
+                take_profit_bonus = 10.0  # High bonus for take profit sells
+                reward += take_profit_bonus
+                logger.info(f"Applied take profit bonus: +{take_profit_bonus:.2f} at step {self.day}")
             # Provide HIGHER rewards for proactive selling (before being forced)
-            if original_action_type == action_type:  # This was a voluntary sell
+            elif original_action_type == action_type:  # This was a voluntary sell
                 proactive_bonus = 8.0  # Doubled from 4.0 to 8.0 for even stronger proactive sell incentive
                 reward += proactive_bonus
                 logger.info(f"Applied proactive sell bonus: +{proactive_bonus:.2f} at step {self.day}")
             # Log when forced sells happen
-            else:
-                logger.warning(f"Forced sell at step {self.day} resulted in reward: {reward:.4f}")
+            elif force_time_sell:
+                logger.warning(f"Forced time-based sell at step {self.day} resulted in reward: {reward:.4f}")
         
         # Add reward for buy actions to encourage more trading
         elif action_type == 2:
@@ -762,7 +807,10 @@ class CryptocurrencyTradingEnv(gym.Env):
             'actual_day': actual_day,
             'close_price': current_price,
             'holding_counter': self.holding_counter,
-            'forced_sells': self.forced_sells
+            'forced_sells': self.forced_sells,
+            'take_profit_sells': self.take_profit_sells,
+            'take_profit_price': self.take_profit_price,
+            'entry_price': self.entry_price
         }
     
     def render(self, mode='human'):

@@ -207,11 +207,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for trading environments that adds safeguards against:
     1. Rapid trading (enforces a cooldown period)
-    2. Action oscillation (penalizes rapid changes between buy and sell)
-    3. Implements proper risk management strategies
+    2. Action oscillation (prevents rapid buy-sell patterns)
+    3. Risk management (adjusts position sizes based on risk parameters)
     """
     
-    def __init__(self, env, trade_cooldown=TRADE_COOLDOWN_PERIOD, max_history_size=100, max_risk_per_trade=0.02):
+    def __init__(self, env, trade_cooldown=TRADE_COOLDOWN_PERIOD, max_history_size=100, max_risk_per_trade=0.02, take_profit_pct=0.03):
         """Initialize the wrapper with safeguards against harmful trading patterns"""
         super().__init__(env)
         
@@ -230,6 +230,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.cumulative_risk = 0.0  # Track cumulative risk across open positions
         self.max_cumulative_risk = 0.25  # Increased from 0.15 to 0.25 - allow much more risk
         self.risk_per_position = {}  # Track risk per position
+        
+        # Take profit parameters
+        self.take_profit_pct = take_profit_pct
+        self.last_take_profit_price = None
         
         # Trading history tracking
         self.last_trade_step = -self.trade_cooldown  # Start with cooldown already passed
@@ -337,33 +341,33 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.window_size = 1000  # Track last 1000 actions
     
     def reset(self, **kwargs):
-        """Reset the environment and all trading history"""
+        """Reset the environment and all tracking variables"""
         observation, info = self.env.reset(**kwargs)
         
-        # Reset trading history
+        # Reset all tracking variables
         self.action_history = []
         self.position_history = []
         self.last_trade_step = -self.trade_cooldown
         self.last_trade_price = None
-        self.last_buy_price = None
-        self.last_sell_price = None
-        self.previous_position = 0
-        self.current_position = 0
-        
-        # Reset oscillation detection
-        self.oscillation_count = 0
-        self.cooldown_violations = 0
+        self.current_position = 0.0
+        self.previous_position = 0.0
         self.forced_actions = 0
+        self.cooldown_violations = 0
+        self.oscillation_patterns = {
+            'buy_sell_alternation': 0,
+            'rapid_reversals': 0,
+        }
+        self.oscillation_count = 0
+        self.consecutive_same_action = 0
         self.same_price_trades = 0
         self.consecutive_holds = 0
-        self.consecutive_same_action = 0
-        self.last_action = None
-        
-        # Reset risk metrics
-        self.trade_returns = []
-        self.trade_pnl = []
-        self.successful_trades = 0
-        self.failed_trades = 0
+        self.hold_duration = 0
+        self.successful_trade_streak = 0
+        self.max_successful_streak = 0
+        self.max_drawdown = 0.0
+        self.last_buy_price = None
+        self.last_sell_price = None
+        self.last_take_profit_price = None
         
         # Get the initial portfolio value from the environment
         if hasattr(self.env, 'portfolio_value'):
@@ -376,7 +380,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         else:
             self.peak_value = 0.0
             
-        self.max_drawdown = 0.0
+        # Reset performance metrics for the new episode
+        self.portfolio_growth_rate = 0.0
         self.sharpe_ratio = 0.0
         
         # CRITICAL: Do NOT reset the starting_portfolio and highest_portfolio values
@@ -871,6 +876,20 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         elif hasattr(self.env, '_get_current_price'):
             current_price = self.env._get_current_price()
         
+        # Check if take profit was triggered in the environment
+        take_profit_triggered = False
+        if 'take_profit_price' in info and info['take_profit_price'] is not None:
+            self.last_take_profit_price = info['take_profit_price']
+            
+            # Check if a take profit sell was just triggered
+            if 'take_profit_sells' in info and hasattr(self, 'last_take_profit_sells'):
+                if info['take_profit_sells'] > self.last_take_profit_sells:
+                    take_profit_triggered = True
+                    logger.info(f"SafeTradingEnvWrapper detected take profit sell at step {current_step}")
+                self.last_take_profit_sells = info['take_profit_sells']
+            else:
+                self.last_take_profit_sells = info.get('take_profit_sells', 0)
+        
         # Get new position
         if 'assets_owned' in info and len(info['assets_owned']) > 0:
             self.current_position = info['assets_owned'][0]
@@ -1032,6 +1051,12 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Apply risk-aware reward adjustments
         reward = self._calculate_risk_rewards(reward, info, trade_occurred, current_step)
         
+        # Add reward bonus for take profit sells
+        if take_profit_triggered:
+            take_profit_bonus = 5.0  # Bonus for successful take profit strategy
+            reward += take_profit_bonus
+            logger.info(f"Applied additional take profit bonus in wrapper: +{take_profit_bonus:.2f}")
+        
         # Add consistency rewards
         if self.last_action is not None:
             if action == self.last_action:
@@ -1101,8 +1126,13 @@ class TensorboardCallback(BaseCallback):
         
         # Forced sell tracking
         self.forced_sells = 0  # Track total forced sells
+        self.take_profit_sells = 0  # Track total take profit sells
         self.holding_steps_histogram = {}  # Track distribution of holding periods
         self.last_holding_counter = 0  # Track the last holding counter
+        
+        # Take profit tracking
+        self.take_profit_ratios = []  # Track profit percentages on take profit sells
+        self.take_profit_returns = []  # Track returns from take profit sells
         
         # Debug counter
         self.debug_steps = 0
@@ -1136,6 +1166,7 @@ class TensorboardCallback(BaseCallback):
             trade_count = 0
             holding_counter = 0
             forced_sells = 0
+            take_profit_sells = 0
             
             if self.locals is not None:
                 # Get rewards if available
@@ -1173,6 +1204,30 @@ class TensorboardCallback(BaseCallback):
                             # Record forced sells in tensorboard
                             if hasattr(self, 'logger') and self.logger is not None:
                                 self.logger.record('trades/forced_sells', self.forced_sells)
+                    
+                    # Track take profit sells
+                    if 'take_profit_sells' in info:
+                        current_take_profit_sells = info['take_profit_sells']
+                        if current_take_profit_sells > self.take_profit_sells:
+                            # A new take profit sell occurred
+                            new_take_profit_sells = current_take_profit_sells - self.take_profit_sells
+                            logger.warning(f"Detected {new_take_profit_sells} new take profit sell(s), total: {current_take_profit_sells}")
+                            self.take_profit_sells = current_take_profit_sells
+                            
+                            # Calculate the profit ratio if we have entry and current price
+                            if 'entry_price' in info and 'close_price' in info and info['entry_price'] is not None:
+                                profit_pct = ((info['close_price'] - info['entry_price']) / info['entry_price']) * 100
+                                self.take_profit_ratios.append(profit_pct)
+                                
+                                # Record profit percentage
+                                if hasattr(self, 'logger') and self.logger is not None:
+                                    self.logger.record('trades/take_profit_pct', profit_pct)
+                            
+                            # Record take profit sells in tensorboard
+                            if hasattr(self, 'logger') and self.logger is not None:
+                                self.logger.record('trades/take_profit_sells', self.take_profit_sells)
+                                if len(self.take_profit_ratios) > 0:
+                                    self.logger.record('trades/avg_take_profit_pct', np.mean(self.take_profit_ratios))
                     
                     if 'portfolio_value' in info:
                         portfolio_value = info['portfolio_value']
@@ -2145,6 +2200,10 @@ def main():
     # Trading safeguards
     parser.add_argument("--trade_cooldown", type=int, default=TRADE_COOLDOWN_PERIOD, 
                         help=f"Minimum steps between trades (default: {TRADE_COOLDOWN_PERIOD})")
+    parser.add_argument("--max_holding_steps", type=int, default=8,
+                        help="Maximum number of steps to hold before forcing a sell (default: 8)")
+    parser.add_argument("--take_profit_pct", type=float, default=0.03,
+                        help="Take profit percentage for automatic selling (default: 0.03 or 3%)")
     
     # Parse arguments
     args = parser.parse_args()
@@ -2217,8 +2276,15 @@ def main():
     logger.info("Checking system resources before training:")
     check_resources()
     
-    # Create base environment
-    logger.info("Creating base environment")
+    # Get max holding steps parameter from args
+    max_holding_steps = args.max_holding_steps
+    
+    # Get take profit percentage from args
+    take_profit_pct = args.take_profit_pct
+    
+    logger.info(f"Creating trading environment with cooldown period: {args.trade_cooldown}")
+    logger.info(f"Max holding steps: {max_holding_steps}, Take profit: {take_profit_pct*100:.1f}%")
+    
     # Calculate candles per day for 15-minute data
     CANDLES_PER_DAY = 96  # 24 hours * 4 candles per hour for 15-minute data
 
@@ -2231,7 +2297,9 @@ def main():
         tech_indicator_list=INDICATORS,
         episode_length=args.episode_length,
         randomize_start=True,
-        candles_per_day=CANDLES_PER_DAY  # Add parameter to correctly interpret 15-min data
+        candles_per_day=CANDLES_PER_DAY,  # Add parameter to correctly interpret 15-min data
+        max_holding_steps=max_holding_steps,  # Use argument from command line
+        take_profit_pct=take_profit_pct  # Use argument from command line
     )
     
     # Log initial portfolio value
@@ -2246,7 +2314,8 @@ def main():
     safe_env = SafeTradingEnvWrapper(
         env=base_env,
         trade_cooldown=args.trade_cooldown,  # Use value from args
-        max_history_size=100
+        max_history_size=100,
+        take_profit_pct=take_profit_pct  # Add take profit percentage to wrapper
     )
     
     # Wrap with TimeLimit
@@ -2266,7 +2335,9 @@ def main():
         "sell_cost_pct": args.commission,
         "tech_indicator_list": INDICATORS,
         "episode_length": args.episode_length,
-        "candles_per_day": CANDLES_PER_DAY  # Add parameter to correctly interpret 15-min data
+        "candles_per_day": CANDLES_PER_DAY,  # Add parameter to correctly interpret 15-min data
+        "max_holding_steps": max_holding_steps,  # Add max holding steps
+        "take_profit_pct": take_profit_pct  # Add take profit percentage
     }
     
     # Define function to create a wrapped environment
@@ -2274,7 +2345,11 @@ def main():
         base_env = CryptocurrencyTradingEnv(**env_kwargs)
         # Verify initial balance
         logger.info(f"Vector env initialized with balance: {base_env.portfolio_value if hasattr(base_env, 'portfolio_value') else 'unknown'}")
-        safe_env = SafeTradingEnvWrapper(base_env, trade_cooldown=args.trade_cooldown)  # Use value from args
+        safe_env = SafeTradingEnvWrapper(
+            base_env, 
+            trade_cooldown=args.trade_cooldown,
+            take_profit_pct=take_profit_pct
+        )
         time_limit_env = TimeLimit(safe_env, max_episode_steps=args.max_steps)
         return Monitor(time_limit_env, "logs/monitor/")
     
