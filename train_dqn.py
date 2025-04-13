@@ -47,6 +47,7 @@ from pathlib import Path
 import datetime
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
+from collections import deque  # Fix: Import deque from collections module
 
 # Set project root to path
 project_root = str(Path(__file__).parent)
@@ -923,7 +924,6 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
 
 
 class TensorboardCallback(BaseCallback):
-    import deque
     """
     Custom callback for tracking metrics.
     This callback tracks detailed metrics about trading performance and logs them to TensorBoard.
