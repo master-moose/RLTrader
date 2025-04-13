@@ -686,6 +686,42 @@ from crypto_trading_model.utils import set_seeds
 GOOD_TRADE_THRESHOLD = 0.001  # 0.1% profit threshold for a good trade
 BAD_TRADE_THRESHOLD = -0.001  # -0.1% loss threshold for a bad trade
 
+# Add this function to convert gym spaces to gymnasium spaces
+def convert_gym_space(space):
+    """
+    Convert gym spaces to gymnasium spaces.
+    
+    Args:
+        space: The gym space to convert
+        
+    Returns:
+        Equivalent gymnasium space
+    """
+    import gymnasium
+    
+    if isinstance(space, gym.spaces.Discrete):
+        return gymnasium.spaces.Discrete(space.n)
+    elif isinstance(space, gym.spaces.Box):
+        return gymnasium.spaces.Box(
+            low=space.low,
+            high=space.high,
+            shape=space.shape,
+            dtype=space.dtype
+        )
+    elif isinstance(space, gym.spaces.MultiDiscrete):
+        return gymnasium.spaces.MultiDiscrete(space.nvec)
+    elif isinstance(space, gym.spaces.MultiBinary):
+        return gymnasium.spaces.MultiBinary(space.n)
+    elif isinstance(space, gym.spaces.Tuple):
+        subspaces = [convert_gym_space(subspace) for subspace in space.spaces]
+        return gymnasium.spaces.Tuple(subspaces)
+    elif isinstance(space, gym.spaces.Dict):
+        subspaces = {k: convert_gym_space(v) for k, v in space.spaces.items()}
+        return gymnasium.spaces.Dict(subspaces)
+    else:
+        # Default: create a simple box space
+        return gymnasium.spaces.Box(low=-10.0, high=10.0, shape=(16,), dtype=np.float32)
+
 # Add this new class after the import statements but before the main functions
 class DimensionAdjustingVecEnv(DummyVecEnv):
     """
