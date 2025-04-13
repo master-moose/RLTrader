@@ -816,7 +816,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                            f"Portfolio value: {portfolio_value_str}")
         
         # Log action distribution less frequently
-        if current_step % 50000 == 0:
+        if current_step % 100000 == 0:
             action_counts = {}
             for a in self.action_history[-1000:]:
                 if a is not None:
@@ -1062,12 +1062,14 @@ class TensorboardCallback(BaseCallback):
             
             metrics_str = f"Trade count: {self.trade_count}, Cooldown violations: {self.cooldown_violations}, Oscillations: {self.oscillation_count}"
             
-            logger.info(f"Step {self.debug_steps}, {steps_per_second:.1f} steps/s{portfolio_str}{reward_str}{action_str}{exploration_str}{growth_str}")
-            logger.info(f"Training metrics: {metrics_str}")
-            
-            # Show exploration/exploitation stats if available
-            if hasattr(self.model, 'exploration') and hasattr(self.model.exploration, 'value'):
-                logger.info(f"Exploration rate: {self.model.exploration.value:.4f}")
+            # Only log basic metrics to console every 5th interval to reduce verbosity
+            if self.debug_steps % (self.debug_frequency * 5) == 0:
+                logger.info(f"Step {self.debug_steps}, {steps_per_second:.1f} steps/s{portfolio_str}{reward_str}{action_str}{exploration_str}{growth_str}")
+                logger.info(f"Training metrics: {metrics_str}")
+                
+                # Show exploration/exploitation stats if available
+                if hasattr(self.model, 'exploration') and hasattr(self.model.exploration, 'value'):
+                    logger.info(f"Exploration rate: {self.model.exploration.value:.4f}")
             
             # Log key metrics to tensorboard
             if hasattr(self, 'logger') and self.logger is not None:

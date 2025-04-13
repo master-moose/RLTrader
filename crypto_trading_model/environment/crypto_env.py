@@ -520,11 +520,11 @@ class CryptocurrencyTradingEnv(gym.Env):
         
         # Add day-based growth limiting for early training (first 300 steps - reduced from 500)
         if self.day < 300 and total_value > self.initial_amount:
-            # Linear growth cap: allow max 30% increase over initial amount for first 300 steps (up from 20%)
-            max_allowed = self.initial_amount * (1.0 + 0.3 * (self.day / 300))
+            # Linear growth cap: allow max 50% increase over initial amount for first 300 steps (up from 30%)
+            max_allowed = self.initial_amount * (1.0 + 0.5 * (self.day / 300))
             if total_value > max_allowed:
-                # Only log warning if significantly exceeding the growth cap (more than 100% over)
-                if total_value > max_allowed * 2.0:
+                # Only log warning if significantly exceeding the growth cap (more than 3x over)
+                if total_value > max_allowed * 3.0:
                     logger.warning(f"Early training growth limiting: {total_value:.2f} -> {max_allowed:.2f} at day {self.day}")
                 # Scale everything down proportionally
                 scale_factor = max_allowed / total_value
