@@ -1486,6 +1486,12 @@ def train_a2c(env, args, callbacks=None):
     n_steps = args.n_steps
     ent_coef = args.ent_coef
     
+    # Adjust n_steps for more frequent updates if not explicitly set by user
+    # Smaller n_steps leads to more frequent updates
+    if n_steps == 2048:  # If using the default value
+        n_steps = 16384 # Use a smaller value for cryptocurrency trading
+        logger.info(f"Adjusting n_steps from default 2048 to {n_steps} for more frequent updates")
+    
     # Increase entropy coefficient to encourage exploration
     ent_coef = max(ent_coef, 0.05)  # Ensure minimum entropy for exploration
     logger.info(f"Using entropy coefficient: {ent_coef} to encourage action exploration")
@@ -1734,7 +1740,7 @@ def main():
     # Additional training parameters
     parser.add_argument("--learning_rate", type=float, default=0.0003, 
                         help="Learning rate")
-    parser.add_argument("--batch_size", type=int, default=64, 
+    parser.add_argument("--batch_size", type=int, default=2048, 
                         help="Batch size for training")
     parser.add_argument("--gamma", type=float, default=0.99, 
                         help="Discount factor")
@@ -1742,7 +1748,7 @@ def main():
                         help="Random seed")
     
     # PPO/A2C-specific parameters
-    parser.add_argument("--n_steps", type=int, default=2048, 
+    parser.add_argument("--n_steps", type=int, default=512, 
                         help="Number of steps per update for PPO/A2C")
     parser.add_argument("--ent_coef", type=float, default=0.01, 
                         help="Entropy coefficient for PPO/A2C")
