@@ -162,17 +162,31 @@ class BaseStockTradingEnv(gym.Env):
             previous_price = self.df.iloc[self.day-1]['close']
             price_change = (current_price - previous_price) / previous_price
             
+            # Transaction costs - add penalties for trading to discourage excessive trading
+            # Default transaction cost is 0.1% of the trade value
+            transaction_cost = getattr(self, 'transaction_cost_pct', 0.001)
+            trading_penalty = 0
+            
             # Action is 0 (sell), 1 (hold), or 2 (buy)
             if action == 0:  # Sell
                 reward = -price_change  # Reward for selling is positive when price goes down
                 info["action_type"] = "sell"
+                # Apply transaction cost penalty for selling
+                trading_penalty = -transaction_cost * 10
             elif action == 2:  # Buy
                 reward = price_change  # Reward for buying is positive when price goes up
                 info["action_type"] = "buy"
+                # Apply transaction cost penalty for buying
+                trading_penalty = -transaction_cost * 10
             else:  # Hold
                 # Small reward/penalty for holding based on whether price is trending up or down
                 reward = price_change * 0.1
                 info["action_type"] = "hold"
+                # No transaction cost for holding
+            
+            # Add trading penalty to reward
+            reward += trading_penalty
+            info["trading_penalty"] = trading_penalty
             
             # Scale reward for better learning
             reward = reward * 100  # Scale up for better learning signal
@@ -214,6 +228,18 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         """Initialize with enhanced error handling."""
         super().__init__(df, state_space, stock_dim, action_space, **kwargs)
         logger.info("Using PatchedStockTradingEnv to prevent numpy.float64 attribute errors")
+        
+        # Initialize price history and position tracking for improved rewards
+        self.price_history = []
+        self.position = 0  # -1 for short, 0 for neutral, 1 for long
+        self.position_price = 0
+        self.profit_threshold = 0.005  # 0.5% profit threshold
+        self.loss_threshold = -0.01  # 1% loss threshold
+        self.steps_since_last_trade = 0
+        self.trade_count = 0
+        self.successful_trades = 0
+        self.failed_trades = 0
+        self.cooldown_period = 5  # Wait 5 steps between trades to prevent overtrading
     
     def _initiate_state(self):
         """
@@ -261,6 +287,267 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             state_np = np.concatenate([state_np, padding])
         
         return state_np.astype(np.float32)
+    
+    def reset(self):
+        """Reset the environment with enhanced state tracking."""
+        # Call parent reset
+        state = super().reset()
+        
+        # Reset enhanced state tracking variables
+        self.price_history = []
+        self.position = 0
+        self.position_price = 0
+        self.steps_since_last_trade = 0
+        self.trade_count = 0
+        self.successful_trades = 0
+        self.failed_trades = 0
+        
+        # Initialize price history if possible
+        if self.df is not None and self.day < len(self.df):
+            self.price_history.append(float(self.df.iloc[self.day]['close']))
+        
+        return state
+    
+    def step(self, action):
+        """
+        Take a step in the environment with enhanced reward calculation.
+        
+        Args:
+            action: Action to take (0: sell, 1: hold, 2: buy)
+            
+        Returns:
+            tuple of (observation, reward, done, info)
+        """
+        # Store previous price and position for reward calculation
+        prev_position = self.position
+        prev_day = self.day
+        
+        # Get previous price if available
+        prev_price = None
+        if self.df is not None and prev_day < len(self.df):
+            prev_price = float(self.df.iloc[prev_day]['close'])
+        
+        # Save portfolio value before step for reward calculation
+        prev_portfolio_value = self._calculate_portfolio_value(prev_price) if prev_price else 0
+        
+        # Execute parent step function - increments day, updates state
+        self.day += 1
+        done = self.day >= len(self.df) if self.df is not None else False
+        
+        # Start with zero reward and basic info
+        reward = 0.0
+        info = {"terminal_observation": self.state if done else None}
+        
+        # Update price history and get current price
+        current_price = None
+        if self.df is not None and self.day < len(self.df):
+            self.data = self.df.iloc[self.day]
+            current_price = float(self.data['close'])
+            self.price_history.append(current_price)
+            
+            # Ensure price history doesn't grow too large
+            if len(self.price_history) > 20:
+                self.price_history.pop(0)
+        
+        # Only calculate rewards if we have valid prices
+        if prev_price is not None and current_price is not None:
+            # Calculate price change
+            price_change = (current_price - prev_price) / prev_price
+            
+            # Determine action type
+            cooldown_active = self.steps_since_last_trade < self.cooldown_period
+            trade_executed = False
+            trade_type = "hold"
+            
+            # Process the action
+            if action == 0:  # Sell
+                if self.position == 1:  # Close long position
+                    # Calculate profit/loss
+                    profit = (current_price - self.position_price) / self.position_price
+                    
+                    # Record trade result
+                    self.trade_count += 1
+                    if profit > 0:
+                        self.successful_trades += 1
+                    else:
+                        self.failed_trades += 1
+                    
+                    # Update position
+                    self.position = 0
+                    trade_executed = True
+                    trade_type = "close_long"
+                    info["profit"] = profit
+                    
+                elif self.position == 0 and not cooldown_active:  # Open short position
+                    self.position = -1
+                    self.position_price = current_price
+                    trade_executed = True
+                    trade_type = "open_short"
+                
+                info["action_type"] = "sell"
+                
+            elif action == 2:  # Buy
+                if self.position == -1:  # Close short position
+                    # Calculate profit/loss
+                    profit = (self.position_price - current_price) / self.position_price
+                    
+                    # Record trade result
+                    self.trade_count += 1
+                    if profit > 0:
+                        self.successful_trades += 1
+                    else:
+                        self.failed_trades += 1
+                    
+                    # Update position
+                    self.position = 0
+                    trade_executed = True
+                    trade_type = "close_short"
+                    info["profit"] = profit
+                    
+                elif self.position == 0 and not cooldown_active:  # Open long position
+                    self.position = 1
+                    self.position_price = current_price
+                    trade_executed = True
+                    trade_type = "open_long"
+                
+                info["action_type"] = "buy"
+                
+            else:  # Hold
+                info["action_type"] = "hold"
+            
+            # Calculate transaction costs
+            transaction_cost = getattr(self, 'transaction_cost_pct', 0.001)
+            trading_penalty = -transaction_cost * 10 if trade_executed else 0
+            
+            # Update trade cooldown timer
+            if trade_executed:
+                self.steps_since_last_trade = 0
+            else:
+                self.steps_since_last_trade += 1
+            
+            # Calculate portfolio value after action
+            current_portfolio_value = self._calculate_portfolio_value(current_price)
+            
+            # Calculate reward components
+            reward_components = {}
+            
+            # 1. Portfolio value change component (primary reward)
+            portfolio_change = 0
+            if prev_portfolio_value > 0:
+                portfolio_change = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
+            reward_components['portfolio_change'] = portfolio_change * 10.0
+            
+            # 2. Trading penalty for excessive trading
+            reward_components['trading_penalty'] = trading_penalty
+            
+            # 3. Cooldown penalty for trying to trade too soon
+            cooldown_penalty = -0.01 if cooldown_active and (action == 0 or action == 2) else 0
+            reward_components['cooldown_penalty'] = cooldown_penalty
+            
+            # 4. Hold reward to encourage patience
+            hold_reward = 0.001 if action == 1 else 0
+            reward_components['hold_reward'] = hold_reward
+            
+            # 5. Trend-following component
+            trend_reward = 0
+            if len(self.price_history) >= 10:
+                # Calculate short and medium trends
+                short_trend = self.price_history[-1] / self.price_history[-5] - 1  # 5-period trend
+                medium_trend = self.price_history[-1] / self.price_history[-10] - 1  # 10-period trend
+                
+                # Determine if we have strong trend
+                strong_uptrend = short_trend > 0.003 and medium_trend > 0.005
+                strong_downtrend = short_trend < -0.003 and medium_trend < -0.005
+                
+                # Reward for trend-aligned positions
+                if self.position == 1 and strong_uptrend:  # Long in uptrend
+                    trend_reward = 0.003
+                elif self.position == -1 and strong_downtrend:  # Short in downtrend
+                    trend_reward = 0.003
+                # Penalty for counter-trend positions
+                elif self.position == 1 and strong_downtrend:  # Long in downtrend
+                    trend_reward = -0.003
+                elif self.position == -1 and strong_uptrend:  # Short in uptrend
+                    trend_reward = -0.003
+            reward_components['trend_reward'] = trend_reward
+            
+            # 6. Position holding component - reward for profitable position
+            position_reward = 0
+            if self.position == 1 and current_price > self.position_price:  # Profitable long
+                position_reward = 0.002
+            elif self.position == -1 and current_price < self.position_price:  # Profitable short
+                position_reward = 0.002
+            reward_components['position_reward'] = position_reward
+            
+            # 7. Stop loss component - penalty for holding losing positions
+            stop_loss_penalty = 0
+            if self.position == 1 and (current_price < self.position_price * 0.98):  # 2% loss in long
+                stop_loss_penalty = -0.005
+            elif self.position == -1 and (current_price > self.position_price * 1.02):  # 2% loss in short
+                stop_loss_penalty = -0.005
+            reward_components['stop_loss_penalty'] = stop_loss_penalty
+            
+            # 8. Bonus for taking profits at good levels
+            profit_taking_reward = 0
+            if trade_type in ["close_long", "close_short"] and 'profit' in info:
+                profit = info['profit']
+                if profit > self.profit_threshold:  # Good profit
+                    profit_taking_reward = 0.005
+                elif profit < self.loss_threshold:  # Bad loss
+                    profit_taking_reward = -0.005
+            reward_components['profit_taking_reward'] = profit_taking_reward
+            
+            # Sum all reward components
+            for component, value in reward_components.items():
+                reward += value
+            
+            # Apply reward scaling
+            reward_scaling = getattr(self, 'reward_scaling', 1.0)
+            reward *= reward_scaling
+            
+            # Clip reward to reasonable range
+            reward = np.clip(reward, -1.0, 1.0)
+            
+            # Add reward components to info
+            info['reward_components'] = reward_components
+            info['price_change'] = price_change
+            info['position'] = self.position
+            info['steps_since_trade'] = self.steps_since_last_trade
+            info['trade_executed'] = trade_executed
+            info['trade_type'] = trade_type
+            info['trade_count'] = self.trade_count
+            info['win_rate'] = self.successful_trades / max(1, self.trade_count)
+            info['portfolio_value'] = current_portfolio_value
+        
+        # Update state
+        self.state = self._initiate_state()
+        
+        return self.state, reward, done, info
+    
+    def _calculate_portfolio_value(self, price):
+        """
+        Calculate the current portfolio value.
+        
+        Args:
+            price: Current price
+            
+        Returns:
+            float: Current portfolio value
+        """
+        if price is None:
+            return 0
+        
+        # Calculate position value based on current position
+        position_value = 0
+        if self.position == 1:  # Long position
+            position_value = price * 100  # Assume 100 shares for simplicity
+        elif self.position == -1:  # Short position
+            position_value = (2 * self.position_price - price) * 100  # Simplified short value
+        
+        # Add cash component (simplified)
+        cash = getattr(self, 'initial_amount', 10000)
+        
+        return cash + position_value
 
 # Original imports
 from crypto_trading_model.trading_environment import TradingEnvironment
@@ -1982,14 +2269,15 @@ def train_with_finrl(
         model = PPO(
             "MlpPolicy", 
             vec_env,
-            learning_rate=learning_rate,
+            learning_rate=lambda progress: learning_rate * (1.0 - progress),  # Linear schedule
             gamma=getattr(args, 'gamma', 0.99),
             n_steps=n_steps,       # Larger batch size for better GPU utilization
             batch_size=batch_size, # Minibatch size for updates
             n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-            ent_coef=0.05,         # Increased entropy coefficient for better exploration
-            vf_coef=1.0,           # Increased value function coefficient
+            ent_coef=lambda progress: 0.05 * (1.0 - progress) + 0.01,  # Schedule from 0.05 to 0.01
+            vf_coef=0.5,           # Reduced value function coefficient
             clip_range_vf=0.4,     # Enable value function clipping
+            target_kl=0.02,        # Limit policy update size
             verbose=1 if args.verbose else 0,
             tensorboard_log="./tensorboard_logs",
             device=device,
@@ -2631,14 +2919,15 @@ def main():
                 model = PPO(
                     "MlpPolicy", 
                     vec_env,
-                    learning_rate=learning_rate,
+                    learning_rate=lambda progress: learning_rate * (1.0 - progress),  # Linear schedule
                     gamma=getattr(args, 'gamma', 0.99),
                     n_steps=n_steps,       # Larger batch size for better GPU utilization
                     batch_size=batch_size, # Minibatch size for updates
                     n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-                    ent_coef=0.05,         # Increased entropy coefficient for better exploration
-                    vf_coef=1.0,           # Increased value function coefficient
+                    ent_coef=lambda progress: 0.05 * (1.0 - progress) + 0.01,  # Schedule from 0.05 to 0.01
+                    vf_coef=0.5,           # Reduced value function coefficient
                     clip_range_vf=0.4,     # Enable value function clipping
+                    target_kl=0.02,        # Limit policy update size
                     verbose=1 if args.verbose else 0,
                     tensorboard_log="./tensorboard_logs",
                     device=device,
