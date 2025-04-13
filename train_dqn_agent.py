@@ -220,334 +220,88 @@ logger.info("Using StockTradingEnv as CryptocurrencyTradingEnv")
 # Add a custom patched version of StockTradingEnv that fixes common issues
 class PatchedStockTradingEnv(BaseStockTradingEnv):
     """
-    A patched version of the StockTradingEnv that fixes common issues with the FinRL implementation,
-    specifically the 'values' attribute error on numpy scalars.
+    Enhanced version of the StockTradingEnv to fix issues and add features
     """
-    
-    def __init__(self, df=None, state_space=16, stock_dim=1, action_space=3, **kwargs):
-        """Initialize with enhanced error handling."""
-        super().__init__(df, state_space, stock_dim, action_space, **kwargs)
-        logger.info("Using PatchedStockTradingEnv to prevent numpy.float64 attribute errors")
+    def __init__(self, *args, **kwargs):
+        self.debug_mode = kwargs.pop('debug_mode', False)
+        self.trade_cooldown = kwargs.pop('trade_cooldown', 10)  # Default cooldown of 10 steps
         
-        # Initialize price history and position tracking for improved rewards
-        self.price_history = []
-        self.position = 0  # -1 for short, 0 for neutral, 1 for long
-        self.position_price = 0
-        self.profit_threshold = 0.005  # 0.5% profit threshold
-        self.loss_threshold = -0.01  # 1% loss threshold
-        self.steps_since_last_trade = 0
-        self.trade_count = 0
-        self.successful_trades = 0
-        self.failed_trades = 0
-        self.cooldown_period = 5  # Wait 5 steps between trades to prevent overtrading
-    
-    def _initiate_state(self):
-        """
-        Initialize state with protection against the 'values' attribute error.
-        This is a replacement for the problematic method in FinRL's implementation.
-        """
-        # Start with basic state (cash + owned stocks)
-        state = [self.initial_amount] + self.num_stock_shares
+        # Initialize trading tracking variables
+        self._last_trade_step = None
+        self._last_trade_price = {}  # Track last trade price per asset
+        self.info_buffer = {}  # Buffer for additional info
         
-        # Add current price data safely
-        if self.df is not None and self.day < len(self.df):
-            # Get current day data
-            data = self.df.iloc[self.day]
+        super().__init__(*args, **kwargs)
+        
+        # Log creation of environment
+        logger.info(f"Created PatchedStockTradingEnv with {self.stock_dim} assets and trade cooldown of {self.trade_cooldown}")
+        
+    def step(self, actions):
+        """
+        Override step method to track trades and provide enhanced logging
+        """
+        begin_total_asset = self.get_total_asset_value()
+        
+        # Detect if this step includes a trade
+        current_holdings = self.state[1:self.stock_dim+1].copy()
+        
+        # Call parent step method
+        next_state, reward, done, info = super().step(actions)
+        
+        # Update reward based on our custom calculation
+        end_total_asset = self.get_total_asset_value()
+        reward = self._calculate_reward(begin_total_asset, end_total_asset)
+        
+        # Check if trade occurred by comparing holdings before and after
+        new_holdings = self.state[1:self.stock_dim+1]
+        trade_occurred = not np.array_equal(current_holdings, new_holdings)
+        
+        if trade_occurred:
+            # Update last trade step
+            self._last_trade_step = self.current_step
             
-            # Add price for each stock, avoiding the 'values' attribute issue
+            # Update last trade prices
             for i in range(self.stock_dim):
-                # For multiple stocks, use column index, for single stock use 'close'
-                if self.stock_dim > 1 and i < len(data):
-                    state.append(float(data.iloc[i]['close']) if hasattr(data, 'iloc') else float(data['close']))
-                else:
-                    state.append(float(data['close']) if 'close' in data else 0.0)
+                if current_holdings[i] != new_holdings[i]:
+                    # Trade occurred for this asset
+                    self._last_trade_price[i] = self.state[self.stock_dim + 1 + i * self.feature_dimension]
+                    
+                    if self.debug_mode and self.current_step % 500 == 0:
+                        change = new_holdings[i] - current_holdings[i]
+                        action_type = "BUY" if change > 0 else "SELL"
+                        logger.info(f"Trade detected at step {self.current_step}: {action_type} asset {i} at price {self._last_trade_price[i]:.4f}")
+        
+        # Enhance info dictionary
+        info.update(self.info_buffer)
+        self.info_buffer = {}  # Reset buffer
+        
+        # Add trade tracking info
+        info['trade_occurred'] = trade_occurred
+        if trade_occurred:
+            info['steps_since_last_trade'] = 0
+        elif self._last_trade_step is not None:
+            info['steps_since_last_trade'] = self.current_step - self._last_trade_step
             
-            # Add technical indicators
-            for indicator in self.tech_indicator_list:
-                if indicator in data:
-                    # Safely extract indicator value
-                    value = data[indicator]
-                    if hasattr(value, 'values') and len(value.values) > 0:
-                        state.append(float(value.values[0]))
-                    elif isinstance(value, (float, int, np.number)):
-                        state.append(float(value))
-                    else:
-                        # Default value if we can't extract safely
-                        state.append(0.0)
-                else:
-                    state.append(0.0)
+        return next_state, reward, done, info
         
-        # Ensure the state has the correct dimension
-        state_np = np.array(state)
-        if len(state_np) > self.state_space:
-            state_np = state_np[:self.state_space]
-        elif len(state_np) < self.state_space:
-            # Pad with zeros
-            padding = np.zeros(self.state_space - len(state_np))
-            state_np = np.concatenate([state_np, padding])
-        
-        return state_np.astype(np.float32)
-    
     def reset(self):
-        """Reset the environment with enhanced state tracking."""
-        # Call parent reset
-        state = super().reset()
-        
-        # Reset enhanced state tracking variables
-        self.price_history = []
-        self.position = 0
-        self.position_price = 0
-        self.steps_since_last_trade = 0
-        self.trade_count = 0
-        self.successful_trades = 0
-        self.failed_trades = 0
-        
-        # Initialize price history if possible
-        if self.df is not None and self.day < len(self.df):
-            self.price_history.append(float(self.df.iloc[self.day]['close']))
-        
-        return state
-    
-    def step(self, action):
         """
-        Take a step in the environment with enhanced reward calculation.
-        
-        Args:
-            action: Action to take (0: sell, 1: hold, 2: buy)
-            
-        Returns:
-            tuple of (observation, reward, done, info)
+        Override reset to initialize trading variables
         """
-        # Store previous price and position for reward calculation
-        prev_position = self.position
-        prev_day = self.day
+        self._last_trade_step = None
+        self._last_trade_price = {}
+        self.info_buffer = {}
+        return super().reset()
         
-        # Get previous price if available
-        prev_price = None
-        if self.df is not None and prev_day < len(self.df):
-            prev_price = float(self.df.iloc[prev_day]['close'])
-        
-        # Save portfolio value before step for reward calculation
-        prev_portfolio_value = self._calculate_portfolio_value(prev_price) if prev_price else 0
-        
-        # Execute parent step function - increments day, updates state
-        self.day += 1
-        done = self.day >= len(self.df) if self.df is not None else False
-        
-        # Start with zero reward and basic info
-        reward = 0.0
-        info = {"terminal_observation": self.state if done else None}
-        
-        # Update price history and get current price
-        current_price = None
-        if self.df is not None and self.day < len(self.df):
-            self.data = self.df.iloc[self.day]
-            current_price = float(self.data['close'])
-            self.price_history.append(current_price)
-            
-            # Ensure price history doesn't grow too large
-            if len(self.price_history) > 20:
-                self.price_history.pop(0)
-        
-        # Only calculate rewards if we have valid prices
-        if prev_price is not None and current_price is not None:
-            # Calculate price change
-            price_change = (current_price - prev_price) / prev_price
-            
-            # Determine action type
-            cooldown_active = self.steps_since_last_trade < self.cooldown_period
-            trade_executed = False
-            trade_type = "hold"
-            
-            # Process the action
-            if action == 0:  # Sell
-                if self.position == 1:  # Close long position
-                    # Calculate profit/loss
-                    profit = (current_price - self.position_price) / self.position_price
-                    
-                    # Record trade result
-                    self.trade_count += 1
-                    if profit > 0:
-                        self.successful_trades += 1
-                    else:
-                        self.failed_trades += 1
-                    
-                    # Update position
-                    self.position = 0
-                    trade_executed = True
-                    trade_type = "close_long"
-                    info["profit"] = profit
-                    
-                elif self.position == 0 and not cooldown_active:  # Open short position
-                    self.position = -1
-                    self.position_price = current_price
-                    trade_executed = True
-                    trade_type = "open_short"
-                
-                info["action_type"] = "sell"
-                
-            elif action == 2:  # Buy
-                if self.position == -1:  # Close short position
-                    # Calculate profit/loss
-                    profit = (self.position_price - current_price) / self.position_price
-                    
-                    # Record trade result
-                    self.trade_count += 1
-                    if profit > 0:
-                        self.successful_trades += 1
-                    else:
-                        self.failed_trades += 1
-                    
-                    # Update position
-                    self.position = 0
-                    trade_executed = True
-                    trade_type = "close_short"
-                    info["profit"] = profit
-                    
-                elif self.position == 0 and not cooldown_active:  # Open long position
-                    self.position = 1
-                    self.position_price = current_price
-                    trade_executed = True
-                    trade_type = "open_long"
-                
-                info["action_type"] = "buy"
-                
-            else:  # Hold
-                info["action_type"] = "hold"
-            
-            # Calculate transaction costs
-            transaction_cost = getattr(self, 'transaction_cost_pct', 0.001)
-            trading_penalty = -transaction_cost * 10 if trade_executed else 0
-            
-            # Update trade cooldown timer
-            if trade_executed:
-                self.steps_since_last_trade = 0
-            else:
-                self.steps_since_last_trade += 1
-            
-            # Calculate portfolio value after action
-            current_portfolio_value = self._calculate_portfolio_value(current_price)
-            
-            # Calculate reward components
-            reward_components = {}
-            
-            # 1. Portfolio value change component (primary reward)
-            portfolio_change = 0
-            if prev_portfolio_value > 0:
-                portfolio_change = (current_portfolio_value - prev_portfolio_value) / prev_portfolio_value
-            reward_components['portfolio_change'] = portfolio_change * 10.0
-            
-            # 2. Trading penalty for excessive trading
-            reward_components['trading_penalty'] = trading_penalty
-            
-            # 3. Cooldown penalty for trying to trade too soon
-            cooldown_penalty = -0.01 if cooldown_active and (action == 0 or action == 2) else 0
-            reward_components['cooldown_penalty'] = cooldown_penalty
-            
-            # 4. Hold reward to encourage patience
-            hold_reward = 0.001 if action == 1 else 0
-            reward_components['hold_reward'] = hold_reward
-            
-            # 5. Trend-following component
-            trend_reward = 0
-            if len(self.price_history) >= 10:
-                # Calculate short and medium trends
-                short_trend = self.price_history[-1] / self.price_history[-5] - 1  # 5-period trend
-                medium_trend = self.price_history[-1] / self.price_history[-10] - 1  # 10-period trend
-                
-                # Determine if we have strong trend
-                strong_uptrend = short_trend > 0.003 and medium_trend > 0.005
-                strong_downtrend = short_trend < -0.003 and medium_trend < -0.005
-                
-                # Reward for trend-aligned positions
-                if self.position == 1 and strong_uptrend:  # Long in uptrend
-                    trend_reward = 0.003
-                elif self.position == -1 and strong_downtrend:  # Short in downtrend
-                    trend_reward = 0.003
-                # Penalty for counter-trend positions
-                elif self.position == 1 and strong_downtrend:  # Long in downtrend
-                    trend_reward = -0.003
-                elif self.position == -1 and strong_uptrend:  # Short in uptrend
-                    trend_reward = -0.003
-            reward_components['trend_reward'] = trend_reward
-            
-            # 6. Position holding component - reward for profitable position
-            position_reward = 0
-            if self.position == 1 and current_price > self.position_price:  # Profitable long
-                position_reward = 0.002
-            elif self.position == -1 and current_price < self.position_price:  # Profitable short
-                position_reward = 0.002
-            reward_components['position_reward'] = position_reward
-            
-            # 7. Stop loss component - penalty for holding losing positions
-            stop_loss_penalty = 0
-            if self.position == 1 and (current_price < self.position_price * 0.98):  # 2% loss in long
-                stop_loss_penalty = -0.005
-            elif self.position == -1 and (current_price > self.position_price * 1.02):  # 2% loss in short
-                stop_loss_penalty = -0.005
-            reward_components['stop_loss_penalty'] = stop_loss_penalty
-            
-            # 8. Bonus for taking profits at good levels
-            profit_taking_reward = 0
-            if trade_type in ["close_long", "close_short"] and 'profit' in info:
-                profit = info['profit']
-                if profit > self.profit_threshold:  # Good profit
-                    profit_taking_reward = 0.005
-                elif profit < self.loss_threshold:  # Bad loss
-                    profit_taking_reward = -0.005
-            reward_components['profit_taking_reward'] = profit_taking_reward
-            
-            # Sum all reward components
-            for component, value in reward_components.items():
-                reward += value
-            
-            # Apply reward scaling
-            reward_scaling = getattr(self, 'reward_scaling', 1.0)
-            reward *= reward_scaling
-            
-            # Clip reward to reasonable range
-            reward = np.clip(reward, -1.0, 1.0)
-            
-            # Add reward components to info
-            info['reward_components'] = reward_components
-            info['price_change'] = price_change
-            info['position'] = self.position
-            info['steps_since_trade'] = self.steps_since_last_trade
-            info['trade_executed'] = trade_executed
-            info['trade_type'] = trade_type
-            info['trade_count'] = self.trade_count
-            info['win_rate'] = self.successful_trades / max(1, self.trade_count)
-            info['portfolio_value'] = current_portfolio_value
-        
-        # Update state
-        self.state = self._initiate_state()
-        
-        return self.state, reward, done, info
-    
-    def _calculate_portfolio_value(self, price):
+    def get_total_asset_value(self):
         """
-        Calculate the current portfolio value.
-        
-        Args:
-            price: Current price
-            
-        Returns:
-            float: Current portfolio value
+        Calculate the total asset value (cash + stocks)
         """
-        if price is None:
-            return 0
-        
-        # Calculate position value based on current position
-        position_value = 0
-        if self.position == 1:  # Long position
-            position_value = price * 100  # Assume 100 shares for simplicity
-        elif self.position == -1:  # Short position
-            position_value = (2 * self.position_price - price) * 100  # Simplified short value
-        
-        # Add cash component (simplified)
-        cash = getattr(self, 'initial_amount', 10000)
-        
-        return cash + position_value
+        if self.stock_dim > 0:
+            return self.state[0] + sum(
+                self.state[1:self.stock_dim+1] * self.state[self.stock_dim+1:self.stock_dim+1+self.stock_dim*self.feature_dimension:self.feature_dimension]
+            )
+        return self.state[0]  # Just cash
 
 # Original imports
 from crypto_trading_model.trading_environment import TradingEnvironment
@@ -1901,41 +1655,41 @@ def train_with_finrl(
     # Define callback to log metrics to tensorboard
     class TensorboardCallback(BaseCallback):
         def __init__(self, verbose=0):
-            super().__init__(verbose)
-            # Episode tracking
+            super(TensorboardCallback, self).__init__(verbose)
+            # Track episode rewards and metadata
             self.episode_rewards = []
-            self.episode_lengths = []
-            self.current_episode_reward = 0
-            self.current_episode_length = 0
-            
-            # Portfolio tracking
             self.portfolio_values = []
-            
-            # Trade metrics tracking
-            self.trade_count = 0
-            self.successful_trades = 0
-            self.failed_trades = 0
             self.total_profit = 0
             self.total_loss = 0
-            self.action_counts = {'buy': 0, 'sell': 0, 'hold': 0}
+            self.successful_trades = 0
+            self.failed_trades = 0
+            self.trade_count = 0
+            self.current_position = 0
+            self.position_start_time = 0
+            self.entry_price = 0
+            self.action_counts = {"buy": 0, "sell": 0, "hold": 0}
+            
+            # New tracking metrics for rapid trades
             self.trade_returns = []
             self.trade_durations = []
             self.recent_trades = []  # List to track recent trades for trend analysis
             self.max_recent_trades = 100  # Maximum number of recent trades to keep
+            self.rapid_trade_threshold = 5  # Consider trades within 5 steps as rapid
+            self.rapid_trades_detected = 0
+            self.last_trade_step = 0
+            self.same_price_trades = 0  # Count trades at exactly the same price (problematic)
+            self.last_trade_price = None
             
             # Position tracking
             self.current_position = 0
-            self.entry_price = 0
-            self.position_start_time = 0
             
-            # Debug info
+            # For debugging
             self.debug_steps = 0
             self.last_debug_output = 0
-            self.debug_frequency = 500  # Reduce logging frequency (was 5000)
-            self.log_flush_frequency = 5000  # Flush logs more frequently (was 20000)
+            self.debug_frequency = 500  # Output debug info every 500 steps
+            self.log_flush_frequency = 5000  # Flush logs more frequently
             
-            logger.info("TensorboardCallback initialized - Will track trading metrics")
-            print("TensorboardCallback initialized - Will track trading metrics and output to console")
+            logger.info("Enhanced TensorboardCallback initialized - Will track trading metrics with rapid trade detection")
         
         def _on_step(self):
             # Increment step counter for debugging
@@ -1957,8 +1711,11 @@ def train_with_finrl(
                     win_rate = self.successful_trades / max(1, self.trade_count) * 100
                     print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
                     print(f"Action counts: {self.action_counts}")
+                    if self.rapid_trades_detected > 0:
+                        print(f"WARNING: {self.rapid_trades_detected} rapid trades detected! {self.same_price_trades} at same price!")
                 
                 if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
+                    # Log a sample of the info dictionary to understand what's available
                     logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
                 self.last_debug_output = self.debug_steps
             
@@ -1967,12 +1724,9 @@ def train_with_finrl(
                 self.logger.dump_tabular()
             
             # Track step reward
-            if hasattr(self, 'locals') and 'rewards' in self.locals:
-                rewards = self.locals['rewards']
-                for i, reward in enumerate(rewards):
-                    # Update the current episode rewards
-                    self.current_episode_reward += reward
-                    self.current_episode_length += 1
+            # Collect information from each environment
+            if hasattr(self, 'locals') and 'dones' in self.locals:
+                for i, done in enumerate(self.locals['dones']):
                     
                     # Log environment info if available
                     if 'infos' in self.locals and i < len(self.locals['infos']):
@@ -1991,7 +1745,6 @@ def train_with_finrl(
                         # Track position
                         if 'position' in info:
                             position = info['position']
-                            self.logger.record('portfolio/position', position)
                             
                             # Position change detection for trade tracking
                             if position != self.current_position:
@@ -2000,13 +1753,28 @@ def train_with_finrl(
                                     trade_duration = self.debug_steps - self.position_start_time
                                     self.trade_durations.append(trade_duration)
                                     
+                                    # Check for rapid trading
+                                    steps_since_last_trade = self.debug_steps - self.last_trade_step
+                                    if steps_since_last_trade < self.rapid_trade_threshold:
+                                        self.rapid_trades_detected += 1
+                                        if self.rapid_trades_detected % 10 == 0:  # Log every 10th rapid trade
+                                            logger.warning(f"Rapid trade detected! Only {steps_since_last_trade} steps since last trade.")
+                                    
                                     # Initialize variables that might be used later
                                     exit_price = 0
                                     pnl = 0
                                     
-                                    # Check if we have a price to calculate P&L
+                                    # Calculate trade results
                                     if 'close' in info:
                                         exit_price = info['close']
+                                        
+                                        # Check for same price trades (sign of environment issues)
+                                        if self.last_trade_price is not None and abs(exit_price - self.last_trade_price) < 0.0001:
+                                            self.same_price_trades += 1
+                                            if self.same_price_trades % 10 == 0:  # Log every 10th same-price trade
+                                                logger.warning(f"Same price trade detected! Price: {exit_price:.2f}")
+                                        
+                                        self.last_trade_price = exit_price
                                         pnl = (exit_price - self.entry_price) * self.current_position
                                         self.trade_returns.append(pnl)
                                         
@@ -2015,12 +1783,12 @@ def train_with_finrl(
                                             self.successful_trades += 1
                                             self.total_profit += pnl
                                             if self.debug_steps % self.debug_frequency == 0:
-                                                logger.info(f"Successful trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
+                                                logger.info(f"Successful trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}, duration={trade_duration}")
                                         else:
                                             self.failed_trades += 1
                                             self.total_loss += abs(pnl)
                                             if self.debug_steps % self.debug_frequency == 0:
-                                                logger.info(f"Failed trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
+                                                logger.info(f"Failed trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}, duration={trade_duration}")
                                     
                                     # Add to recent trades for trend analysis
                                     self.recent_trades.append({
@@ -2038,6 +1806,7 @@ def train_with_finrl(
                                 # If new position is non-zero, this is a trade entry
                                 if position != 0:
                                     self.trade_count += 1
+                                    self.last_trade_step = self.debug_steps
                                     if 'close' in info:
                                         self.entry_price = info['close']
                                         if self.debug_steps % self.debug_frequency == 0:
@@ -2053,91 +1822,42 @@ def train_with_finrl(
                                 self.action_counts[action_type] += 1
                             self.logger.record(f'actions/{action_type}', self.action_counts.get(action_type, 0))
                             
-                            # Debug output
+                            # Log action distribution periodically
                             if self.debug_steps % (self.debug_frequency * 10) == 0:
-                                logger.info(f"Action counts: {self.action_counts}")
+                                total_actions = sum(self.action_counts.values())
+                                if total_actions > 0:
+                                    buy_pct = self.action_counts.get('buy', 0) / total_actions * 100
+                                    sell_pct = self.action_counts.get('sell', 0) / total_actions * 100
+                                    hold_pct = self.action_counts.get('hold', 0) / total_actions * 100
+                                    logger.info(f"Action distribution: Buy: {buy_pct:.1f}%, Sell: {sell_pct:.1f}%, Hold: {hold_pct:.1f}%")
                         
                         # Track trade metrics
                         if 'trade_count' in info:
                             self.logger.record('trades/count', info['trade_count'])
                         if 'profit_loss' in info:
                             self.logger.record('trades/profit_loss', info['profit_loss'])
+                        
+                        # Track individual reward components if available
+                        if 'reward_components' in info:
+                            components = info['reward_components']
+                            for comp_name, comp_value in components.items():
+                                self.logger.record(f'reward_components/{comp_name}', comp_value)
                     
                     # Check if episode is done
                     dones = self.locals.get('dones', [False])
-                    
-                    for j, done in enumerate(dones):
-                        if done and j == i:  # Only process the done signal if it corresponds to the current reward
-                            # Add the episode statistics
-                            self.episode_rewards.append(self.current_episode_reward)
-                            self.episode_lengths.append(self.current_episode_length)
+                    if done and i < len(dones) and dones[i]:
+                        if 'episode' in self.locals and i < len(self.locals['episode'].rewards):
+                            ep_rew = self.locals['episode'].rewards[i]
+                            self.episode_rewards.append(ep_rew)
+                            self.logger.record('episode/reward', ep_rew)
                             
-                            # Log episode statistics
-                            self.logger.record('episode/reward', self.current_episode_reward)
-                            self.logger.record('episode/length', self.current_episode_length)
-                            
-                            # Calculate and log running statistics
-                            if len(self.episode_rewards) > 0:
-                                self.logger.record('episode/mean_reward', np.mean(self.episode_rewards[-100:]))
-                                self.logger.record('episode/mean_length', np.mean(self.episode_lengths[-100:]))
-                            
-                            if len(self.portfolio_values) > 0:
-                                self.logger.record('portfolio/final_value', self.portfolio_values[-1])
-                                self.logger.record('portfolio/mean_value', np.mean(self.portfolio_values[-100:]))
-                            
-                            # Log trading metrics
-                            if self.trade_count > 0:
-                                # Calculate win rate
-                                win_rate = self.successful_trades / max(1, self.trade_count)
-                                self.logger.record('trades/win_rate', win_rate)
+                            # Reset rapid trade counter at episode end
+                            if self.rapid_trades_detected > 0:
+                                logger.warning(f"Episode ended with {self.rapid_trades_detected} rapid trades detected")
+                                self.logger.record('trades/rapid_trades', self.rapid_trades_detected)
+                                self.logger.record('trades/same_price_trades', self.same_price_trades)
                                 
-                                # Debug output
-                                logger.info(f"Episode complete - Trading stats: trades={self.trade_count}, win_rate={win_rate:.4f}")
-                                
-                                # Profit factor (total profit / total loss)
-                                profit_factor = self.total_profit / max(1e-6, self.total_loss)  # Avoid div by zero
-                                self.logger.record('trades/profit_factor', profit_factor)
-                                
-                                # Average trade metrics
-                                if len(self.trade_returns) > 0:
-                                    avg_return = np.mean(self.trade_returns)
-                                    self.logger.record('trades/avg_return', avg_return)
-                                    
-                                    # Average returns of winning and losing trades
-                                    winning_returns = [r for r in self.trade_returns if r > 0]
-                                    losing_returns = [r for r in self.trade_returns if r <= 0]
-                                    
-                                    if winning_returns:
-                                        self.logger.record('trades/avg_win', np.mean(winning_returns))
-                                    if losing_returns:
-                                        self.logger.record('trades/avg_loss', np.mean(losing_returns))
-                                
-                                # Average trade duration
-                                if len(self.trade_durations) > 0:
-                                    avg_duration = np.mean(self.trade_durations)
-                                    self.logger.record('trades/avg_duration', avg_duration)
-                                
-                                # Trading consistency - using standard deviation of recent returns
-                                if len(self.trade_returns) > 5:
-                                    returns_std = np.std(self.trade_returns[-20:])
-                                    self.logger.record('trades/returns_std', returns_std)
-                                
-                                # Action distribution
-                                total_actions = sum(self.action_counts.values())
-                                if total_actions > 0:
-                                    for action, count in self.action_counts.items():
-                                        self.logger.record(f'actions/{action}_pct', count / total_actions)
-                            
-                                # Log running totals
-                                self.logger.record('trades/total_count', self.trade_count)
-                                self.logger.record('trades/successful', self.successful_trades)
-                                self.logger.record('trades/failed', self.failed_trades)
-                            
-                            # Reset episode tracking
-                            self.current_episode_reward = 0
-                            self.current_episode_length = 0
-                
-            return True
+            return True  # Continue training
     
     # Create the TensorboardCallback
     tensorboard_callback = TensorboardCallback()
