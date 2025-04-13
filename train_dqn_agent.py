@@ -1735,31 +1735,26 @@ class CustomDRLAgent:
 
 
 def train_with_finrl(
-    args, logger, start_date, end_date, tickers, 
-    data_source="binance", num_workers=1, use_lstm_predictions=False,
-    lstm_model=None, lstm_processor=None
+    df,
+    args,
+    model_name="ppo",
+    timesteps=10000,
+    tensorboard_log="./tensorboard_log",
+    device=None
 ):
-    """
-    Train a reinforcement learning agent using FinRL framework.
+    """Train a model using the FinRL library.
     
     Args:
-        args: Command line arguments
-        logger: Logger instance
-        start_date: Start date for training data
-        end_date: End date for training data
-        tickers: List of ticker symbols
-        data_source: Source of data
-        num_workers: Number of parallel environments
-        use_lstm_predictions: Whether to use LSTM predictions
-        lstm_model: LSTM model instance
-        lstm_processor: LSTM data processor
+        df: DataFrame with market data
+        args: Training arguments
+        model_name: Name of model to use (ppo, ddpg, td3, sac)
+        timesteps: Number of timesteps to train for
+        tensorboard_log: Directory for tensorboard logs
+        device: PyTorch device to use
         
     Returns:
         Trained model
     """
-    logger.info("Training with FinRL framework")
-    print("=== Starting FinRL training ===")
-    
     try:
         # Import stable-baselines3 and torch.nn
         from stable_baselines3 import PPO, DDPG, TD3, SAC
@@ -1770,211 +1765,33 @@ def train_with_finrl(
         import numpy as np
         import os
         
-        # Set device for PyTorch
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Using device: {device}")
-        print(f"Using device: {device}")
     except ImportError as e:
-        logger.error(f"Error importing required packages: {e}")
+        logger.error(f"Error importing required modules: {e}")
         raise
-    
-    # Extract arguments for training
+        
+    # Get parameters from args
+    logger.info(f"Training with FinRL using model: {model_name}")
     finrl_model = args.finrl_model.lower()
+
+    # Environment parameters 
     initial_balance = getattr(args, 'initial_balance', 1000000.0)
-    lookback = getattr(args, 'lookback', 10)
-    include_cash = getattr(args, 'include_cash', False)
     state_dim = getattr(args, 'state_dim', 16)  # Default to 16 if not specified
     
-    # First check if synthetic data exists in data/synthetic directory
-    synthetic_data_path = os.path.join('data', 'synthetic', 'synthetic_dataset.h5')
-    
-    if os.path.exists(synthetic_data_path):
-        logger.info(f"Found existing synthetic data at {synthetic_data_path}, loading...")
-        
-        try:
-            import pandas as pd
-            
-            # Load data from HDF5 file
-            with pd.HDFStore(synthetic_data_path, mode='r') as store:
-                # Get all available timeframes from the HDF5 file
-                timeframes = [key[1:] for key in store.keys()]  # Remove leading '/'
-                logger.info(f"Available timeframes in dataset: {timeframes}")
-                
-                # Load primary timeframe (15m) to use for FinRL
-                if '15m' in timeframes:
-                    df = store['/15m']
-                    logger.info(f"Loaded 15m data with shape {df.shape}")
-                    
-                    # Reset index to make date a column if it's in the index
-                    if isinstance(df.index, pd.DatetimeIndex):
-                        df = df.reset_index()
-                elif timeframes:
-                    # If 15m is not available, use the first available timeframe
-                    tf = timeframes[0]
-                    df = store[f'/{tf}']
-                    logger.info(f"15m timeframe not available, using {tf} with shape {df.shape}")
-                    
-                    # Reset index to make date a column if it's in the index
-                    if isinstance(df.index, pd.DatetimeIndex):
-                        df = df.reset_index()
-                else:
-                    raise ValueError("No timeframe data found in the HDF5 file")
-                
-            # Check for timestamp column which might be named 'date' or be in the index
-            if 'timestamp' not in df.columns:
-                if 'date' in df.columns:
-                    df.rename(columns={'date': 'timestamp'}, inplace=True)
-                else:
-                    # If neither timestamp nor date is in columns, index might be the date
-                    if isinstance(df.index, pd.DatetimeIndex):
-                        df['timestamp'] = df.index
-                        df.reset_index(drop=True, inplace=True)
-            
-            # Ensure datetime type for timestamp
-            if 'timestamp' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
-            # Add 'tic' column if not present
-            if 'tic' not in df.columns:
-                logger.info(f"Adding 'tic' column with value: {tickers[0]}")
-                df['tic'] = tickers[0]
-            
-            # Create 'day' column if not present (required by some FinRL components)
-            if 'day' not in df.columns:
-                df['day'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d')
-            
-            # Create a multi-index dataframe with (timestamp, tic)
-            logger.info("Creating multi-index DataFrame with (timestamp, tic)")
-            df = df.rename(columns={'timestamp': 'date'})  # FinRL expects 'date'
-            
-            # Special preparation for FinRL's StockTradingEnv
-            # The environment expects a DataFrame with a numeric index and 'date' and 'tic' columns
-            # NOT a multi-index DataFrame as we initially thought
-            if 'date' in df.columns and 'tic' in df.columns:
-                # Keep date and tic as columns (don't set as index)
-                # Sort the DataFrame by date and tic
-                df = df.sort_values(['date', 'tic']).reset_index(drop=True)
-                logger.info("Data prepared as DataFrame with 'date' and 'tic' columns (FinRL format)")
-            else:
-                # Create a multi-index but we'll need to transform it later
-                df = df.set_index(['date', 'tic'])
-                # Convert back to columns for FinRL compatibility
-                df = df.reset_index()
-                logger.info("Data prepared with 'date' and 'tic' as regular columns")
-            
-            # Factor the dates to integers (0, 1, 2, ...) which StockTradingEnv expects
-            # This is CRITICAL for FinRL's StockTradingEnv to work
-            if 'date' in df.columns:
-                df['day'] = df['date'].factorize()[0]
-                logger.info(f"Factorized dates to day column with range: {df['day'].min()} - {df['day'].max()}")
-                
-            # Final sort by day and tic
-            if 'day' in df.columns and 'tic' in df.columns:
-                df = df.sort_values(['day', 'tic']).reset_index(drop=True)
-                
-            logger.info(f"Processed data shape: {df.shape}")
-            logger.info(f"DataFrame columns: {df.columns}")
-            logger.info(f"DataFrame index: {df.index.name or 'default'}")
-            logger.info(f"Sample of prepared data:\n{df.head(3)}")
-        except Exception as e:
-            logger.error(f"Error loading synthetic data: {str(e)}")
-            logger.error(traceback.format_exc())
-            df = None
+    # Use the preprocessed data
+    if df is not None:
+        logger.info(f"Using provided DataFrame for training with shape: {df.shape}")
+        logger.info(f"Sample of input data:\n{df.head(2)}")
     else:
-        logger.info(f"No existing synthetic data found at {synthetic_data_path}, generating new data...")
-        df = None
+        logger.error("No training data provided")
+        return None
     
-    # Generate synthetic data or format the real data properly if loading failed
-    if df is None:
-        try:
-            # Try to import generate_data functions to use the same format
-            try:
-                # First try to import directly
-                from generate_data import generate_synthetic_data
-                logger.info("Using generate_data.py's generate_synthetic_data function")
-                
-                # Generate synthetic data using the consistent generator
-                output_dir = os.path.join('data', 'synthetic')
-                os.makedirs(output_dir, exist_ok=True)
-                
-                # Generate data for all timeframes
-                dataset = generate_synthetic_data(
-                    symbols=tickers,
-                    timeframes=['15m', '4h', '1d'],
-                    num_samples=100000,  # More samples for better training
-                    start_date=start_date,
-                    end_date=end_date,
-                    seed=42,
-                    output_path=os.path.join(output_dir, 'synthetic_dataset.h5')
-                )
-                
-                # Use the 15m timeframe for trading environment
-                df = dataset['15m'].copy()
-                df.reset_index(inplace=True)  # Convert index to column
-                df.rename(columns={'timestamp': 'date'}, inplace=True)  # Rename to match FinRL
-                
-                # Add tic column
-                df['tic'] = tickers[0]  # Assign first ticker to all rows
-                
-                # Factor the dates to integers (0, 1, 2, ...) which StockTradingEnv expects
-                df['day'] = df['date'].factorize()[0]
-                logger.info(f"Factorized dates to day column with range: {df['day'].min()} - {df['day'].max()}")
-                
-                # Sort by day and tic for FinRL compatibility
-                df = df.sort_values(['day', 'tic']).reset_index(drop=True)
-                
-                logger.info(f"Generated synthetic data using generate_data.py's format")
-                logger.info(f"Sample data:\n{df.head(3)}")
-            except (ImportError, ModuleNotFoundError):
-                logger.warning("Could not import generate_data module, falling back to internal synthetic data generation")
-                logger.info("Creating synthetic data with multi-index format for FinRL...")
-                df = create_synthetic_data(tickers, start_date, end_date)
-                
-                # Make sure the internal synthetic data is also properly formatted
-                if isinstance(df.index, pd.MultiIndex):
-                    df = df.reset_index()
-                    
-                # Add day column with factorized dates
-                if 'day' not in df.columns and 'date' in df.columns:
-                    df['day'] = df['date'].factorize()[0]
-                    logger.info(f"Added day column with factorized dates: {df['day'].min()} - {df['day'].max()}")
-                
-                # Final sorting by day and tic
-                if 'day' in df.columns and 'tic' in df.columns:
-                    df = df.sort_values(['day', 'tic']).reset_index(drop=True)
-                    
-                logger.info(f"Internal synthetic data prepared with shape: {df.shape}")
-                logger.info(f"Sample data:\n{df.head(3)}")
-        except Exception as e:
-            logger.error(f"Error creating synthetic data: {e}")
-            logger.error(traceback.format_exc())
-            raise
+    # Create parallel environments for training
+    num_envs = getattr(args, 'num_envs', 4)
+    logger.info(f"Creating {num_envs} parallel environments for training")
+    vec_env = create_parallel_finrl_envs(df, args, num_workers=num_envs)
     
-    # Use DummyVecEnv due to gym.spaces.Sequence compatibility issues
-    logger.info("Using DummyVecEnv for environment vectorization due to compatibility issues")
-    
-    # Define the list of technical indicators needed
-    tech_indicators = [
-        'macd', 'rsi_14', 'cci_30', 'dx_30', 
-        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
-        'close_5_ema', 'close_10_ema', 'close_20_ema', 'close_60_ema', 'close_120_ema',
-        'volatility_30', 'volume_change', 'volume_norm'
-    ]
-    
-    # Make sure all required technical indicators are in the DataFrame
-    logger.info("Ensuring all required technical indicators are available...")
-    df = ensure_technical_indicators(df, tech_indicators)
-    
-    # Create parallel environments
-    logger.info(f"Creating vectorized environment with {num_workers} workers")
     try:
-        vec_env = create_parallel_finrl_envs(
-            df=df,
-            args=args,
-            num_workers=num_workers
-        )
-        
-        # Test the observation shape to ensure it's compatible with the model
+        # Test the vectorized environment
         test_obs = vec_env.reset()
         actual_obs_dim = test_obs.shape[1]
         logger.info(f"Vectorized environment observation shape: {test_obs.shape}")
@@ -1985,27 +1802,100 @@ def train_with_finrl(
             # Update state_dim to actual observation dimension
             state_dim = actual_obs_dim
     except Exception as e:
-        logger.error(f"Error creating or initializing environments: {e}")
-        logger.error(traceback.format_exc())
-        raise
+        logger.error(f"Error testing vectorized environment: {e}")
     
-    # Define policy network architecture
-    policy_kwargs = {
-        'activation_fn': nn.ReLU,
-        'net_arch': {
-            'pi': [256, 256],  # Actor network
-            'qf': [256, 256]   # Critic network
+    # Set up network architecture
+    net_arch = {
+        'pi': [128, 128],  # Actor network - smaller than default
+        'qf': [128, 128]   # Critic network - smaller than default
+    }
+    
+    # Improved PPO parameters for better exploration and learning
+    ppo_params = {
+        'learning_rate': 3e-4,  # Increased from default
+        'n_steps': 2048,
+        'batch_size': 64,
+        'n_epochs': 10,
+        'gamma': 0.99,
+        'gae_lambda': 0.95,
+        'clip_range': 0.2,
+        'clip_range_vf': None,  # Don't clip value function
+        'normalize_advantage': True,
+        'ent_coef': 0.01,  # Increase entropy coefficient for more exploration
+        'vf_coef': 0.5,  # Increase value function coefficient
+        'max_grad_norm': 0.5,
+        'use_sde': False,
+        'sde_sample_freq': -1,
+        'target_kl': 0.01,  # Early stopping based on KL divergence
+        'policy_kwargs': {
+            'activation_fn': nn.ReLU,
+            'net_arch': net_arch,
+            'log_std_init': -2.0  # Set initial log standard deviation for more controlled exploration
         }
     }
     
-    # Select model class based on finrl_model parameter
+    # DDPG parameters
+    ddpg_params = {
+        'learning_rate': 3e-4,
+        'buffer_size': 1000000,
+        'learning_starts': 100,
+        'batch_size': 256,
+        'tau': 0.005,
+        'gamma': 0.99,
+        'train_freq': (1, 'episode'),
+        'gradient_steps': -1,
+        'policy_kwargs': {
+            'activation_fn': nn.ReLU,
+            'net_arch': [256, 256]
+        }
+    }
+    
+    # TD3 parameters
+    td3_params = {
+        'learning_rate': 3e-4,
+        'buffer_size': 1000000,
+        'learning_starts': 100,
+        'batch_size': 256,
+        'tau': 0.005,
+        'gamma': 0.99,
+        'policy_delay': 2,
+        'train_freq': (1, 'episode'),
+        'gradient_steps': -1,
+        'policy_kwargs': {
+            'activation_fn': nn.ReLU,
+            'net_arch': [400, 300]
+        }
+    }
+    
+    # SAC parameters
+    sac_params = {
+        'learning_rate': 3e-4,
+        'buffer_size': 1000000,
+        'learning_starts': 100,
+        'batch_size': 256,
+        'tau': 0.005,
+        'gamma': 0.99,
+        'train_freq': 1,
+        'gradient_steps': 1,
+        'ent_coef': 'auto',
+        'policy_kwargs': {
+            'activation_fn': nn.ReLU,
+            'net_arch': [256, 256]
+        }
+    }
+    
+    # Select parameters based on model
     if finrl_model == 'ppo':
+        model_params = ppo_params
         model_class = PPO
     elif finrl_model == 'ddpg':
+        model_params = ddpg_params
         model_class = DDPG
     elif finrl_model == 'td3':
+        model_params = td3_params
         model_class = TD3
     else:  # Default to SAC
+        model_params = sac_params
         model_class = SAC
         
     # Define callback to log metrics to tensorboard
@@ -2242,15 +2132,6 @@ def train_with_finrl(
                                 self.logger.record('trades/total_count', self.trade_count)
                                 self.logger.record('trades/successful', self.successful_trades)
                                 self.logger.record('trades/failed', self.failed_trades)
-                                self.logger.record('trades/total_profit', self.total_profit)
-                                self.logger.record('trades/total_loss', self.total_loss)
-                                
-                                # Recent performance trend (last 20 trades vs previous 20)
-                                if len(self.trade_returns) >= 40:
-                                    recent_returns = np.mean(self.trade_returns[-20:])
-                                    previous_returns = np.mean(self.trade_returns[-40:-20])
-                                    trend = recent_returns - previous_returns
-                                    self.logger.record('trades/trend', trend)
                             
                             # Reset episode tracking
                             self.current_episode_reward = 0
@@ -2258,181 +2139,62 @@ def train_with_finrl(
                 
             return True
     
-    # Create the model
-    logger.info(f"Creating {finrl_model.upper()} model with policy_kwargs: {policy_kwargs}")
+    # Create the TensorboardCallback
+    tensorboard_callback = TensorboardCallback()
+    
+    # Try to create and train the model
     try:
-        # Set a higher tensorboard queue size to handle more metrics
-        import os
-        os.environ['STABLE_BASELINES_TENSORBOARD_QUEUE_SIZE'] = '100000'
+        logger.info(f"Creating {finrl_model} model with parameters: {model_params}")
         
-        # Get PPO hyperparameters
-        n_steps = getattr(args, 'n_steps', 32768)
-        batch_size = getattr(args, 'batch_size', 64)
-        n_epochs = getattr(args, 'n_epochs', 10)
-        learning_rate = getattr(args, 'learning_rate', 0.0003)  # Increased from 0.0001
+        # Additional parameters to pass to the model
+        if device is not None:
+            model_params['device'] = device
         
-        logger.info(f"PPO parameters: n_steps={n_steps}, batch_size={batch_size}, n_epochs={n_epochs}, lr={learning_rate}")
-        
-        # Create PPO model with enhanced GPU utilization
-        model = PPO(
-            "MlpPolicy", 
-            vec_env,
-            learning_rate=lambda progress: learning_rate * (1.0 - progress),  # Linear schedule
-            gamma=getattr(args, 'gamma', 0.99),
-            n_steps=n_steps,       # Larger batch size for better GPU utilization
-            batch_size=batch_size, # Minibatch size for updates
-            n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-            ent_coef=0.01,  # Fixed value instead of schedule
-            vf_coef=0.5,           # Reduced value function coefficient
-            clip_range_vf=0.4,     # Enable value function clipping
-            target_kl=0.02,        # Limit policy update size
-            verbose=1 if args.verbose else 0,
-            tensorboard_log="./tensorboard_logs",
-            device=device,
-            policy_kwargs={
-                'net_arch': [512, 256, 128]  # Adjusted network architecture
-            }
+        # Instantiate the model
+        model = model_class(
+            policy="MlpPolicy",
+            env=vec_env,
+            verbose=1,
+            tensorboard_log=tensorboard_log,
+            **model_params
         )
         
-        # Check if we should normalize observations
-        if getattr(args, 'normalize_observations', 'true').lower() == 'true':
-            from stable_baselines3.common.vec_env import VecNormalize
-            logger.info("Wrapping environment with VecNormalize for observation normalization")
-            vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
+        # Log the model parameters
+        logger.info(f"Model created with parameters: {model.get_parameters()}")
         
-        # Train the model with callback
-        total_timesteps = getattr(args, 'timesteps', 50000)  # Default to 50000 if not specified
-        logger.info(f"Training model for {total_timesteps} timesteps")
+        # Set the random seed if provided
+        if hasattr(args, 'seed') and args.seed is not None:
+            logger.info(f"Setting random seed: {args.seed}")
+            model.set_random_seed(args.seed)
         
-        # Create the callbacks
-        tensorboard_callback = TensorboardCallback()
-        progress_callback = ProgressBarCallback()
-        
-        # Store the callbacks in a list to make them accessible later
-        callbacks = [tensorboard_callback, progress_callback]
-        
+        # Train the model
+        logger.info(f"Starting training for {timesteps} timesteps")
         model.learn(
-            total_timesteps=total_timesteps,
-            callback=callbacks,
-            tb_log_name=finrl_model
+            total_timesteps=timesteps,
+            callback=tensorboard_callback,
+            tb_log_name=f"{finrl_model}_logs",
+            progress_bar=True,
+            reset_num_timesteps=True
         )
-        
-        # Create timestamp for saving
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
-        os.makedirs(model_path, exist_ok=True)
-        
-        # Print trading metrics summary if callback metrics are available
-        try:
-            # Access the callback from the list
-            callback = callbacks[0]
-            
-            # Calculate win rate and other metrics
-            win_rate = callback.successful_trades / max(1, callback.trade_count) * 100
-            profit_factor = callback.total_profit / max(1e-6, callback.total_loss)
-            
-            # Print summary
-            print("\n" + "="*50)
-            print("TRADING METRICS SUMMARY")
-            print("="*50)
-            print(f"Total Trades: {callback.trade_count}")
-            print(f"Successful Trades: {callback.successful_trades} ({win_rate:.2f}%)")
-            print(f"Failed Trades: {callback.failed_trades} ({100-win_rate:.2f}%)")
-            print(f"Total Profit: {callback.total_profit:.2f}")
-            print(f"Total Loss: {callback.total_loss:.2f}")
-            print(f"Profit Factor: {profit_factor:.2f}")
-            
-            # Print average trade metrics if available
-            if len(callback.trade_returns) > 0:
-                avg_return = np.mean(callback.trade_returns)
-                winning_returns = [r for r in callback.trade_returns if r > 0]
-                losing_returns = [r for r in callback.trade_returns if r <= 0]
-                
-                print(f"Average Trade Return: {avg_return:.4f}")
-                if winning_returns:
-                    print(f"Average Winning Trade: {np.mean(winning_returns):.4f}")
-                if losing_returns:
-                    print(f"Average Losing Trade: {np.mean(losing_returns):.4f}")
-            
-            # Print action distribution
-            if sum(callback.action_counts.values()) > 0:
-                print("\nAction Distribution:")
-                total_actions = sum(callback.action_counts.values())
-                for action, count in callback.action_counts.items():
-                    print(f"  {action}: {count} ({count/total_actions*100:.2f}%)")
-            
-            # Print portfolio metrics if available
-            if len(callback.portfolio_values) > 0:
-                initial_value = callback.portfolio_values[0] if callback.portfolio_values else initial_balance
-                final_value = callback.portfolio_values[-1] if callback.portfolio_values else 0
-                roi = (final_value / initial_value - 1) * 100
-                print(f"\nInitial Portfolio Value: {initial_value:.2f}")
-                print(f"Final Portfolio Value: {final_value:.2f}")
-                print(f"Return on Investment: {roi:.2f}%")
-            
-            print("="*50)
-            
-            # Save the metrics to a JSON file for later analysis
-            metrics_data = {
-                'total_trades': callback.trade_count,
-                'successful_trades': callback.successful_trades,
-                'failed_trades': callback.failed_trades,
-                'win_rate': float(win_rate),
-                'total_profit': float(callback.total_profit),
-                'total_loss': float(callback.total_loss),
-                'profit_factor': float(profit_factor),
-                'action_distribution': callback.action_counts,
-            }
-            
-            if len(callback.portfolio_values) > 0:
-                metrics_data['initial_value'] = float(initial_value)
-                metrics_data['final_value'] = float(final_value)
-                metrics_data['roi'] = float(roi)
-            
-            if len(callback.trade_returns) > 0:
-                metrics_data['avg_return'] = float(avg_return)
-                if winning_returns:
-                    metrics_data['avg_win'] = float(np.mean(winning_returns))
-                if losing_returns:
-                    metrics_data['avg_loss'] = float(np.mean(losing_returns))
-            
-            # Save metrics to file
-            metrics_file = os.path.join(model_path, 'trading_metrics.json')
-            with open(metrics_file, 'w') as f:
-                json.dump(metrics_data, f, indent=4)
-            logger.info(f"Trading metrics saved to {metrics_file}")
-                
-        except Exception as e:
-            logger.warning(f"Could not print or save trading metrics summary: {e}")
-            logger.warning(traceback.format_exc())
         
         # Save the model
-        model.save(f"{model_path}/model")
-        logger.info(f"Model saved to {model_path}/model")
+        if hasattr(args, 'model_save_path') and args.model_save_path is not None:
+            save_path = args.model_save_path
+        else:
+            save_path = f"./models/{finrl_model}_{int(time.time())}"
         
-        # Save arguments used for training
-        with open(f"{model_path}/training_args.json", 'w') as f:
-            json.dump(vars(args), f, indent=4)
-        logger.info(f"Training arguments saved to {model_path}/training_args.json")
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        logger.info(f"Saving model to {save_path}")
+        model.save(save_path)
+        
+        return model
+        
     except Exception as e:
-        logger.error(f"Error during model creation or training: {e}")
-        logger.error(traceback.format_exc())
-        
-        # Try to debug the problem
-        if "object is not subscriptable" in str(e):
-            logger.error("This is likely a problem with transaction costs in StockTradingEnv.")
-            logger.error("StockTradingEnv expects transaction costs as lists, not scalar values.")
-            
-            # Check for "index out of range" or AttributeError
-            if "list index out of range" in str(e) or "AttributeError" in str(e):
-                logger.error("This could be related to the observation space or state dimensions.")
-                logger.error("Check that the state dimensions match between wrapper and environment.")
-                
-        elif "space contains" in str(e) or "expected_shape" in str(e):
-            logger.error("This is an observation space mismatch error.")
-            logger.error("The environment is returning observations with a different shape than expected.")
-            
-        raise
+        logger.error(f"Error during model training: {e}")
+        traceback.print_exc()
+        return None
 
 def setup_logging():
     """Configure logging."""
@@ -2782,13 +2544,12 @@ def main():
         if args.use_finrl:
             # Train with FinRL
             train_with_finrl(
+                df=market_data,
                 args=args,
-                logger=logger,
-                start_date=start_date,
-                end_date=end_date,
-                tickers=tickers,
-                data_source="binance",
-                num_workers=args.num_workers
+                model_name=args.finrl_model,
+                timesteps=args.timesteps,
+                tensorboard_log="./tensorboard_log",
+                device=device
             )
         else:
             # Train with our custom DQN implementation
