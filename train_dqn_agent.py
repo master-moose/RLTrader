@@ -224,7 +224,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
     """
     def __init__(self, *args, **kwargs):
         self.debug_mode = kwargs.pop('debug_mode', False)
-        self.trade_cooldown = kwargs.pop('trade_cooldown', 10)  # Default cooldown of 10 steps
+        # Increase default trade cooldown from 10 to 30 steps
+        self.trade_cooldown = kwargs.pop('trade_cooldown', 30)  # Default cooldown of 30 steps
         
         # Initialize trading tracking variables
         self._last_trade_step = None
@@ -251,6 +252,32 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Detect if this step includes a trade
         current_holdings = self.state[1:self.stock_dim+1].copy()
         
+        # Enforce trade cooldown to prevent excessive trading
+        steps_since_last_trade = (
+            self.current_step - self._last_trade_step if self._last_trade_step is not None else float('inf')
+        )
+        
+        # Check if the agent is attempting to trade during cooldown
+        attempted_trade_during_cooldown = False
+        if steps_since_last_trade < self.trade_cooldown:
+            # Detect if action is not hold (meaning the agent is trying to trade)
+            if isinstance(actions, np.ndarray) and len(actions) > 0:
+                attempted_trade_during_cooldown = not np.all(actions == 1)  # 1 is hold
+            elif isinstance(actions, (int, float, np.int64, np.float64)):
+                attempted_trade_during_cooldown = actions != 1  # Not hold action
+            
+            # If trying to trade during cooldown, force a hold action
+            if attempted_trade_during_cooldown:
+                # Convert to hold action (1) - this enforces cooldown and prevents rapid trading
+                if isinstance(actions, np.ndarray) and len(actions) > 0:
+                    # For multi-dimensional actions, set all to "hold" (1)
+                    actions = np.ones_like(actions)
+                elif isinstance(actions, (int, float, np.int64, np.float64)):
+                    # For scalar actions in discrete space
+                    actions = 1  # Hold action
+                
+                logger.debug(f"Enforcing trade cooldown: {steps_since_last_trade}/{self.trade_cooldown} steps since last trade")
+        
         # Call parent step method
         next_state, reward, done, info = super().step(actions)
         
@@ -259,7 +286,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         
         # Update reward based on our custom calculation
         end_total_asset = self.get_total_asset_value()
-        reward = self._calculate_reward(begin_total_asset, end_total_asset)
+        reward = self._calculate_reward(begin_total_asset, end_total_asset, attempted_trade_during_cooldown)
         
         # Check if trade occurred by comparing holdings before and after
         new_holdings = self.state[1:self.stock_dim+1]
@@ -279,6 +306,17 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                         change = new_holdings[i] - current_holdings[i]
                         action_type = "BUY" if change > 0 else "SELL"
                         logger.info(f"Trade detected at step {self.current_step}: {action_type} asset {i} at price {self._last_trade_price[i]:.4f}")
+        
+        # Add information about cooldown to info dictionary
+        info['cooldown_remaining'] = max(0, self.trade_cooldown - steps_since_last_trade)
+        info['enforced_hold'] = steps_since_last_trade < self.trade_cooldown
+        info['attempted_rapid_trade'] = attempted_trade_during_cooldown
+        
+        # Add rapid trade penalty to reward components if available
+        if attempted_trade_during_cooldown:
+            reward_components = info.get('reward_components', {})
+            reward_components['rapid_trade_penalty'] = -0.01
+            info['reward_components'] = reward_components
         
         # Enhance info dictionary
         info.update(self.info_buffer)
@@ -303,19 +341,28 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.current_step = 0
         return super().reset()
     
-    def _calculate_reward(self, begin_total_asset, end_total_asset):
+    def _calculate_reward(self, begin_total_asset, end_total_asset, attempted_trade_during_cooldown=False):
         """
         Calculate reward based on change in total asset value
         
         Args:
             begin_total_asset: Asset value at beginning of step
             end_total_asset: Asset value at end of step
+            attempted_trade_during_cooldown: Whether agent tried to trade during cooldown
             
         Returns:
             float: Reward value
         """
-        # Calculate percentage change in asset value
-        return (end_total_asset - begin_total_asset) * self.reward_scaling
+        # Basic reward from asset value change
+        base_reward = (end_total_asset - begin_total_asset) * self.reward_scaling
+        
+        # Apply penalty for attempted rapid trading
+        if attempted_trade_during_cooldown:
+            # Significant penalty to discourage rapid trading
+            rapid_trade_penalty = -0.01  # -1% of asset value
+            return base_reward + rapid_trade_penalty
+            
+        return base_reward
         
     def get_total_asset_value(self):
         """
