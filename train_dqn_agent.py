@@ -853,6 +853,17 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             self.metadata = env.metadata if hasattr(env, 'metadata') else {'render_modes': []}
             self.num_envs = 1
             
+            # CRITICAL FIX: Add environment spec attributes needed by Gymnasium
+            from gymnasium.envs.registration import EnvSpec
+            self._cached_spec = None
+            self.spec = EnvSpec(
+                id="StockTrading-v0",
+                entry_point=None,
+                reward_threshold=None,
+                max_episode_steps=None,
+                kwargs={}
+            )
+            
             logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
         else:
             # If already a gymnasium environment, just wrap it directly
@@ -861,6 +872,22 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             self.observation_space = gymnasium.spaces.Box(
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
+            
+            # CRITICAL FIX: If we inherit from a gymnasium environment but it doesn't have the spec attribute
+            if not hasattr(self, 'spec') or self.spec is None:
+                from gymnasium.envs.registration import EnvSpec
+                self._cached_spec = None
+                self.spec = EnvSpec(
+                    id="StockTrading-v0",
+                    entry_point=None,
+                    reward_threshold=None,
+                    max_episode_steps=None,
+                    kwargs={}
+                )
+            else:
+                # If the wrapped environment has a spec, ensure we have _cached_spec
+                self._cached_spec = self.spec
+                
             logger.info(f"Wrapped Gymnasium environment with observation space: {self.observation_space}")
         
         # Store the actual observation dimension for comparison
@@ -2275,6 +2302,40 @@ def wrap_env_with_monitor(env):
     # Custom monitor wrapper that ensures compatibility with both gym and gymnasium APIs
     # and preserves the cooldown mechanism
     class CompatibleMonitor(Monitor):
+        def __init__(self, env, filename=None, allow_early_resets=True, reset_keywords=(), info_keywords=()):
+            """Modified monitor initialization that handles missing spec attributes."""
+            # Ensure the environment has a spec attribute
+            if not hasattr(env, 'spec') or env.spec is None:
+                from gymnasium.envs.registration import EnvSpec
+                env._cached_spec = None
+                env.spec = EnvSpec(
+                    id="StockTrading-v0",
+                    entry_point=None,
+                    reward_threshold=None,
+                    max_episode_steps=None,
+                    kwargs={}
+                )
+                logger.info("Added missing spec attribute to environment for Monitor compatibility")
+            
+            # Now call the parent init
+            try:
+                super().__init__(env, filename, allow_early_resets, reset_keywords, info_keywords)
+            except Exception as e:
+                logger.error(f"Error initializing Monitor: {e}")
+                # As a fallback, try with a simple spec id
+                if isinstance(e, AttributeError) and 'spec' in str(e):
+                    logger.warning("AttributeError with spec, trying fallback initialization")
+                    self.env = env
+                    self.file_handler = None
+                    self.total_steps = 0
+                    self.rewards = []
+                    self.needs_reset = True
+                    self.episode_returns = []
+                    self.episode_lengths = []
+                    self.episode_times = []
+                    self.total_steps = 0
+                    self.t_start = None
+
         def step(self, action):
             """Step the environment with compatibility for both APIs and preserve cooldown."""
             # IMPORTANT: We need to directly pass through the action without modification
@@ -2288,137 +2349,36 @@ def wrap_env_with_monitor(env):
                     if steps_since < 10 and action != 1:  # Not a hold action
                         logger.warning(f"CompatibleMonitor: Detected potential rapid trade attempt in Monitor wrapper ({steps_since} steps since last trade)")
             
-            # Call parent step method exactly as is to preserve action
-            result = super().step(action)
-            
-            # If we get a 4-tuple result (old gym API), convert to 5-tuple (gymnasium API)
-            if isinstance(result, tuple) and len(result) == 4:
-                obs, reward, done, info = result
-                return obs, reward, done, False, info  # Add truncated=False
-            
-            return result
-    
-    # Use our compatible monitor wrapper
-    return CompatibleMonitor(env, monitor_dir)
-
-def main():
-    """Main entry point for the script."""
-    # Set up logging
-    logger = setup_logging()
-    logger.info("Starting cryptocurrency trading DQN agent training")
-    
-    # Parse arguments
-    args = parse_args()
-    logger.info(f"Command line arguments: {args}")
-    
-    # Set device for training
-    device = 'cpu'
-    if args.device and args.device.startswith('cuda'):
-        import torch
-        if torch.cuda.is_available():
-            device = args.device
-            logger.info(f"Using device: {device}")
-        else:
-            logger.warning("CUDA requested but not available. Using CPU instead.")
-    
-    # Load and preprocess market data
-    market_data = load_and_preprocess_market_data(args)
-    
-    if market_data is None:
-        logger.error("Failed to load market data, exiting")
-        return
-    
-    logger.info(f"Loaded market data with shape: {market_data.shape}")
-    
-    # Parse tickers
-    tickers = [t.strip() for t in args.tickers.split(',')]
-    logger.info(f"Using tickers: {tickers}")
-    
-    # Parse dates
-    start_date = args.start_date
-    end_date = args.end_date
-    logger.info(f"Training period: {start_date} to {end_date}")
-    
-    # Calculate data length (needed for metrics)
-    data_length = len(market_data) if market_data is not None else 0
-    logger.info(f"Total data length: {data_length}")
-    
-    # Create the training environment
-    try:
-        if args.use_finrl:
-            # Train with FinRL
-            train_with_finrl(
-                df=market_data,
-                args=args,
-                model_name=args.finrl_model,
-                timesteps=args.timesteps,
-                tensorboard_log="./tensorboard_log",
-                device=device
-            )
-        else:
-            # Train with our custom DQN implementation
-            train_with_custom_dqn(args, market_data, data_length, device)
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-        logger.error(traceback.format_exc())
-        raise
-        
-    logger.info("Training completed successfully")
-    
-    # Add metadata logging
-    import psutil
-    memory_info = psutil.virtual_memory()
-    logger.info(f"System memory usage: {memory_info.percent}%")
-    
-    # Try to get GPU info if available
-    try:
-        import torch
-        import subprocess
-        if torch.cuda.is_available():
-            # Log GPU memory info
-            gpu_memory = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
-            logger.info(f"GPU memory allocated: {gpu_memory:.2f} GB")
-            
-            # Create a callback that monitors GPU memory
-            class GPUMonitorCallback(BaseCallback):
-                def __init__(self, verbose=0):
-                    super(GPUMonitorCallback, self).__init__(verbose)
-                
-                def _on_step(self):
-                    if self.n_calls % 1000 == 0:  # Log every 1000 steps
-                        gpu_memory = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
-                        logger.info(f"Step {self.n_calls}: GPU memory: {gpu_memory:.2f} GB")
-                    return True
-            
-            # Get GPU info from nvidia-smi
             try:
-                gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')
-                logger.info(f"GPU Info:\n{gpu_info}")
-            except:
-                logger.info("Could not get GPU info from nvidia-smi")
-    except Exception as e:
-        logger.info(f"Could not log GPU info: {e}")
-        
-    # Create metrics dictionary
-    metrics = {
-        "data_length": data_length,
-        "training_duration": 0,  # Will be filled by the training function
-        "model_size": 0,  # Will be filled by the training function
-        "memory_usage": memory_info.percent,
-    }
+                # Call parent step method exactly as is to preserve action
+                result = super().step(action)
+                
+                # If we get a 4-tuple result (old gym API), convert to 5-tuple (gymnasium API)
+                if isinstance(result, tuple) and len(result) == 4:
+                    obs, reward, done, info = result
+                    return obs, reward, done, False, info  # Add truncated=False
+                
+                return result
+            except Exception as e:
+                logger.error(f"Error in CompatibleMonitor.step: {e}")
+                # Fallback to direct environment call in case of monitor issues
+                try:
+                    result = self.env.step(action)
+                    return result
+                except Exception as e2:
+                    logger.error(f"Error in direct environment step: {e2}")
+                    # Last resort fallback with dummy values
+                    obs = np.zeros(self.env.observation_space.shape)
+                    return obs, 0.0, True, False, {}  # obs, reward, terminated, truncated, info
     
-    # Save metrics to JSON
     try:
-        import json
-        metrics_file = 'metrics.json'
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=4)
-        logger.info(f"Saved metrics to {metrics_file}")
+        # Use our compatible monitor wrapper
+        return CompatibleMonitor(env, monitor_dir)
     except Exception as e:
-        logger.error(f"Failed to save metrics: {e}")
-        
-    logger.info("Exiting successfully")
-    return 0
+        logger.error(f"Failed to create monitor wrapper: {e}")
+        # Return the unwrapped environment as fallback
+        logger.warning("Returning unwrapped environment without Monitor")
+        return env
 
 def create_dummy_vectorized_env(env_function, n_envs=1):
     """
@@ -2707,6 +2667,125 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         logger.info("Using DummyVecEnv for environment vectorization")
 
     return vec_env
+
+def main():
+    """Main entry point for the script."""
+    # Set up logging
+    logger = setup_logging()
+    logger.info("Starting cryptocurrency trading DQN agent training")
+    
+    # Parse arguments
+    args = parse_args()
+    logger.info(f"Command line arguments: {args}")
+    
+    # Set device for training
+    device = 'cpu'
+    if args.device and args.device.startswith('cuda'):
+        import torch
+        if torch.cuda.is_available():
+            device = args.device
+            logger.info(f"Using device: {device}")
+        else:
+            logger.warning("CUDA requested but not available. Using CPU instead.")
+    
+    # Load and preprocess market data
+    market_data = load_and_preprocess_market_data(args)
+    
+    if market_data is None:
+        logger.error("Failed to load market data, exiting")
+        return
+    
+    logger.info(f"Loaded market data with shape: {market_data.shape}")
+    
+    # Parse tickers
+    tickers = [t.strip() for t in args.tickers.split(',')]
+    logger.info(f"Using tickers: {tickers}")
+    
+    # Parse dates
+    start_date = args.start_date
+    end_date = args.end_date
+    logger.info(f"Training period: {start_date} to {end_date}")
+    
+    # Calculate data length (needed for metrics)
+    data_length = len(market_data) if market_data is not None else 0
+    logger.info(f"Total data length: {data_length}")
+    
+    # Create the training environment
+    try:
+        if args.use_finrl:
+            # Train with FinRL
+            train_with_finrl(
+                df=market_data,
+                args=args,
+                model_name=args.finrl_model,
+                timesteps=args.timesteps,
+                tensorboard_log="./tensorboard_log",
+                device=device
+            )
+        else:
+            # Train with our custom DQN implementation
+            train_with_custom_dqn(args, market_data, data_length, device)
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        logger.error(traceback.format_exc())
+        raise
+        
+    logger.info("Training completed successfully")
+    
+    # Add metadata logging
+    import psutil
+    memory_info = psutil.virtual_memory()
+    logger.info(f"System memory usage: {memory_info.percent}%")
+    
+    # Try to get GPU info if available
+    try:
+        import torch
+        import subprocess
+        if torch.cuda.is_available():
+            # Log GPU memory info
+            gpu_memory = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+            logger.info(f"GPU memory allocated: {gpu_memory:.2f} GB")
+            
+            # Create a callback that monitors GPU memory
+            class GPUMonitorCallback(BaseCallback):
+                def __init__(self, verbose=0):
+                    super(GPUMonitorCallback, self).__init__(verbose)
+                
+                def _on_step(self):
+                    if self.n_calls % 1000 == 0:  # Log every 1000 steps
+                        gpu_memory = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+                        logger.info(f"Step {self.n_calls}: GPU memory: {gpu_memory:.2f} GB")
+                    return True
+            
+            # Get GPU info from nvidia-smi
+            try:
+                gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')
+                logger.info(f"GPU Info:\n{gpu_info}")
+            except:
+                logger.info("Could not get GPU info from nvidia-smi")
+    except Exception as e:
+        logger.info(f"Could not log GPU info: {e}")
+    
+    # Create metrics dictionary
+    metrics = {
+        "data_length": data_length,
+        "training_duration": 0,  # Will be filled by the training function
+        "model_size": 0,  # Will be filled by the training function
+        "memory_usage": memory_info.percent,
+    }
+    
+    # Save metrics to JSON
+    try:
+        import json
+        metrics_file = 'metrics.json'
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+        logger.info(f"Saved metrics to {metrics_file}")
+    except Exception as e:
+        logger.error(f"Failed to save metrics: {e}")
+        
+    logger.info("Exiting successfully")
+    return 0
 
 if __name__ == "__main__":
     main() 
