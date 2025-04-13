@@ -811,7 +811,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 
             # Log risk management metrics
             logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
-                        f"Portfolio value: {portfolio_value:.2f if portfolio_value else 'unknown'}")
+                        f"Portfolio value: {portfolio_value:.2f if portfolio_value is not None else 'unknown'}")
         
         # Every 1000 steps, log action distribution
         if current_step % 1000 == 0:
