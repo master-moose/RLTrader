@@ -224,8 +224,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
     """
     def __init__(self, *args, **kwargs):
         self.debug_mode = kwargs.pop('debug_mode', False)
-        # Dramatically increase default trade cooldown to 2000 steps
-        self.trade_cooldown = kwargs.pop('trade_cooldown', 5000)  # Dramatically increased cooldown
+        # CRITICAL FIX: Even more dramatically increase default trade cooldown to prevent rapid trading
+        self.trade_cooldown = kwargs.pop('trade_cooldown', 25000)  # Dramatically increased from 5000 to 25000
         
         # Initialize trading tracking variables
         self._last_trade_step = None
@@ -242,9 +242,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.rapid_trade_attempts = 0
         self.consecutive_attempts = 0
         
-        # Force holding period during initialization
-        # Increased from default to allow better observation of market conditions
-        self.initial_forced_hold_period = kwargs.pop('initial_forced_hold_period', 5000)
+        # CRITICAL FIX: Force holding period during initialization - increased dramatically
+        self.initial_forced_hold_period = kwargs.pop('initial_forced_hold_period', 25000)
         
         # Add frozen period after trades where only holds are allowed
         self.post_trade_frozen = False
@@ -271,6 +270,12 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.last_trade_prices = {}
         self.last_position_values = {}
         
+        # CRITICAL FIX: Add sequence detection for buy-sell-buy or sell-buy-sell patterns 
+        self.sequential_trade_counter = 0
+        self.position_change_history = []
+        self.last_trade_timestamp = 0
+        self.same_price_trade_counter = 0
+        
         # Call parent constructor with remaining kwargs
         super().__init__(*args, **kwargs)
         
@@ -296,8 +301,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Check for forced holding during initialization period
         in_initial_period = self.current_step < self.initial_forced_hold_period
         
-        # Record action in action history (for oscillation detection)
-        # But only if not in initial forced hold period
+        # Record action in history for oscillation detection - but only real actions that aren't during the forced hold
         if not in_initial_period:
             if isinstance(actions, np.ndarray) and len(actions) > 0:
                 # For multi-dimensional actions, record first action for simplicity
@@ -306,18 +310,16 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 # For scalar actions
                 self.action_history.append(int(actions))
             else:
-                # Default if action type is unexpected
-                if self.debug_mode:
-                    logger.warning(f"Unknown action type: {type(actions)}")
-                    self.action_history.append(1)  # Default to hold
+                # Default action if not a numeric type
+                self.action_history.append(1)  # Default to hold
         else:
             # During forced hold period, don't record actions for oscillation detection
             pass
-                
+            
         # Keep action history within maximum size
         if len(self.action_history) > self.max_action_history:
             self.action_history = self.action_history[-self.max_action_history:]
-            
+        
         # Only check for oscillation when not in forced hold period
         # and we have enough history of actual agent decisions
         if len(self.action_history) >= 4 and not in_initial_period:
@@ -334,21 +336,20 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 # Track oscillation count
                 self.oscillation_counter += 1
                 
-                # Apply progressively more severe penalties based on oscillation count
-                oscillation_penalty = -100.0 * min(20, self.oscillation_counter)  # Doubled base penalty and max multiplier
+                # CRITICAL FIX: Apply much more severe penalties based on oscillation count
+                oscillation_penalty = -300.0 * min(20, self.oscillation_counter)  # Triple penalty
                 logger.warning(f"Applied oscillation penalty at step {self.current_step}: {oscillation_penalty:.6f}")
                 self.info_buffer['oscillation_penalty'] = oscillation_penalty
                 
-                # If we see multiple oscillations, extend the frozen period dramatically
+                # CRITICAL FIX: More severe frozen period for oscillation
                 self.post_trade_frozen = True
-                # Scale frozen period based on oscillation count - extremely severe for repeat offenders
-                frozen_steps = 40000 * min(20, self.oscillation_counter)  # Doubled base frozen period and max multiplier
+                frozen_steps = 100000 * min(20, self.oscillation_counter)  # Dramatically increase frozen period
                 self.frozen_until_step = self.current_step + frozen_steps
                 logger.warning(f"Enforcing extended frozen period for {frozen_steps} steps due to action oscillation")
                 
                 # If we've seen 3+ oscillations, force a complete trading moratorium for an extended period
                 if self.oscillation_counter >= 3:
-                    self.trade_cooldown = max(self.trade_cooldown, 100000)  # Doubled minimum cooldown
+                    self.trade_cooldown = max(self.trade_cooldown, 200000)  # Doubled minimum cooldown
                     logger.warning(f"CRITICAL: Extended trade cooldown to {self.trade_cooldown} steps due to repeated oscillation")
         
         # Force hold actions during initial period
@@ -820,16 +821,10 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for StockTradingEnv that ensures consistent observation shapes
     and is compatible with Gymnasium API used by Stable-Baselines3.
+    Also includes additional safety measures to prevent excessive trading.
     """
-    
     def __init__(self, env, state_space=16):
-        """
-        Initialize the wrapper.
-        
-        Args:
-            env: Environment to wrap
-            state_space: Dimension of the state space
-        """
+        """Initialize the wrapper with additional safety measures."""
         # Check if env is a gym environment rather than a gymnasium environment
         if hasattr(env, 'observation_space') and not isinstance(env.observation_space, gymnasium.spaces.Space):
             # Convert regular gym to gymnasium wrapper
@@ -862,7 +857,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         else:
             # If already a gymnasium environment, just wrap it directly
             super().__init__(env)
-            # But ensure the observation space is consistent
+            # Set the observation space explicitly to ensure it's correct
             self.observation_space = gymnasium.spaces.Box(
                 low=-10.0, high=10.0, shape=(state_space,), dtype=np.float32
             )
@@ -871,117 +866,42 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         # Store the actual observation dimension for comparison
         self.actual_state_space = None
         self.state_space = state_space
+        
+        # Add step counter for logging
         self.step_counter = 0
-        self.env_id = getattr(env, 'env_id', 0)
         
         # Debug logging
         logger.debug(f"Initialized StockTradingEnvWrapper with state_space={state_space}")
-    
-    @property
-    def spec(self):
-        """Return the environment spec."""
-        if hasattr(self.env, 'spec'):
-            return self.env.spec
-        return None
-    
-    def reset(self, **kwargs):
-        """Reset the environment, with compatibility for both gym and gymnasium APIs."""
-        try:
-            # Reset wrapper-level tracking variables
-            self._last_trade_step = None
-            self._last_wrapper_trade_step = None
-            self._wrapper_position_history = []
-            self._wrapper_last_position = 0
-            self._wrapper_trade_cooldown = 50  # Reset to default value
-            self._last_price = None
-            self.step_counter = 0
-            
-            # Reset oscillation detection counters
-            if hasattr(self, '_oscillation_count'):
-                self._oscillation_count = 0
-            
-            # Reset forced hold period
-            if hasattr(self, '_forced_hold_until'):
-                self._forced_hold_until = 0
-                
-            # Reset actual observation space tracking
-            if hasattr(self, 'actual_state_space'):
-                self.actual_state_space = None
-            
-            # Try gymnasium API first (for newer environments)
-            reset_return = self.env.reset(**kwargs)
-            
-            # Handle different return types from reset
-            if isinstance(reset_return, tuple):
-                if len(reset_return) == 2:
-                    # Standard gymnasium API: (obs, info)
-                    obs, info = reset_return
-                else:
-                    # Some environments might return more values
-                    # Take the first value as observation and create empty info
-                    obs = reset_return[0]
-                    info = {} if len(reset_return) <= 1 else reset_return[1]
-            else:
-                # Single return value (older gym API)
-                obs = reset_return
-                info = {}
-        except TypeError:
-            try:
-                # Try gym API
-                obs = self.env.reset()
-                info = {}
-            except Exception as e:
-                logger.error(f"Error in reset: {e}")
-                # Return zeros as a fallback
-                obs = np.zeros(self.observation_space.shape)
-                info = {}
         
-        # Ensure observation is a numpy array
-        if not isinstance(obs, np.ndarray):
-            logger.warning(f"Reset returned non-numpy observation of type {type(obs)}")
-            # Try to convert to numpy array
-            try:
-                obs = np.array(obs, dtype=np.float32)
-            except Exception:
-                # If conversion fails, return zeros
-                obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-                
-        # Store the actual observation dimension if not already stored
-        if self.actual_state_space is None:
-            self.actual_state_space = len(obs)
-            logger.info(f"First reset - detected actual observation dimension: {self.actual_state_space}")
-                
-            # Update observation space if needed to match the actual dimension
-            if self.actual_state_space != self.observation_space.shape[0]:
-                logger.info(f"Updating observation space from shape {self.observation_space.shape} to ({self.actual_state_space},)")
-                self.observation_space = gymnasium.spaces.Box(
-                    low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
-                )
+        # CRITICAL FIX: Add wrapper-level safeguards against rapid trading
+        self._last_wrapper_trade_step = None
+        # Increased from 50 to 1000 for much stronger cooldown at wrapper level
+        self._wrapper_trade_cooldown = 1000  
+        self._wrapper_position_history = []
+        self._last_position = None
+        self._last_price = None
+        self.env_id = getattr(env, 'env_id', 0)
         
-        logger.debug(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
-            
-        # Ensure observation has the right shape
-        if len(obs) != self.state_space:
-            logger.warning(f"Observation shape mismatch: got {len(obs)}, expected {self.state_space}")
-            # Pad or truncate the observation to match the expected shape
-            if len(obs) < self.state_space:
-                # Pad with zeros if observation is too short
-                padded_obs = np.zeros(self.state_space, dtype=np.float32)
-                padded_obs[:len(obs)] = obs
-                obs = padded_obs
-                logger.info(f"Padded observation from shape {obs.shape} to {self.state_space}")
-            else:
-                # Truncate if observation is too long
-                obs = obs[:self.state_space]
-                logger.info(f"Truncated observation from shape {len(obs)} to {self.state_space}")
-            
-        # Clip observation values to reasonable range
-        obs = np.clip(obs, -10.0, 10.0)
-            
-        return obs, info
+        # CRITICAL FIX: Add more robust oscillation detection
+        self._consecutive_same_direction_trades = 0
+        self._same_price_trade_counter = 0
+        self._position_change_steps = []
+        self._frozen_until_step = 0
+        self._frozen_for_oscillation = False
         
+        # CRITICAL FIX: Stronger penalty mechanisms
+        self._oscillation_penalty_multiplier = 1.0  # Will increase with detected oscillations
+
     def step(self, action):
-        """Step the environment, with compatibility for both gym and gymnasium APIs."""
+        """Step the environment, with compatibility for both gym and gymnasium APIs.
+           Includes enhanced safeguards against rapid trading and oscillation.
+        """
+        # CRITICAL FIX: Enforce wrapper-level frozen period first
+        if hasattr(self, '_frozen_until_step') and self._frozen_until_step > self.step_counter:
+            if action != 1:  # If not a hold action
+                logger.warning(f"Wrapper frozen period active - forcing hold action at step {self.step_counter}")
+                action = 1  # Force hold
+        
         # Add debug logging for actions every 10000 steps
         if hasattr(self, 'step_counter'):
             if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
@@ -1007,7 +927,7 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         # Additional double-check cooldown protection at wrapper level
         if not hasattr(self, '_last_wrapper_trade_step'):
             self._last_wrapper_trade_step = None
-            self._wrapper_trade_cooldown = 50  # Much smaller cooldown at wrapper level as additional protection
+            self._wrapper_trade_cooldown = 1000  # Much larger cooldown at wrapper level as additional protection
             self._wrapper_position_history = []
         
         # Check wrapper-level cooldown
@@ -1020,8 +940,16 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 logger.warning(f"Wrapper emergency cooldown enforcement: Forcing hold ({steps_since_last_wrapper_trade}/{self._wrapper_trade_cooldown})")
                 action = 1
         
+        # Initialize default variables that will be updated in the try block
+        obs = np.zeros(self.observation_space.shape)
+        reward = 0.0
+        terminated = False
+        truncated = False
+        done = False
+        info = {}
+        
         try:
-            # Try gymnasium API first
+            # Try to use the gymnasium-style step interface
             result = self.env.step(action)
             
             # Handle different return formats
@@ -1048,59 +976,73 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 done = True
                 info = {}
                 terminated, truncated = done, False
-        except Exception as e:
-            # If step fails for any reason, return a default observation
-            logger.error(f"Error in environment step: {e}")
-            obs = np.zeros(self.observation_space.shape)
-            reward = 0.0
-            done = True
-            info = {"error": str(e)}
-            terminated, truncated = done, False
-        
-        # Add trading metrics to info dictionary if not already present
-        if isinstance(info, dict):
-            # Ensure action_type is present
-            if 'action_type' not in info:
-                if action == 0:
-                    info['action_type'] = 'sell'
-                elif action == 1:
-                    info['action_type'] = 'hold'
-                elif action == 2:
-                    info['action_type'] = 'buy'
-            
-            # Track our own last trade step to enable wrapper-level cooldown
-            if not hasattr(self, '_last_trade_step'):
-                self._last_trade_step = None
                 
-            # Check for a trade by looking at action_type
-            if info.get('action_type') in ['buy', 'sell'] and info.get('trade_occurred', False):
-                if self._last_trade_step is not None:
-                    steps_since = self.step_counter - self._last_trade_step
-                    if steps_since < 10:  # Rapid trade detection at wrapper level
-                        logger.warning(f"Wrapper detected rapid trade: {steps_since} steps since last trade")
-                        # Apply additional severe penalty
-                        reward -= 30.0
-                        # Force extra cooldown by updating wrapper-level trade step
-                        self._last_wrapper_trade_step = self.step_counter
+            # Initialize info dict if it's None or not a dict
+            if info is None or not isinstance(info, dict):
+                info = {}
                 
-                self._last_trade_step = self.step_counter
-                # Also update wrapper-level trade tracking
-                self._last_wrapper_trade_step = self.step_counter
-            
-            # Additional position tracking to detect rapid position changes
-            current_position = info.get('position', 0)
-            if not hasattr(self, '_wrapper_position_history'):
-                self._wrapper_position_history = []
-                self._wrapper_last_position = 0
-            
-            # Check if a trade occurred using the info dictionary
-            trade_occurred = info.get('trade_occurred', False)
-            
-            if hasattr(self, '_wrapper_last_position') and trade_occurred:
-                if self._wrapper_last_position != current_position:
-                    # Position changed - record it
+            # Add trading metrics to info dictionary if not already present
+            if isinstance(info, dict):
+                # Ensure action_type is present
+                if 'action_type' not in info:
+                    if action == 0:
+                        info['action_type'] = 'sell'
+                    elif action == 1:
+                        info['action_type'] = 'hold'
+                    elif action == 2:
+                        info['action_type'] = 'buy'
+                
+                # Track our own last trade step to enable wrapper-level cooldown
+                if not hasattr(self, '_last_trade_step'):
+                    self._last_trade_step = None
+                    
+                # Check for a trade by looking at action_type
+                if info.get('action_type') in ['buy', 'sell'] and info.get('trade_occurred', False):
+                    if self._last_trade_step is not None:
+                        steps_since = self.step_counter - self._last_trade_step
+                        # CRITICAL FIX: Much stricter rapid trade detection
+                        if steps_since < 20:  # Reduced from 10 to detect even closer trades 
+                            logger.warning(f"CRITICAL: Wrapper detected extremely rapid trade: {steps_since} steps since last trade")
+                            # Apply additional severe penalty
+                            reward -= 100.0  # Increased from 30.0
+                            # Force extended cooldown
+                            self._last_wrapper_trade_step = self.step_counter
+                            # CRITICAL FIX: Add extra frozen period for rapid trading
+                            self._frozen_until_step = self.step_counter + 10000
+                            self._frozen_for_oscillation = True
+                    
+                    self._last_trade_step = self.step_counter
+                    # Also update wrapper-level trade tracking
+                    self._last_wrapper_trade_step = self.step_counter
+                
+                # Additional position tracking to detect rapid position changes
+                current_position = info.get('position', 0)
+                
+                # CRITICAL FIX: Track position changes to detect oscillation
+                if hasattr(self, '_last_position') and self._last_position is not None:
+                    if current_position != self._last_position:
+                        # Position changed - add to tracking
+                        self._position_change_steps.append(self.step_counter)
+                        
+                        # Keep only the most recent position changes
+                        if len(self._position_change_steps) > 10:
+                            self._position_change_steps = self._position_change_steps[-10:]
+                            
+                        # Check for rapid position changes
+                        if len(self._position_change_steps) >= 2:
+                            steps_between_changes = self._position_change_steps[-1] - self._position_change_steps[-2]
+                            if steps_between_changes < 20:  # Very rapid position change
+                                logger.warning(f"CRITICAL: Wrapper detected extremely rapid position change: {steps_between_changes} steps between changes")
+                                # Apply extreme penalty
+                                reward -= 200.0
+                                # Force extended frozen period
+                                self._frozen_until_step = self.step_counter + 20000
+                                self._frozen_for_oscillation = True
+                
+                # Update wrapper position history for oscillation detection
+                if current_position != 0:  # Only track non-zero positions for oscillation
                     self._wrapper_position_history.append(current_position)
-                    # Only keep last 5 positions
+                    # Keep history manageable
                     if len(self._wrapper_position_history) > 5:
                         self._wrapper_position_history = self._wrapper_position_history[-5:]
                     
@@ -1117,32 +1059,52 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                         
                         if alternating and len(set(self._wrapper_position_history[-4:])) > 1:
                             logger.warning(f"CRITICAL: Wrapper detected position oscillation pattern: {self._wrapper_position_history[-4:]}")
-                            # Apply severe penalty
-                            reward -= 100.0
+                            # CRITICAL FIX: Apply much more severe penalty
+                            self._oscillation_penalty_multiplier += 1.0
+                            penalty = 300.0 * self._oscillation_penalty_multiplier
+                            reward -= penalty
+                            logger.warning(f"Applied severe oscillation penalty: {penalty}")
+                            
                             # Force cooldown for much longer period
                             self._last_wrapper_trade_step = self.step_counter
                             # Increase wrapper cooldown for next trades
-                            self._wrapper_trade_cooldown = min(500, self._wrapper_trade_cooldown * 2)
+                            self._wrapper_trade_cooldown = min(20000, self._wrapper_trade_cooldown * 2)
+                            # CRITICAL FIX: Add extended frozen period
+                            self._frozen_until_step = self.step_counter + 50000
+                            self._frozen_for_oscillation = True
                     
                     # Check for same trade price
                     if hasattr(self, '_last_price'):
                         current_price = info.get('close', None)
                         if current_price is not None and self._last_price is not None:
-                            if abs(current_price - self._last_price) < 0.001:
-                                logger.warning(f"CRITICAL: Wrapper detected same price trade: {current_price:.4f}")
-                                # Apply extreme penalty
-                                reward -= 200.0
+                            # CRITICAL FIX: More strict same price detection
+                            if abs(current_price - self._last_price) < 0.0001:
+                                self._same_price_trade_counter += 1
+                                logger.warning(f"CRITICAL: Wrapper detected same price trade: {current_price:.4f} (#{self._same_price_trade_counter})")
+                                # Apply extreme penalty that increases with repeated same-price trades
+                                penalty = 300.0 * min(10, self._same_price_trade_counter)
+                                reward -= penalty
+                                logger.warning(f"Applied same-price trade penalty: {penalty}")
+                                
                                 # Force extended cooldown
                                 self._last_wrapper_trade_step = self.step_counter
-                                self._wrapper_trade_cooldown = min(1000, self._wrapper_trade_cooldown * 3)
+                                self._wrapper_trade_cooldown = min(20000, self._wrapper_trade_cooldown * 2)
+                                # CRITICAL FIX: Add extended frozen period
+                                self._frozen_until_step = self.step_counter + 30000
                         
                         # Update last price
                         self._last_price = current_price
-            
-            # Store current position for next comparison
-            self._wrapper_last_position = current_position
-            
-            # Add position if available from env or track it ourselves
+                
+                # Update last position for next step
+                self._last_position = current_position
+                
+                # CRITICAL FIX: Add info about wrapper-level protection
+                info['wrapper_cooldown_remaining'] = max(0, self._wrapper_trade_cooldown - steps_since_last_wrapper_trade) if self._last_wrapper_trade_step is not None else 0
+                info['wrapper_frozen_period'] = max(0, self._frozen_until_step - self.step_counter) if hasattr(self, '_frozen_until_step') else 0 
+                info['wrapper_frozen_for_oscillation'] = self._frozen_for_oscillation
+                info['wrapper_same_price_trades'] = getattr(self, '_same_price_trade_counter', 0)
+                
+            # Add position information if missing
             if 'position' not in info:
                 # Try to get position from env
                 position = getattr(self.env, 'position', 0) if hasattr(self.env, 'position') else 0
@@ -1151,17 +1113,24 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 if not hasattr(self, 'current_position'):
                     self.current_position = 0
                 
-                # Update our position estimate based on action
-                if info.get('action_type') == 'buy':
-                    self.current_position = 1
-                elif info.get('action_type') == 'sell':
-                    self.current_position = -1
-                elif info.get('action_type') == 'hold':
-                    # Keep current position
-                    pass
+                # Update position based on action
+                if action == 0:  # Sell
+                    # If already in a position, close it
+                    if self.current_position == 1:
+                        self.current_position = 0  # Flat
+                    # Otherwise open a short position
+                    elif self.current_position == 0:
+                        self.current_position = -1  # Short
+                elif action == 2:  # Buy
+                    # If already in a position, close it
+                    if self.current_position == -1:
+                        self.current_position = 0  # Flat
+                    # Otherwise open a long position
+                    elif self.current_position == 0:
+                        self.current_position = 1  # Long
                 
-                # Add position to info
-                info['position'] = getattr(self, 'current_position', 0)
+                # Set position in info
+                info['position'] = position if position != 0 else self.current_position
             
             # Add price information if available
             if 'close' not in info and hasattr(self.env, 'data') and hasattr(self.env.data, 'get'):
@@ -1172,49 +1141,64 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                 # Estimate portfolio value if we can
                 cash = getattr(self.env, 'initial_amount', 100000)
                 position = info.get('position', 0)
-                close_price = info.get('close', 0)
+                position_value = 0
+                if position != 0 and 'close' in info:
+                    position_value = abs(position) * info['close']
                 
-                # Simple estimate of portfolio value
-                portfolio_value = cash + (position * close_price)
+                portfolio_value = cash + position_value
                 info['portfolio_value'] = portfolio_value
-        
-        # Log step observation for debugging (only on some steps to avoid excessive logging)
-        if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
-            self.step_counter = getattr(self, 'step_counter', 0) + 1
-            # Only log every 10000 steps and only if env_id is 0 (first environment)
-            if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
-                logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
-        
-        # Ensure observation is a numpy array
-        if not isinstance(obs, np.ndarray):
-            logger.warning(f"Step returned non-numpy observation of type {type(obs)}")
-            # Try to convert to numpy array
-            try:
-                obs = np.array(obs, dtype=np.float32)
-            except Exception as e:
-                logger.error(f"Could not convert observation to numpy array: {e}")
-                # Use a default observation
+
+        except Exception as e:
+            # Log any errors during step execution
+            logger.error(f"Error in StockTradingEnvWrapper step function: {str(e)}")
+            # Use default values if the step method fails
+            if not isinstance(obs, np.ndarray) or obs.shape != self.observation_space.shape:
                 obs = np.zeros(self.observation_space.shape)
+            terminated, truncated = True, False
+            done = True
         
-        # Ensure proper observation shape
-        if len(obs.shape) == 0:  # Scalar observation
-            obs = np.array([obs], dtype=np.float32)
+        finally:
+            # Log step observation for debugging (only on some steps to avoid excessive logging)
+            if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
+                self.step_counter = getattr(self, 'step_counter', 0) + 1
+                # Only log every 10000 steps and only if env_id is 0 (first environment)
+                if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
+                    logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
             
-        # If observation dimension doesn't match our state space, update the dimension
-        if len(obs) != self.state_space:
-            # Only track this the first time it happens or when it changes
-            if self.actual_state_space is None or self.actual_state_space != len(obs):
-                self.actual_state_space = len(obs)
-                logger.info(f"Step returned observation with different dimension: {self.actual_state_space}")
-                self.observation_space = gymnasium.spaces.Box(
-                    low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
-                )
+            # Ensure observation is a numpy array
+            if not isinstance(obs, np.ndarray):
+                logger.warning(f"Step returned non-numpy observation of type {type(obs)}")
+                # Try to convert to numpy array
+                try:
+                    obs = np.array(obs, dtype=np.float32)
+                except Exception as e:
+                    logger.error(f"Could not convert observation to numpy array: {e}")
+                    # Use a default observation
+                    obs = np.zeros(self.observation_space.shape)
+            
+            # Check if observation is scalar and convert to array
+            if np.isscalar(obs):
+                obs = np.array([obs], dtype=np.float32)
+                
+            # If observation dimension doesn't match our state space, update the dimension
+            if len(obs) != self.state_space:
+                # Only track this the first time it happens or when it changes
+                if self.actual_state_space is None or self.actual_state_space != len(obs):
+                    self.actual_state_space = len(obs)
+                    logger.info(f"Step returned observation with different dimension: {self.actual_state_space}")
+                    self.observation_space = gymnasium.spaces.Box(
+                        low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
+                    )
+            
+            # Clip observation values to reasonable range
+            obs = np.clip(obs, -10.0, 10.0)
         
-        # Clip observation values to reasonable range
-        obs = np.clip(obs, -10.0, 10.0)
-        
-        # Always return in gymnasium format (5-tuple)
-        return obs, reward, terminated, truncated, info
+        # Return in gymnasium format (obs, reward, terminated, truncated, info)
+        if 'gymnasium' in str(type(self.env)) or len(inspect.signature(self.env.step).parameters) > 1:
+            return obs, reward, terminated, truncated, info
+        else:
+            # Return in gym format for compatibility (obs, reward, done, info)
+            return obs, reward, done, info
 
 def setup_finrl_import():
     """Setup import for FinRL DRLAgent with version detection"""
@@ -1442,6 +1426,325 @@ class CustomDRLAgent:
         
         return model
 
+# Add custom callbacks for monitoring
+class TensorboardCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.episode_rewards = []
+        self.portfolio_values = []
+        self.action_counts = {"buy": 0, "sell": 0, "hold": 0}
+        self.trade_count = 0
+        self.successful_trades = 0
+        self.total_profit = 0.01  # Small non-zero to avoid division by zero
+        self.total_loss = 0.01  # Small non-zero to avoid division by zero
+        self.debug_steps = 0
+        self.debug_frequency = 100
+        self.last_debug_output = 0
+        self.oscillation_count = 0  # Track oscillations
+        
+        # Create additional tracking for trade patterns
+        self.trade_returns = []
+        self.trade_durations = []
+        self.recent_trades = []  # List to track recent trades for trend analysis
+        self.max_recent_trades = 100  # Maximum number of recent trades to keep
+        self.rapid_trade_threshold = 200  # Doubled to further discourage rapid trading
+        self.rapid_trades_detected = 0
+        self.rapid_trade_attempts = 0  # Track attempts separately from actual trades
+        self.frozen_period_enforced = 0  # Track number of times frozen period was enforced
+        self.last_trade_step = 0
+        self.same_price_trades = 0  # Count trades at exactly the same price (problematic)
+        self.last_trade_price = None
+        
+        # Position tracking
+        self.current_position = 0
+        self.entry_price = 0
+        self.position_start_time = 0
+        
+        # CRITICAL FIX: Add emergency detection for trades that bypass protections
+        self.trade_steps = []
+        self.last_position_changes = []
+        self.consecutive_same_price_trades = 0
+        self.emergency_shutdown_triggered = False
+        self.position_oscillation_detected = False
+        
+        # Log flush settings
+        self.log_flush_frequency = 5000  # Flush logs more frequently
+        
+        logger.info("Enhanced TensorboardCallback initialized with oscillation detection")
+    
+    def _on_step(self):
+        # Increment step counter for debugging
+        self.debug_steps += 1
+        
+        # Debug output every N steps
+        if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
+            logger.info(f"Callback debugging at step {self.debug_steps}")
+            print(f"\n--- Training progress: step {self.debug_steps} ---")
+            
+            # Print key metrics to console
+            if len(self.episode_rewards) > 0:
+                print(f"Recent reward mean: {np.mean(self.episode_rewards[-10:]):.4f}")
+            
+            if len(self.portfolio_values) > 0:
+                print(f"Current portfolio value: {self.portfolio_values[-1]:.2f}")
+            
+            if self.trade_count > 0:
+                win_rate = self.successful_trades / max(1, self.trade_count) * 100
+                print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
+                print(f"Action counts: {self.action_counts}")
+                if self.rapid_trades_detected > 0 or self.rapid_trade_attempts > 0:
+                    print(f"WARNING: {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} attempts! {self.same_price_trades} at same price!")
+                    print(f"Frozen periods enforced: {self.frozen_period_enforced}")
+                # Add oscillation info
+                print(f"Oscillation count: {self.oscillation_count}")
+                
+                # CRITICAL FIX: Print emergency status if detected
+                if self.emergency_shutdown_triggered:
+                    print("⚠️ CRITICAL: EMERGENCY SHUTDOWN TRIGGERED - PLEASE HALT TRAINING! ⚠️")
+                if self.position_oscillation_detected:
+                    print("⚠️ CRITICAL: POSITION OSCILLATION DETECTED - MODEL IS NOT LEARNING! ⚠️")
+                if self.consecutive_same_price_trades > 5:
+                    print(f"⚠️ CRITICAL: {self.consecutive_same_price_trades} SAME PRICE TRADES IN A ROW! ⚠️")
+            
+            if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
+                # Log a sample of the info dictionary to understand what's available
+                logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
+            self.last_debug_output = self.debug_steps
+        
+        # Force tensorboard log flushing periodically
+        if hasattr(self.logger, "dump_tabular") and self.debug_steps % self.log_flush_frequency == 0:
+            self.logger.dump_tabular()
+        
+        # Track step reward
+        if self.locals is not None and 'rewards' in self.locals and 'dones' in self.locals:
+            for i, (reward, done) in enumerate(zip(self.locals['rewards'], self.locals['dones'])):
+                if done:
+                    self.episode_rewards.append(reward)
+                    
+                # Log environment info if available
+                if 'infos' in self.locals and i < len(self.locals['infos']):
+                    info = self.locals['infos'][i]
+                    
+                    # Initialize variables that might be used later to avoid UnboundLocalError
+                    exit_price = 0
+                    pnl = 0
+                    trade_duration = 0
+
+                    # Track portfolio value
+                    if 'portfolio_value' in info:
+                        self.portfolio_values.append(info['portfolio_value'])
+                        self.logger.record('portfolio/value', info['portfolio_value'])
+                    
+                    # Track rapid trade attempts from environment
+                    if 'rapid_trade_attempts' in info:
+                        attempts = info['rapid_trade_attempts']
+                        if attempts > self.rapid_trade_attempts:
+                            # Only log when the number increases
+                            if attempts % 10 == 0:  # Log periodically
+                                logger.warning(f"Environment reported {attempts} rapid trade attempts")
+                            self.rapid_trade_attempts = attempts
+                            self.logger.record('trades/rapid_trade_attempts', attempts)
+                    
+                    # Record if this step was an enforced hold
+                    if 'enforced_hold' in info:
+                        self.logger.record('environment/enforced_hold', 1 if info['enforced_hold'] else 0)
+                    
+                    # Record cooldown remaining
+                    if 'cooldown_remaining' in info:
+                        self.logger.record('environment/cooldown_remaining', info['cooldown_remaining'])
+                    
+                    # Record if in frozen period
+                    if 'in_frozen_period' in info and info['in_frozen_period']:
+                        self.frozen_period_enforced += 1
+                        self.logger.record('environment/frozen_period', 1)
+                    
+                    # CRITICAL FIX: Check wrapper-level protection status
+                    if 'wrapper_frozen_period' in info and info['wrapper_frozen_period'] > 0:
+                        self.logger.record('environment/wrapper_frozen_period', info['wrapper_frozen_period'])
+                    
+                    if 'wrapper_frozen_for_oscillation' in info and info['wrapper_frozen_for_oscillation']:
+                        self.position_oscillation_detected = True
+                        self.logger.record('environment/wrapper_frozen_for_oscillation', 1)
+                    
+                    if 'wrapper_same_price_trades' in info:
+                        self.logger.record('environment/wrapper_same_price_trades', info['wrapper_same_price_trades'])
+                    
+                    # Track oscillation counter from environment
+                    if 'oscillation_counter' in info:
+                        osc_count = info['oscillation_counter']
+                        if osc_count > self.oscillation_count:
+                            self.oscillation_count = osc_count
+                            self.logger.record('environment/oscillation_count', osc_count)
+                    
+                    # Track position
+                    if 'position' in info:
+                        position = info['position']
+                        self.logger.record('position/value', position)
+                        
+                        # Position change detection for trade tracking
+                        if position != self.current_position:
+                            # CRITICAL FIX: Add the step to our trade steps list
+                            self.trade_steps.append(self.debug_steps)
+                            if len(self.trade_steps) > 10:
+                                self.trade_steps = self.trade_steps[-10:]
+                                
+                            # CRITICAL FIX: Check for extremely rapid trading
+                            if len(self.trade_steps) >= 2:
+                                steps_between_trades = self.trade_steps[-1] - self.trade_steps[-2]
+                                if steps_between_trades < 5:  # Extremely small gap between trades
+                                    logger.critical(f"CRITICAL: Extremely rapid trade detected! Only {steps_between_trades} steps between trades!")
+                                    # This indicates protection mechanisms are being bypassed
+                                    self.emergency_shutdown_triggered = True
+                                    self.logger.record('emergency/shutdown_triggered', 1)
+                                    
+                            # CRITICAL FIX: Track position changes
+                            self.last_position_changes.append((self.debug_steps, position))
+                            if len(self.last_position_changes) > 10:
+                                self.last_position_changes = self.last_position_changes[-10:]
+                            
+                            # New position, increment trade counter
+                            self.trade_count += 1
+                            
+                            # Track action type
+                            if position > self.current_position:
+                                self.action_counts["buy"] += 1
+                                self.logger.record('trades/buy', 1)
+                                self.logger.record('trades/sell', 0)
+                                self.logger.record('trades/hold', 0)
+                            elif position < self.current_position:
+                                self.action_counts["sell"] += 1
+                                self.logger.record('trades/buy', 0)
+                                self.logger.record('trades/sell', 1)
+                                self.logger.record('trades/hold', 0)
+                            
+                            # Check for rapid trading
+                            current_step = self.debug_steps
+                            if (current_step - self.last_trade_step) < self.rapid_trade_threshold:
+                                self.rapid_trades_detected += 1
+                                if self.rapid_trades_detected % 10 == 0:  # Only log periodically
+                                    logger.warning(f"Rapid trade detected! Only {current_step - self.last_trade_step} steps since last trade.")
+                                self.logger.record('trades/rapid_detected', 1)
+                            else:
+                                self.logger.record('trades/rapid_detected', 0)
+                            
+                            # Check for same price trading (sign of issues)
+                            if 'close_price' in info:
+                                current_price = info['close_price']
+                                if self.last_trade_price is not None and abs(current_price - self.last_trade_price) < 1e-6:
+                                    self.same_price_trades += 1
+                                    self.consecutive_same_price_trades += 1
+                                    logger.warning(f"Same price trade detected! Now {self.same_price_trades} total.")
+                                    self.logger.record('trades/same_price', 1)
+                                    if self.consecutive_same_price_trades > 5:
+                                        logger.critical(f"CRITICAL: {self.consecutive_same_price_trades} consecutive same price trades detected!")
+                                else:
+                                    self.consecutive_same_price_trades = 0
+                                    self.logger.record('trades/same_price', 0)
+                                self.last_trade_price = current_price
+                            
+                            # Record trade if closing a position
+                            if self.current_position != 0 and position == 0:
+                                if 'close_price' in info:
+                                    exit_price = info['close_price']
+                                    
+                                    trade_duration = current_step - self.position_start_time
+                                    self.trade_durations.append(trade_duration)
+                                    self.logger.record('trades/duration', trade_duration)
+                                    
+                                    # Calculate profit/loss
+                                    if self.current_position > 0:  # Long position
+                                        pnl = (exit_price - self.entry_price) / self.entry_price
+                                    else:  # Short position
+                                        pnl = (self.entry_price - exit_price) / self.entry_price
+                                    
+                                    # Record trade metrics
+                                    self.trade_returns.append(pnl)
+                                    self.logger.record('trades/pnl', pnl)
+                                    
+                                    # Update profit/loss counters
+                                    if pnl > 0:
+                                        self.total_profit += pnl
+                                        self.successful_trades += 1
+                                        self.logger.record('trades/profitable', 1)
+                                    else:
+                                        self.total_loss += abs(pnl)
+                                        self.logger.record('trades/profitable', 0)
+                                    
+                                    # Record win rate
+                                    win_rate = self.successful_trades / max(1, self.trade_count) * 100
+                                    self.logger.record('trades/win_rate', win_rate)
+                                    
+                                    # Record profit factor
+                                    profit_factor = self.total_profit / max(1e-6, self.total_loss)
+                                    self.logger.record('trades/profit_factor', profit_factor)
+                                    
+                                    # Add to recent trades list
+                                    self.recent_trades.append({
+                                        'step': current_step,
+                                        'duration': trade_duration,
+                                        'pnl': pnl,
+                                        'position': self.current_position,
+                                        'entry': self.entry_price,
+                                        'exit': exit_price
+                                    })
+                                    
+                                    # Keep recent trades list at max size
+                                    if len(self.recent_trades) > self.max_recent_trades:
+                                        self.recent_trades = self.recent_trades[-self.max_recent_trades:]
+                            
+                            # Starting a new position
+                            elif self.current_position == 0 and position != 0:
+                                self.position_start_time = current_step
+                                if 'close_price' in info:
+                                    self.entry_price = info['close_price']
+                            
+                            # Update current position
+                            self.current_position = position
+                            self.last_trade_step = current_step
+                        else:
+                            # Position didn't change - it's a hold
+                            self.action_counts["hold"] += 1
+                            self.logger.record('trades/buy', 0)
+                            self.logger.record('trades/sell', 0)
+                            self.logger.record('trades/hold', 1)
+                            
+                            # CRITICAL FIX: For oscillation detection, track consecutive action differences
+                            if len(self.last_position_changes) >= 4:
+                                # Check for alternating pattern like [0,1,0,1] which is a sign of oscillation
+                                last_positions = [p[1] for p in self.last_position_changes[-4:]]
+                                if last_positions == [0, 1, 0, 1] or last_positions == [1, 0, 1, 0] or \
+                                   last_positions == [0, -1, 0, -1] or last_positions == [-1, 0, -1, 0]:
+                                    logger.warning(f"Position oscillation detected! Pattern: {last_positions}")
+                                    self.position_oscillation_detected = True
+                                    self.oscillation_count += 1
+                                    self.logger.record('environment/oscillation_detected', 1)
+                    
+                    # Track price data if available
+                    for price_key in ['close_price', 'high_price', 'low_price', 'open_price']:
+                        if price_key in info:
+                            self.logger.record(f'market/{price_key}', info[price_key])
+                            
+                    # Track technical indicators if available
+                    for indicator in ['rsi', 'macd', 'ema_short', 'ema_long', 'bollinger_upper', 'bollinger_lower']:
+                        if indicator in info:
+                            self.logger.record(f'indicators/{indicator}', info[indicator])
+                            
+                    # Track reward
+                    self.logger.record('environment/reward', reward)
+                    
+                    # Monitor memory usage
+                    process = psutil.Process()
+                    memory_info = process.memory_info()
+                    memory_mb = memory_info.rss / 1024 / 1024
+                    self.logger.record('resources/memory_mb', memory_mb)
+                    
+                    # Monitor CPU usage
+                    cpu_percent = process.cpu_percent()
+                    self.logger.record('resources/cpu_percent', cpu_percent)
+                    
+        # Continue training
+        return True
+
 def train_with_finrl(
     df,
     args,
@@ -1450,18 +1753,19 @@ def train_with_finrl(
     tensorboard_log="./tensorboard_log",
     device=None
 ):
-    """Train a model using the FinRL library.
+    """
+    Train a model using FinRL.
     
     Args:
         df: DataFrame with market data
-        args: Training arguments
-        model_name: Name of model to use (ppo, ddpg, td3, sac)
-        timesteps: Number of timesteps to train for
-        tensorboard_log: Directory for tensorboard logs
-        device: PyTorch device to use
+        args: Args from argparse
+        model_name: Model type to train (e.g., "ppo", "a2c", "ddpg", "td3", "sac", "dqn")
+        timesteps: Number of timesteps to train
+        tensorboard_log: Directory for TensorBoard logs
+        device: Device to use (e.g., "cuda:0", "cpu")
         
     Returns:
-        Trained model
+        The trained model
     """
     try:
         # Import stable-baselines3 and torch.nn
@@ -1497,18 +1801,19 @@ def train_with_finrl(
     num_envs = getattr(args, 'num_envs', 4)
     logger.info(f"Creating {num_envs} parallel environments for training")
     
-    # Set higher trade cooldown periods for all environments to prevent oscillation
-    trade_cooldown = getattr(args, 'trade_cooldown', 10000)  # Increased default cooldown
-    initial_forced_hold = getattr(args, 'initial_forced_hold_period', 10000)  # Increased initial hold
+    # CRITICAL FIX: Set extremely high trade cooldown periods to completely prevent oscillation
+    # These values are dramatically increased from the previous settings
+    trade_cooldown = getattr(args, 'trade_cooldown', 50000)  # Increased from 10000 to 50000
+    initial_forced_hold = getattr(args, 'initial_forced_hold_period', 50000)  # Increased from 10000 to 50000
     
     # Adjust args to enforce longer cooldowns
     args.trade_cooldown = trade_cooldown
     args.initial_forced_hold_period = initial_forced_hold
     
-    # Apply stronger transaction costs to discourage excessive trading
-    args.transaction_cost_pct = getattr(args, 'transaction_cost_pct', 0.005)  # 0.5% transaction cost
+    # CRITICAL FIX: Apply much stronger transaction costs to discourage excessive trading
+    args.transaction_cost_pct = getattr(args, 'transaction_cost_pct', 0.02)  # Increased from 0.005 to 0.02 (2%)
     
-    logger.info(f"Using trade cooldown: {trade_cooldown}, initial hold: {initial_forced_hold}, "
+    logger.info(f"CRITICAL FIX: Using extreme trade cooldown: {trade_cooldown}, initial hold: {initial_forced_hold}, "
                 f"transaction cost: {args.transaction_cost_pct:.4f}")
     
     vec_env = create_parallel_finrl_envs(df, args, num_workers=num_envs)
@@ -1562,15 +1867,15 @@ def train_with_finrl(
         policy_kwargs = {
             'activation_fn': nn.Tanh,  # Changed to Tanh for smoother policy changes
             'net_arch': net_arch,
-            # Use much lower standard deviation to reduce extreme actions that lead to oscillation
-            'log_std_init': -3.5  # Further lowered for more stability
+            # CRITICAL FIX: Use MUCH lower standard deviation to reduce extreme actions
+            'log_std_init': -5.0  # Drastically lowered for more stability (from -3.5)
         }
     
-    # Add entropy coefficient to encourage exploration rather than oscillation
-    entropy_coef = getattr(args, 'entropy_coef', 0.01)
+    # CRITICAL FIX: Add higher entropy coefficient to encourage more exploration and less oscillation
+    entropy_coef = getattr(args, 'entropy_coef', 0.05)  # Increased from 0.01 to 0.05
     # For PPO, increase entropy coefficient to encourage more exploration
     if model_name.lower() == 'ppo':
-        entropy_coef = 0.03  # Increased to promote exploration over exploitation
+        entropy_coef = 0.05  # Increased from 0.03 to 0.05
     
     # Create model based on name
     agent = CustomDRLAgent(env=vec_env, verbose=1)
@@ -1588,20 +1893,20 @@ def train_with_finrl(
         model_kwargs.update({
             # Increase n_steps for better temporal pattern learning
             'n_steps': 4096,  # Doubled to capture longer time dependencies
-            # Lower learning rate for more stable learning
-            'learning_rate': 1e-4,  # Further reduced to prevent policy oscillation
+            # CRITICAL FIX: Lower learning rate for much more stable learning
+            'learning_rate': 5e-5,  # Reduced from 1e-4 to 5e-5
             # Increase entropy coefficient to encourage exploration over exploitation
             'ent_coef': entropy_coef,
             # More epochs for better learning
-            'n_epochs': 15,  # Increased for better convergence
+            'n_epochs': 20,  # Increased from 15 to 20 for better convergence
             # Smaller batch size for better generalization
             'batch_size': 128,
             # Improved GAE lambda for smoother advantage estimation
             'gae_lambda': 0.97,
-            # Add clipping parameter to control policy updates
-            'clip_range': 0.15,  # Tighter clipping to prevent drastic policy changes
+            # CRITICAL FIX: Tighter clipping to prevent drastic policy changes
+            'clip_range': 0.1,  # Tightened from 0.15 to 0.1
             # Add value function clipping for stability
-            'clip_range_vf': 0.15,
+            'clip_range_vf': 0.1,  # Also tightened from 0.15 to 0.1
             # Normalize advantage to improve training stability
             'normalize_advantage': True,
             # Add max gradient norm to prevent exploding gradients
@@ -1636,238 +1941,7 @@ def train_with_finrl(
                 'buffer_size': 300000  # Larger buffer for better experience retention
             })
     
-    # Add custom callbacks for monitoring
-    class TensorboardCallback(BaseCallback):
-        def __init__(self, verbose=0):
-            super(TensorboardCallback, self).__init__(verbose)
-            self.debug_steps = 0
-            self.debug_frequency = 1000  # Debug every 1000 steps
-            self.last_debug_output = 0
-            
-            # Portfolio tracking
-            self.portfolio_values = []
-            
-            # Trade tracking
-            self.trade_count = 0
-            self.successful_trades = 0
-            self.total_profit = 0
-            self.total_loss = 0
-            
-            # Tracking data for debugging
-            self.action_counts = {'buy': 0, 'hold': 0, 'sell': 0}
-            self.episode_rewards = []
-            self.step_rewards = []
-            
-            # Trade analysis
-            self.trade_returns = []
-            self.trade_durations = []
-            self.recent_trades = []  # List to track recent trades for trend analysis
-            self.max_recent_trades = 100  # Maximum number of recent trades to keep
-            self.rapid_trade_threshold = 200  # Doubled to further discourage rapid trading
-            self.rapid_trades_detected = 0
-            self.rapid_trade_attempts = 0  # Track attempts separately from actual trades
-            self.frozen_period_enforced = 0  # Track number of times frozen period was enforced
-            self.last_trade_step = 0
-            self.same_price_trades = 0  # Count trades at exactly the same price (problematic)
-            self.last_trade_price = None
-            
-            # Position tracking
-            self.current_position = 0
-            self.position_start_time = 0
-            self.entry_price = 0
-            
-            # Add oscillation tracking
-            self.oscillation_count = 0
-            self.action_history = []
-            
-            # Set up more frequent log flushing
-            self.log_flush_frequency = 5000  # Flush logs more frequently
-            
-            logger.info("Enhanced TensorboardCallback initialized with oscillation detection")
-        
-        def _on_step(self):
-            # Increment step counter for debugging
-            self.debug_steps += 1
-            
-            # Debug output every N steps
-            if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
-                logger.info(f"Callback debugging at step {self.debug_steps}")
-                print(f"\n--- Training progress: step {self.debug_steps} ---")
-                
-                # Print key metrics to console
-                if len(self.episode_rewards) > 0:
-                    print(f"Recent reward mean: {np.mean(self.episode_rewards[-10:]):.4f}")
-                
-                if len(self.portfolio_values) > 0:
-                    print(f"Current portfolio value: {self.portfolio_values[-1]:.2f}")
-                
-                if self.trade_count > 0:
-                    win_rate = self.successful_trades / max(1, self.trade_count) * 100
-                    print(f"Trades: {self.trade_count} | Win rate: {win_rate:.2f}% | Profit factor: {self.total_profit / max(1e-6, self.total_loss):.2f}")
-                    print(f"Action counts: {self.action_counts}")
-                    if self.rapid_trades_detected > 0 or self.rapid_trade_attempts > 0:
-                        print(f"WARNING: {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} attempts! {self.same_price_trades} at same price!")
-                        print(f"Frozen periods enforced: {self.frozen_period_enforced}")
-                    # Add oscillation info
-                    print(f"Oscillation count: {self.oscillation_count}")
-                
-                if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
-                    # Log a sample of the info dictionary to understand what's available
-                    logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
-                self.last_debug_output = self.debug_steps
-            
-            # Force tensorboard log flushing periodically
-            if hasattr(self.logger, "dump_tabular") and self.debug_steps % self.log_flush_frequency == 0:
-                self.logger.dump_tabular()
-            
-            # Track step reward
-            if self.locals is not None and 'rewards' in self.locals:
-                for i, reward in enumerate(self.locals['rewards']):
-                    self.step_rewards.append(reward)
-                    
-                    # Log environment info if available
-                    if 'infos' in self.locals and i < len(self.locals['infos']):
-                        info = self.locals['infos'][i]
-                        
-                        # Initialize variables that might be used later to avoid UnboundLocalError
-                        exit_price = 0
-                        pnl = 0
-                        trade_duration = 0
-
-                        # Track portfolio value
-                        if 'portfolio_value' in info:
-                            self.portfolio_values.append(info['portfolio_value'])
-                            self.logger.record('portfolio/value', info['portfolio_value'])
-                        
-                        # Track rapid trade attempts from environment
-                        if 'rapid_trade_attempts' in info:
-                            attempts = info['rapid_trade_attempts']
-                            if attempts > self.rapid_trade_attempts:
-                                # Only log when the number increases
-                                if attempts % 10 == 0:  # Log periodically
-                                    logger.warning(f"Environment reported {attempts} rapid trade attempts")
-                                self.rapid_trade_attempts = attempts
-                                self.logger.record('trades/rapid_trade_attempts', attempts)
-                        
-                        # Record if this step was an enforced hold
-                        if 'enforced_hold' in info:
-                            self.logger.record('environment/enforced_hold', 1 if info['enforced_hold'] else 0)
-                        
-                        # Record cooldown remaining
-                        if 'cooldown_remaining' in info:
-                            self.logger.record('environment/cooldown_remaining', info['cooldown_remaining'])
-                        
-                        # Record if in frozen period
-                        if 'in_frozen_period' in info and info['in_frozen_period']:
-                            self.frozen_period_enforced += 1
-                            self.logger.record('environment/frozen_period', 1)
-                        
-                        # Track oscillation count from environment
-                        if 'oscillation_counter' in info:
-                            osc_count = info['oscillation_counter']
-                            if osc_count > self.oscillation_count:
-                                self.oscillation_count = osc_count
-                                self.logger.record('environment/oscillation_count', osc_count)
-                        
-                        # Track position
-                        if 'position' in info:
-                            position = info['position']
-                            
-                            # Position change detection for trade tracking
-                            if position != self.current_position:
-                                # If we had a previous position, this is a trade exit
-                                if self.current_position != 0:
-                                    trade_duration = self.debug_steps - self.position_start_time
-                                    self.trade_durations.append(trade_duration)
-                                    
-                                    # Check for rapid trading
-                                    steps_since_last_trade = self.debug_steps - self.last_trade_step
-                                    if steps_since_last_trade < self.rapid_trade_threshold:
-                                        self.rapid_trades_detected += 1
-                                        logger.warning(f"Rapid trade detected! Only {steps_since_last_trade} steps since last trade.")
-                                    
-                                    # Initialize variables that might be used later
-                                    exit_price = 0
-                                    pnl = 0
-                                    
-                                    # Calculate trade profit/loss if price info available
-                                    if 'close' in info:
-                                        exit_price = info['close']
-                                        
-                                        # Check for same price trades (sign of environment issues)
-                                        if self.last_trade_price is not None and abs(exit_price - self.last_trade_price) < 0.0001:
-                                            self.same_price_trades += 1
-                                            logger.warning(f"Same price trade detected! Price: {exit_price:.2f}")
-                                        
-                                        self.last_trade_price = exit_price
-                                        pnl = (exit_price - self.entry_price) * self.current_position
-                                        self.trade_returns.append(pnl)
-                                        
-                                        # Track trade result
-                                        self.trade_count += 1
-                                        if pnl > 0:
-                                            self.successful_trades += 1
-                                            self.total_profit += pnl
-                                        else:
-                                            self.total_loss += abs(pnl)
-                                        
-                                        # Log trade details
-                                        logger.info(f"Trade exit: position={position}, price={exit_price:.4f}, pnl={pnl:.2f}, duration={trade_duration}")
-                                        
-                                        # Record trade metrics
-                                        self.logger.record('trades/count', self.trade_count)
-                                        self.logger.record('trades/win_rate', self.successful_trades / max(1, self.trade_count))
-                                        self.logger.record('trades/profit_factor', self.total_profit / max(1e-6, self.total_loss))
-                                        self.logger.record('trades/duration', trade_duration)
-                                        self.logger.record('trades/pnl', pnl)
-                                
-                                # This is a new trade entry
-                                if position != 0:
-                                    self.current_position = position
-                                    self.position_start_time = self.debug_steps
-                                    self.last_trade_step = self.debug_steps
-                                    
-                                    if 'close' in info:
-                                        self.entry_price = info['close']
-                                        logger.info(f"Trade entry: position={position}, price={self.entry_price:.4f}")
-                                else:
-                                    # Exit to flat position
-                                    self.current_position = 0
-                            
-                        # Track actions based on info
-                        if 'action_type' in info:
-                            action_type = info['action_type']
-                            if action_type in self.action_counts:
-                                self.action_counts[action_type] += 1
-                            self.logger.record(f'actions/{action_type}', 1)
-                            
-                            # Store action history for oscillation detection
-                            if action_type == 'buy':
-                                self.action_history.append(2)
-                            elif action_type == 'sell':
-                                self.action_history.append(0)
-                            else:  # hold
-                                self.action_history.append(1)
-                                
-                            # Keep history to a reasonable size
-                            if len(self.action_history) > 20:
-                                self.action_history = self.action_history[-20:]
-                                
-                            # Check for oscillation patterns
-                            if len(self.action_history) >= 6:  # Require longer history for stricter detection
-                                # Only count as oscillation if we see multiple cycles in a row
-                                # E.g., buy-sell-buy-sell or sell-buy-sell-buy for at least 6 actions
-                                strict_pattern1 = self.action_history[-6:] == [2, 0, 2, 0, 2, 0]  # buy-sell-buy-sell-buy-sell
-                                strict_pattern2 = self.action_history[-6:] == [0, 2, 0, 2, 0, 2]  # sell-buy-sell-buy-sell-buy
-                                
-                                if strict_pattern1 or strict_pattern2:
-                                    logger.warning(f"Severe oscillation pattern detected in callback: {self.action_history[-6:]}")
-                                    self.oscillation_count += 1
-                                    self.logger.record('environment/oscillation_detected', 1)
-            
-            return True
-    
-    # Use the enhanced callback
+    # Create the callback (no need to define TensorboardCallback here anymore)
     callback = TensorboardCallback()
     
     logger.info(f"Creating {model_name} model with kwargs: {model_kwargs}")
@@ -2438,14 +2512,14 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
 
     # Environment parameters
     initial_amount = getattr(args, 'initial_balance', 1000000)
-    # Hardcode transaction costs to use crypto exchange maker/taker fees of 0.075%
-    transaction_cost_pct = 0.00075  # 0.075% as a decimal
-    logger.info("Using hardcoded crypto exchange maker/taker fees: 0.075%")
+    # CRITICAL FIX: Increase transaction costs dramatically to discourage excessive trading
+    transaction_cost_pct = 0.02  # 2% fee (increased from 0.00075)
+    logger.info("CRITICAL FIX: Using much higher transaction fees: 2% (increased from 0.075%)")
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
 
-    # Get trade cooldown setting with dramatically increased default value
-    base_trade_cooldown = getattr(args, 'trade_cooldown', 5000)
-    logger.info(f"Setting strict base trade cooldown to {base_trade_cooldown} steps")
+    # CRITICAL FIX: Get trade cooldown setting with dramatically increased default value
+    base_trade_cooldown = getattr(args, 'trade_cooldown', 100000)  # Increased from 5000 to 100000
+    logger.info(f"CRITICAL FIX: Setting extremely strict base trade cooldown to {base_trade_cooldown} steps (increased from 5000)")
 
     # Calculate maximum number of shares to trade per step (hmax)
     # Enforcing a minimum position size of 10%
@@ -2559,16 +2633,16 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
 
     # Create environment functions
     for i in range(num_workers * num_envs_per_worker):
-        # Calculate a progressively increasing trade cooldown for each environment
-        # This prevents synchronized rapid trading across environments
+        # CRITICAL FIX: Calculate a progressively increasing trade cooldown for each environment
+        # Use much larger values to prevent any possibility of rapid trading
         env_index = i + 1  # Start from 1 to avoid division by zero
         # Add additional cooldown based on environment index to create staggered cooldowns
-        env_trade_cooldown = base_trade_cooldown + (1000 * (i % 5))  # Add 0, 1000, 2000, 3000, 4000 steps in a cycle
+        env_trade_cooldown = base_trade_cooldown + (10000 * (i % 5))  # Add 0, 10000, 20000, 30000, 40000 steps in a cycle
 
-        # Increase the initial hold period as well
-        env_initial_hold = getattr(args, 'initial_forced_hold_period', 5000) + (500 * (i % 4))  # Add 0, 500, 1000, 1500 initial hold period
+        # CRITICAL FIX: Increase the initial hold period as well
+        env_initial_hold = getattr(args, 'initial_forced_hold_period', 50000) + (5000 * (i % 4))  # Add 0, 5000, 10000, 15000 initial hold
 
-        logger.info(f"Environment {i}: Setting trade_cooldown={env_trade_cooldown}, initial_hold={env_initial_hold}")
+        logger.info(f"CRITICAL FIX - Environment {i}: Setting trade_cooldown={env_trade_cooldown}, initial_hold={env_initial_hold}")
 
         # Define a function that creates a new environment instance each time it's called
         def make_env(idx=i, trade_cooldown=env_trade_cooldown, initial_hold=env_initial_hold):
