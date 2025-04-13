@@ -40,6 +40,9 @@ import psutil
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+import datetime
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend for server environments
 
 # Set project root to path
 project_root = str(Path(__file__).parent)
@@ -1135,202 +1138,88 @@ def train_dqn(env, args):
 
 
 def train_ppo(env, args):
-    """
-    Train a PPO agent on the cryptocurrency trading environment with enhanced
-    stability and curriculum learning through population-based training.
+    """Train a PPO agent"""
+    logger.info("Starting PPO training...")
     
-    Args:
-        env: Vector environment for training
-        args: Command line arguments with configuration
+    # Create directories for checkpoints and logs
+    checkpoint_dir = os.path.join('models', 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
     
-    Returns:
-        Trained PPO model
-    """
+    # Setup tensorboard logging
+    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_log_dir = os.path.join("tensorboard_log", f"PPO_{current_time}")
+    
+    # Ensure minimum values for stability
+    n_steps = max(512, args.n_steps)
+    if n_steps != args.n_steps:
+        logger.warning(f"Adjusted n_steps from {args.n_steps} to {n_steps} for stability")
+        
+    batch_size = max(256, args.batch_size)
+    if batch_size != args.batch_size:
+        logger.warning(f"Adjusted batch_size from {args.batch_size} to {batch_size} for stability")
+    
+    # Set up standard callbacks
+    callbacks = []
+    
+    # Add checkpoint callback to save models periodically
+    checkpoint_callback = CheckpointCallback(
+        save_freq=50000,
+        save_path=checkpoint_dir,
+        name_prefix="ppo_model",
+        save_vecnormalize=True
+    )
+    callbacks.append(checkpoint_callback)
+    
+    # Add tensorboard callback for logging
+    tensorboard_callback = TensorboardCallback()
+    callbacks.append(tensorboard_callback)
+    
+    # Combine callbacks
+    callback = CallbackList(callbacks)
+    
+    # Create model with appropriate parameters for stability
+    # Cap learning rate at 0.0005 for stability
+    learning_rate = min(0.0005, args.learning_rate)
+    if learning_rate != args.learning_rate:
+        logger.warning(f"Capped learning rate from {args.learning_rate} to {learning_rate} for training stability")
+    
+    # Learning rate schedule for stability
+    def lr_schedule(remaining_progress):
+        return learning_rate * remaining_progress  # Linear schedule
+    
+    logger.info(f"Creating PPO model with n_steps={n_steps}, batch_size={batch_size}")
+    model = PPO(
+        "MlpPolicy",
+        env,
+        learning_rate=lr_schedule,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        gamma=args.gamma,
+        ent_coef=0.01,  # Slightly higher entropy for better exploration
+        clip_range=0.2,
+        verbose=1 if args.verbose else 0,
+        tensorboard_log=tensorboard_log_dir,
+        device=args.device
+    )
+    
+    # Train model with standard approach
     try:
-        # Setup checkpoint dir
-        checkpoint_dir = os.path.join('models', 'checkpoints', f"ppo_{int(time.time())}")
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        
-        # Setup tensorboard callback
-        tensorboard_log = os.path.join('logs', 'tensorboard')
-        os.makedirs(tensorboard_log, exist_ok=True)
-        
-        # Setup callbacks
-        callbacks = []
-        
-        # Add TensorBoard callback for visualization
-        callbacks.append(TensorboardCallback(verbose=1))
-        
-        # Add checkpoint callback for saving models
-        checkpoint_freq = min(args.checkpoint_freq, args.timesteps // 10)
-        checkpoint_callback = CheckpointCallback(
-            save_freq=checkpoint_freq,
-            save_path=checkpoint_dir,
-            name_prefix="ppo_model",
-            save_replay_buffer=False,
-            save_vecnormalize=True,
-        )
-        callbacks.append(checkpoint_callback)
-        
-        # Population-based training callback
-        pbt_callback = PopulationBasedTrainingCallback(
-            num_models=3,  # Train 3 models in parallel
-            eval_freq=50000,  # Evaluate every 50k steps
-            checkpoint_dir=checkpoint_dir
-        )
-        callbacks.append(pbt_callback)
-        
-        # Combine all callbacks
-        callback = CallbackList(callbacks)
-        
-        # Find LSTM model if provided
-        lstm_model = None
-        if args.lstm_model_path:
-            lstm_model = load_lstm_model(args.lstm_model_path)
-        
-        # Create PPO model with enhanced architecture and stability parameters
-        # Use a proper feature extractor setup for LSTM integration
-        policy_kwargs = dict(
-            # Larger network dimensions
-            net_arch=[
-                dict(
-                    pi=[256, 128, 64],  # Larger policy network
-                    vf=[256, 128, 64]   # Larger value network
-                )
-            ],
-            # Use Tanh activation for better gradient behavior
-            activation_fn=torch.nn.Tanh,
-            # More conservative exploration
-            log_std_init=-2.0  
+        logger.info(f"Training PPO model for {args.timesteps} timesteps...")
+        model.learn(
+            total_timesteps=args.timesteps,
+            callback=callback,
+            tb_log_name="ppo_run"
         )
         
-        # Add LSTM features if model was loaded
-        if lstm_model is not None:
-            # Update to use LSTM features through the feature extractor
-            logger.info("Integrating pre-trained LSTM model into policy network")
-            
-            # Create custom feature extractor that uses the pre-trained LSTM
-            policy_kwargs['features_extractor_class'] = LSTMAugmentedFeatureExtractor
-            policy_kwargs['features_extractor_kwargs'] = {
-                'lstm_model': lstm_model,
-                'features_dim': 128
-            }
-            
-        # Adjust learning rate for stability
-        learning_rate = args.learning_rate
-        if learning_rate > 0.0005:
-            logger.warning(f"Reducing learning rate from {learning_rate} to 0.0005 for stability")
-            learning_rate = 0.0005
+        # Save trained model
+        model_save_path = os.path.join('models', f"ppo_model_{int(time.time())}.zip")
+        model.save(model_save_path)
+        logger.info(f"Model saved to {model_save_path}")
         
-        # Calculate appropriate clip range based on action space
-        clip_range = 0.1  # Conservative clipping by default
+        return model
         
-        # Calculate appropriate batch size and n_steps
-        batch_size = args.batch_size
-        n_steps = args.n_steps
-        
-        # Ensure minimum values for stability
-        min_batch_size = 64  # Minimum batch size
-        min_n_steps = 512    # Minimum steps
-        
-        # For large networks, prefer larger batch sizes
-        recommended_min_batch_size = 256
-        
-        # Ensure n_steps is at least the minimum value
-        if n_steps < min_n_steps:
-            logger.warning(f"Increasing n_steps from {n_steps} to {min_n_steps} for stability")
-            n_steps = min_n_steps
-        else:
-            logger.info(f"Using requested n_steps value: {n_steps}")
-        
-        # Ensure batch_size is at least the minimum value
-        if batch_size < recommended_min_batch_size:
-            logger.warning(f"Increasing batch_size from {batch_size} to {recommended_min_batch_size} for larger network")
-            batch_size = recommended_min_batch_size
-        else:
-            logger.info(f"Using requested batch_size value: {batch_size}")
-        
-        # Increased entropy coefficient for better exploration
-        ent_coef = 0.01
-        if args.ent_coef < 0.01:
-            ent_coef = 0.01
-            logger.info(f"Setting entropy coefficient to {ent_coef} for better exploration")
-        
-        # Initialize models for population-based training
-        models = []
-        
-        # Create models with slightly different hyperparameters
-        for i in range(pbt_callback.num_models):
-            # Adjust hyperparameters slightly for diversity
-            model_lr = learning_rate * (0.8 + 0.4 * random.random())  # 0.8x to 1.2x
-            model_ent = ent_coef * (0.8 + 0.4 * random.random())      # 0.8x to 1.2x
-            
-            # Create model
-            model = PPO(
-                policy="MlpPolicy",
-                env=env,
-                learning_rate=model_lr,
-                n_steps=n_steps,
-                batch_size=batch_size,
-                gamma=args.gamma,
-                ent_coef=model_ent,
-                clip_range=clip_range,
-                policy_kwargs=policy_kwargs,
-                tensorboard_log=tensorboard_log,
-                verbose=1 if args.verbose else 0,
-                device=args.device
-            )
-            
-            models.append(model)
-            
-            logger.info(f"Created PPO model #{i} with lr={model_lr:.6f}, ent_coef={model_ent:.4f}")
-        
-        # Initialize the callback with the models
-        pbt_callback.init_models(models)
-        
-        # Use the first model as our main model
-        model = models[0]
-        
-        # Log the training parameters
-        logger.info(f"Training PPO with population-based training:")
-        logger.info(f" - Models in population: {pbt_callback.num_models}")
-        logger.info(f" - Base learning rate: {learning_rate}")
-        logger.info(f" - Base entropy coefficient: {ent_coef}")
-        logger.info(f" - Batch size: {batch_size}")
-        logger.info(f" - n_steps: {n_steps}")
-        logger.info(f" - clip_range: {clip_range}")
-        logger.info(f" - max_grad_norm: 0.5")
-        
-        # Train model
-        try:
-            # Create a learning rate scheduler for stability
-            def lr_schedule(remaining_progress):
-                # Start with the base learning rate and decay to 10% of the initial value
-                return learning_rate * (0.1 + 0.9 * remaining_progress)
-            
-            # Train with population-based training
-            pbt_callback.train(total_timesteps=args.timesteps, callback=callback)
-            
-            # Get the best model
-            model = pbt_callback.get_best_model()
-            
-            # Save trained model
-            model_save_path = os.path.join('models', f"ppo_model_{int(time.time())}")
-            model.save(model_save_path)
-            logger.info(f"Best model from population saved to {model_save_path}")
-            
-            return model
-            
-        except KeyboardInterrupt:
-            logger.warning("Training interrupted by user")
-            # Save the model even if interrupted
-            model_save_path = os.path.join('models', f"ppo_model_interrupted_{int(time.time())}")
-            model.save(model_save_path)
-            logger.info(f"Interrupted model saved to {model_save_path}")
-            return model
-    
     except Exception as e:
-        logger.error(f"Error training PPO model: {e}")
+        logger.error(f"Error during PPO training: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -1406,273 +1295,6 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
         
         return features
         
-
-class PopulationBasedTrainingCallback:
-    """
-    Implements Population-Based Training (PBT) for reinforcement learning.
-    
-    PBT trains a population of models in parallel, and periodically replaces
-    the worst-performing models with mutations of the best-performing ones.
-    """
-    
-    def __init__(self, num_models=3, eval_freq=50000, checkpoint_dir='pbt_checkpoints'):
-        """
-        Initialize the PBT callback.
-        
-        Args:
-            num_models: Number of models in the population
-            eval_freq: Frequency of evaluation (in timesteps)
-            checkpoint_dir: Directory to save checkpoints
-        """
-        self.num_models = num_models
-        self.eval_freq = eval_freq
-        self.checkpoint_dir = checkpoint_dir
-        self.models = []
-        self.performances = [0] * num_models
-        self.timesteps_trained = [0] * num_models
-        self.total_timesteps = 0
-        self.best_performance = float('-inf')
-        self.best_model_idx = 0
-        
-        # Create checkpoint directory
-        os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    def init_models(self, models):
-        """Initialize with pre-created models"""
-        assert len(models) == self.num_models, "Number of models must match num_models"
-        self.models = models
-    
-    def _evaluate_model(self, model_idx, num_episodes=5):
-        """
-        Evaluate a model on a separate evaluation environment.
-        
-        Args:
-            model_idx: Index of the model to evaluate
-            num_episodes: Number of episodes to evaluate
-            
-        Returns:
-            Average episodic reward
-        """
-        model = self.models[model_idx]
-        
-        # Create evaluation environment
-        eval_env = model.get_env()
-        
-        # Run evaluation
-        episode_rewards = []
-        for _ in range(num_episodes):
-            obs = eval_env.reset()[0]
-            done = False
-            episode_reward = 0
-            
-            while not done:
-                action, _ = model.predict(obs, deterministic=True)
-                obs, reward, done, _, _ = eval_env.step(action)
-                episode_reward += reward
-                
-                # Handle vectorized environments
-                if isinstance(done, (list, np.ndarray)):
-                    if np.any(done):
-                        break
-            
-            episode_rewards.append(episode_reward)
-        
-        # Calculate average reward
-        avg_reward = sum(episode_rewards) / len(episode_rewards)
-        
-        # Update best model if this is better
-        if avg_reward > self.best_performance:
-            self.best_performance = avg_reward
-            self.best_model_idx = model_idx
-            
-            # Save best model checkpoint
-            model_path = os.path.join(self.checkpoint_dir, f"best_model_{model_idx}")
-            model.save(model_path)
-            logger.info(f"New best model (idx {model_idx}) with performance {avg_reward:.2f}")
-        
-        return avg_reward
-    
-    def _exploit_and_explore(self):
-        """
-        Replace worst-performing models with mutations of best-performing ones.
-        """
-        # Find the worst-performing model(s)
-        sorted_indices = np.argsort(self.performances)
-        
-        # Replace worst model(s) with mutations of better ones
-        num_replace = max(1, self.num_models // 3)  # Replace bottom third
-        
-        for i in range(num_replace):
-            # Get the worst model index
-            worst_idx = sorted_indices[i]
-            
-            # Get a random model from the top half
-            top_half = sorted_indices[self.num_models // 2:]
-            source_idx = np.random.choice(top_half)
-            
-            logger.info(f"Replacing model {worst_idx} (perf: {self.performances[worst_idx]:.2f}) "
-                       f"with mutation of model {source_idx} (perf: {self.performances[source_idx]:.2f})")
-            
-            # Copy parameters from source to target
-            source_model = self.models[source_idx]
-            target_model = self.models[worst_idx]
-            
-            # Extract source parameters
-            source_params = source_model.get_parameters()
-            
-            # Mutate some hyperparameters
-            # Learning rate mutation
-            lr = source_model.learning_rate
-            if isinstance(lr, float):
-                # Perturb by up to ±20%
-                lr_factor = 0.8 + 0.4 * np.random.random()
-                new_lr = lr * lr_factor
-                logger.info(f"Mutating learning rate: {lr:.6f} -> {new_lr:.6f}")
-            else:
-                new_lr = lr  # Handle case where lr is a schedule
-            
-            # Entropy coefficient mutation for PPO
-            if hasattr(source_model, 'ent_coef'):
-                ent_coef = source_model.ent_coef
-                ent_factor = 0.8 + 0.4 * np.random.random()
-                new_ent_coef = ent_coef * ent_factor
-                logger.info(f"Mutating entropy coefficient: {ent_coef:.4f} -> {new_ent_coef:.4f}")
-            else:
-                new_ent_coef = None
-            
-            # Load parameters to target model
-            target_model.load_parameters(source_params)
-            
-            # Update hyperparameters
-            target_model.learning_rate = new_lr
-            if new_ent_coef is not None:
-                target_model.ent_coef = new_ent_coef
-            
-            # Reset performance counter for the replaced model
-            self.performances[worst_idx] = 0
-    
-    def train(self, total_timesteps, callback=None):
-        """
-        Train the population of models using PBT.
-        
-        Args:
-            total_timesteps: Total timesteps to train for
-            callback: Additional callback to use during training
-            
-        Returns:
-            The best model from the population
-        """
-        self.total_timesteps = total_timesteps
-        steps_per_round = self.eval_freq
-        num_rounds = total_timesteps // steps_per_round
-        
-        logger.info(f"Starting population-based training with {self.num_models} models")
-        logger.info(f"Training for {total_timesteps} timesteps in {num_rounds} rounds")
-        
-        for round_idx in range(num_rounds):
-            logger.info(f"Starting training round {round_idx+1}/{num_rounds}")
-            
-            # Train each model for steps_per_round timesteps
-            for i, model in enumerate(self.models):
-                logger.info(f"Training model {i+1}/{self.num_models} for {steps_per_round} timesteps")
-                
-                # Train the model
-                model.learn(
-                    total_timesteps=steps_per_round,
-                    callback=callback,
-                    reset_num_timesteps=False
-                )
-                
-                self.timesteps_trained[i] += steps_per_round
-                
-                # Evaluate the model
-                performance = self._evaluate_model(i)
-                self.performances[i] = performance
-                
-                logger.info(f"Model {i+1} performance: {performance:.2f}")
-            
-            # Exploit and explore phase
-            self._exploit_and_explore()
-            
-            # Log progress
-            logger.info(f"Completed round {round_idx+1}/{num_rounds}")
-            logger.info(f"Best model so far: {self.best_model_idx} with performance {self.best_performance:.2f}")
-        
-        # Final evaluation of all models
-        for i in range(self.num_models):
-            performance = self._evaluate_model(i, num_episodes=10)  # More episodes for final eval
-            self.performances[i] = performance
-            
-            logger.info(f"Final model {i+1} performance: {performance:.2f}")
-        
-        # Return the best model
-        return self.get_best_model()
-    
-    def get_best_model(self):
-        """Return the best model from the population"""
-        return self.models[self.best_model_idx]
-
-
-def train_a2c(env, args):
-    """Train an A2C agent"""
-    logger.info("Starting A2C training...")
-    
-    # Setup callbacks
-    checkpoint_dir = os.path.join('models', 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    callbacks = []
-    
-    # Add checkpoint callback
-    checkpoint_callback = CheckpointCallback(
-        save_freq=args.checkpoint_freq,
-        save_path=checkpoint_dir,
-        name_prefix="a2c_model",
-        save_vecnormalize=True
-    )
-    callbacks.append(checkpoint_callback)
-    
-    # Add tensorboard callback
-    tensorboard_callback = TensorboardCallback()
-    callbacks.append(tensorboard_callback)
-    
-    # Combine callbacks
-    callback = CallbackList(callbacks)
-    
-    # Create model
-    model = A2C(
-        "MlpPolicy",
-        env,
-        learning_rate=args.learning_rate,
-        n_steps=args.n_steps // 4,  # A2C typically uses smaller n_steps
-        gamma=args.gamma,
-        ent_coef=args.ent_coef,
-        verbose=1 if args.verbose else 0,
-        tensorboard_log="tensorboard_log",
-        device=args.device
-    )
-    
-    # Train model
-    try:
-        model.learn(
-            total_timesteps=args.timesteps,
-            callback=callback,
-            tb_log_name="a2c_run"
-        )
-        
-        # Save trained model
-        model_save_path = os.path.join('models', f"a2c_model_{int(time.time())}")
-        model.save(model_save_path)
-        logger.info(f"Model saved to {model_save_path}")
-        
-        return model
-        
-    except Exception as e:
-        logger.error(f"Error during A2C training: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
-
 
 def main():
     """Main training function"""
