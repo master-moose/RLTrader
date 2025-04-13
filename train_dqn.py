@@ -22,6 +22,7 @@ import random
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import gymnasium
 from gymnasium import spaces
 from gymnasium.wrappers import TimeLimit
@@ -32,6 +33,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.utils import set_random_seed
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from typing import Dict, List, Tuple, Union, Optional, Any, Callable
 import psutil
 import pandas as pd
@@ -72,10 +74,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for trading environments that adds safeguards against:
     1. Rapid trading (enforces a cooldown period)
-    2. Action oscillation (penalizes rapid flipping between positions)
-    3. Same-price trading (penalizes trades at the same price)
+    2. Oscillatory trading behavior 
+    3. Trading at the same price repeatedly
+    4. Excessive trading frequency
     
-    This wrapper supports both Gymnasium and older Gym environments.
+    Also adds risk-aware rewards and curriculum learning capabilities.
     """
     
     def __init__(self, env, trade_cooldown=TRADE_COOLDOWN_PERIOD, max_history_size=100):
@@ -84,23 +87,36 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Trading safeguards
         self.trade_cooldown = trade_cooldown
-        self.max_history_size = max_history_size
+        self.cooldown_violations = 0
+        self.forced_actions = 0
         
         # Trading history tracking
         self.last_trade_step = -self.trade_cooldown  # Start with cooldown already passed
         self.last_trade_price = None
         self.action_history = []
         self.position_history = []
-        self.same_price_trades = 0
-        self.cooldown_violations = 0
-        self.oscillation_count = 0
-        
-        # State tracking
-        self.previous_position = 0
+        self.previous_position = 0  # Initial position is flat (no assets)
         self.current_position = 0
-        self.forced_actions = 0
+        self.max_history_size = max_history_size
+        self.oscillation_count = 0
+        self.same_price_trades = 0
         
-        # Enhanced anti-oscillation feature
+        # Track consecutive actions for consistency rewards
+        self.consecutive_holds = 0
+        self.consecutive_same_action = 0
+        self.last_action = None
+        
+        # Position sizing for progressive training
+        self.position_size_pct = 0.1  # Start with small position sizes
+        self.training_progress = 0.0  # Track progress from 0.0 to 1.0
+        
+        # Performance metrics for risk-aware training
+        self.trade_returns = []
+        self.successful_trades = 0
+        self.failed_trades = 0
+        self.trade_pnl = []
+        
+        # Price history for last trades
         self.last_buy_price = None
         self.last_sell_price = None
         self.min_profit_threshold = 0.002  # Require at least 0.2% price difference to trade
@@ -112,9 +128,38 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.oscillation_patterns = {
             'buy_sell_alternation': 0,  # Count of buy-sell alternations
             'rapid_reversals': 0,       # Count of position reversals
-            'same_action_repeat': 0     # Count of repeated same actions
         }
+        
+        # Track trading metrics for risk-aware rewards
+        self.sharpe_ratio = 0.0
+        self.max_drawdown = 0.0
+        self.peak_value = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 0.0
+        
         self.current_cooldown = trade_cooldown  # Adjustable cooldown period
+        
+        # Modify observation space to include action history and risk metrics
+        if isinstance(self.env.observation_space, spaces.Box):
+            # Calculate new observation space size
+            # Original observation dimension + action history (15) + consistency metrics (3) 
+            # + risk metrics (3) + cooldown status (1)
+            original_shape = self.env.observation_space.shape
+            if len(original_shape) == 1:
+                # 1D observation space
+                additional_features = 22  # 15 + 3 + 3 + 1
+                low = np.append(self.env.observation_space.low, [-np.inf] * additional_features)
+                high = np.append(self.env.observation_space.high, [np.inf] * additional_features)
+                self.observation_space = spaces.Box(
+                    low=low, 
+                    high=high, 
+                    dtype=self.env.observation_space.dtype
+                )
+                logger.info(f"Expanded observation space from {original_shape[0]} to {original_shape[0] + additional_features} dimensions")
+            else:
+                # More complex observation space, keep original
+                logger.warning(f"Keeping original observation space with shape {original_shape} - cannot augment non-1D space")
+        else:
+            # Non-Box observation space, keep original
+            logger.warning(f"Keeping original observation space of type {type(self.env.observation_space)} - augmentation only supports Box spaces")
         
         logger.info(f"SafeTradingEnvWrapper initialized with {trade_cooldown} step cooldown")
     
@@ -122,40 +167,103 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         """Reset the environment and all trading history"""
         observation, info = self.env.reset(**kwargs)
         
-        # Reset tracking variables
-        self.last_trade_step = -self.trade_cooldown
-        self.last_trade_price = None
+        # Reset trading history
         self.action_history = []
         self.position_history = []
-        self.previous_position = 0
-        self.current_position = 0
-        self.forced_actions = 0
+        self.last_trade_step = -self.trade_cooldown
+        self.last_trade_price = None
         self.last_buy_price = None
         self.last_sell_price = None
+        self.previous_position = 0
+        self.current_position = 0
         
-        # Reset oscillation tracking
+        # Reset oscillation detection
         self.oscillation_count = 0
-        self.current_cooldown = self.trade_cooldown
-        self.oscillation_patterns = {
-            'buy_sell_alternation': 0,
-            'rapid_reversals': 0,
-            'same_action_repeat': 0
-        }
+        self.cooldown_violations = 0
+        self.forced_actions = 0
+        self.same_price_trades = 0
+        self.consecutive_holds = 0
+        self.consecutive_same_action = 0
+        self.last_action = None
+        
+        # Reset risk metrics
+        self.trade_returns = []
+        self.trade_pnl = []
+        self.successful_trades = 0
+        self.failed_trades = 0
+        self.peak_value = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 0.0
+        self.max_drawdown = 0.0
+        self.sharpe_ratio = 0.0
+        
+        # Add action history to observation
+        observation = self._augment_observation(observation)
         
         return observation, info
     
+    def _augment_observation(self, observation):
+        """Add action history and risk metrics to the observation space"""
+        # Get original observation shape
+        orig_obs = observation
+        
+        # Create one-hot encoding of recent actions (last 5 actions)
+        action_history = np.zeros(15)  # 5 recent actions x 3 possible actions (one-hot)
+        for i, action in enumerate(self.action_history[-5:]):
+            if action is not None and i < 5:
+                # One-hot encode each action
+                if action == 0:  # Sell
+                    action_history[i * 3] = 1
+                elif action == 1:  # Hold
+                    action_history[i * 3 + 1] = 1
+                elif action == 2:  # Buy 
+                    action_history[i * 3 + 2] = 1
+        
+        # Add consistency metrics
+        consistency_metrics = np.array([
+            min(self.consecutive_same_action / 10.0, 1.0),  # Normalized consecutive actions
+            min(self.consecutive_holds / 20.0, 1.0),  # Normalized consecutive holds
+            min(self.oscillation_count / 50.0, 1.0),  # Normalized oscillation count
+        ])
+        
+        # Add risk metrics
+        risk_metrics = np.array([
+            max(min(self.sharpe_ratio / 2.0, 1.0), -1.0),  # Clipped Sharpe ratio
+            min(self.max_drawdown, 1.0),  # Max drawdown
+            1.0 if self.consecutive_holds > 10 else 0.0,  # Long hold indicator
+        ])
+        
+        # Calculate current cooldown status
+        current_step = getattr(self.env, 'day', 0)
+        cooldown_status = min(max(
+            (current_step - self.last_trade_step) / self.current_cooldown, 0), 1)
+        
+        # Combine all features
+        augmented_features = np.concatenate([
+            action_history,
+            consistency_metrics,
+            risk_metrics,
+            np.array([cooldown_status]),
+        ])
+        
+        # Combine with original observation
+        if isinstance(orig_obs, np.ndarray):
+            augmented_observation = np.concatenate([orig_obs, augmented_features])
+        else:
+            # Handle case where observation might be a dict or other structure
+            logger.warning("Non-array observation type detected, returning original")
+            return orig_obs
+            
+        return augmented_observation
+    
     def _detect_oscillation_patterns(self):
-        """
-        Detect various oscillation patterns in the action history.
-        Returns True if oscillation is detected, False otherwise.
-        """
-        if len(self.action_history) < self.oscillation_window:
+        """Detect oscillation patterns in recent actions"""
+        # Need at least 8 actions for meaningful pattern detection
+        if len(self.action_history) < 8:
             return False
         
         # Get the most recent actions
         recent_actions = self.action_history[-self.oscillation_window:]
         
-        # Pattern 1: Buy-Sell alternation (e.g., [2, 0, 2, 0] or [0, 2, 0, 2])
+        # Pattern 1: Buy-sell alternation (e.g., [2, 0, 2, 0] or [0, 2, 0, 2])
         alternation_detected = False
         for i in range(len(recent_actions) - 3):
             if (recent_actions[i] == 2 and recent_actions[i+1] == 0 and 
@@ -184,24 +292,28 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 reversal_detected = True
                 self.oscillation_patterns['rapid_reversals'] += 1
                 break
+                
+        # Update oscillation count if either pattern is detected
+        if alternation_detected or reversal_detected:
+            self.oscillation_count += 1
+            return True
         
-        return alternation_detected or reversal_detected
+        return False
     
     def _update_cooldown_period(self):
-        """Update the cooldown period based on oscillation behavior"""
-        if not self.progressive_cooldown:
-            return
+        """Adjust cooldown period based on oscillation patterns"""
+        # Calculate oscillation score
+        oscillation_score = 0
         
-        # Calculate oscillation severity score
-        oscillation_score = (
-            self.oscillation_patterns['buy_sell_alternation'] * 2 +
-            self.oscillation_patterns['rapid_reversals'] * 1.5 +
-            self.oscillation_patterns['same_action_repeat'] * 0.5
-        )
+        # Heavily weight buy-sell alternations
+        oscillation_score += self.oscillation_patterns['buy_sell_alternation'] * 1.5
         
-        # Adjust cooldown period based on score
+        # Add rapid reversals with less weight
+        oscillation_score += self.oscillation_patterns['rapid_reversals'] * 1.0
+        
+        # Adapt cooldown based on oscillation score
         if oscillation_score > 5:
-            # Significant oscillation, use maximum cooldown
+            # Severe oscillation, use maximum cooldown
             new_cooldown = self.max_oscillation_cooldown
         elif oscillation_score > 2:
             # Some oscillation, scale cooldown linearly
@@ -210,43 +322,101 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             # Minimal oscillation, use base cooldown
             new_cooldown = self.trade_cooldown
         
-        # Update if changed significantly
+        # Update if significant change
         if abs(new_cooldown - self.current_cooldown) > 10:
             self.current_cooldown = int(new_cooldown)
             logger.info(f"Adjusted cooldown period to {self.current_cooldown} steps (oscillation score: {oscillation_score:.1f})")
     
+    def _calculate_risk_rewards(self, reward, info, trade_occurred, current_step):
+        """Calculate risk-aware rewards based on trading performance"""
+        # Get current portfolio value
+        portfolio_value = info.get('portfolio_value', 0)
+        
+        # Update peak value and max drawdown
+        if portfolio_value > self.peak_value:
+            self.peak_value = portfolio_value
+        
+        # Calculate drawdown
+        if self.peak_value > 0:
+            drawdown = (self.peak_value - portfolio_value) / self.peak_value
+            self.max_drawdown = max(self.max_drawdown, drawdown)
+        
+        # If a trade occurred, update trade statistics
+        if trade_occurred:
+            # Add trade return to history
+            if self.last_trade_price is not None and 'close_price' in info:
+                trade_return = (info['close_price'] - self.last_trade_price) / self.last_trade_price
+                self.trade_returns.append(trade_return)
+                
+                # Track if this was a successful trade
+                if trade_return > 0:
+                    self.successful_trades += 1
+                else:
+                    self.failed_trades += 1
+                
+                # Calculate Sharpe ratio if we have enough trades
+                if len(self.trade_returns) > 5:
+                    returns_array = np.array(self.trade_returns[-20:])
+                    mean_return = np.mean(returns_array)
+                    std_return = np.std(returns_array) + 1e-6  # Add small constant to avoid division by zero
+                    self.sharpe_ratio = mean_return / std_return
+        
+        # Apply risk-aware reward adjustments
+        risk_adjusted_reward = reward
+        
+        # Penalize high drawdowns
+        if self.max_drawdown > 0.1:  # More than 10% drawdown
+            drawdown_penalty = self.max_drawdown * 2.0
+            risk_adjusted_reward -= drawdown_penalty
+        
+        # Reward positive Sharpe ratio
+        if self.sharpe_ratio > 0.5:
+            sharpe_bonus = self.sharpe_ratio * 0.5
+            risk_adjusted_reward += sharpe_bonus
+        
+        # Add consistency reward - encourage staying with same action
+        if self.last_action == self.action_history[-1]:
+            self.consecutive_same_action += 1
+            consistency_bonus = min(self.consecutive_same_action * 0.02, 0.5)
+            risk_adjusted_reward += consistency_bonus
+        else:
+            self.consecutive_same_action = 0
+        
+        # Add hold bonus during early training
+        if current_step < 10000 and self.action_history and self.action_history[-1] == 1:  # hold action
+            self.consecutive_holds += 1
+            if self.consecutive_holds > 5:
+                hold_bonus = min(self.consecutive_holds * 0.01, 0.5)
+                risk_adjusted_reward += hold_bonus
+        else:
+            self.consecutive_holds = 0
+            
+        # Curriculum learning - scale down rewards in early training
+        self.training_progress = min(current_step / 1000000.0, 1.0)  # Progress from 0 to 1 over 1M steps
+        
+        return risk_adjusted_reward
+
     def step(self, action):
         """
-        Take a step in the environment with added safeguards
+        Take a step in the environment with enhanced safeguards against harmful
+        trading patterns and additional reward-shaping for stable behavior.
         
-        Parameters:
-        -----------
-        action : int
-            Action to take (0: sell, 1: hold, 2: buy)
-        
+        Args:
+            action: 0 (sell), 1 (hold), or 2 (buy)
+            
         Returns:
-        --------
-        observation : numpy.ndarray
-            Observation from the environment
-        reward : float
-            Reward with penalties applied if needed
-        terminated : bool
-            Whether episode is done
-        truncated : bool
-            Whether episode was truncated
-        info : dict
-            Additional information
+            Tuple of (observation, reward, terminated, truncated, info)
         """
-        # Track step number from parent class if available
+        # Get current step in environment
         current_step = getattr(self.env, 'day', 0)
-        if hasattr(self.env, 'current_step'):
-            current_step = self.env.current_step
         
-        # Store original action for tracking
-        original_action = action
+        # Add curriculum learning - restrict action space in early training
+        if self.training_progress < 0.1 and action != 1 and current_step % 10 != 0:
+            # Force hold actions 90% of the time in first 10% of training
+            action = 1
         
-        # Update cooldown period based on oscillation patterns
-        self._update_cooldown_period()
+        # Store previous position for change detection
+        self.previous_position = self.current_position
         
         # Determine if we're in a trade cooldown period
         in_cooldown = (current_step - self.last_trade_step) < self.current_cooldown
@@ -256,30 +426,33 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         current_price = None
         if hasattr(self.env, '_get_current_price'):
             current_price = self.env._get_current_price()
-        elif hasattr(self.env, 'current_price'):
-            current_price = self.env.current_price
             
-        # Add strict price movement requirement for early trading
-        # Only allow trading when price has moved significantly from last trade
+        # Advanced early-stage check for valid price changes before allowing trades
+        min_profit_violation = False
+        
         strict_price_requirement = False
         if current_price is not None and self.last_trade_price is not None:
             price_change_pct = abs(current_price - self.last_trade_price) / self.last_trade_price
             
             # Require larger price movements early in training
             required_movement = self.min_profit_threshold
-            if current_step < 1000:  # Very early in training
-                required_movement = 0.01  # Require 1% price movement
-            elif current_step < 10000:  # Early in training
-                required_movement = 0.005  # Require 0.5% price movement
-                
-            # If price hasn't moved enough, enforce a hold
+            
+            # More strict requirements depending on training stage
+            if current_step < 1000:
+                required_movement = 0.03  # Require 3% difference in first 1k steps
+            elif current_step < 5000:
+                required_movement = 0.015  # Require 1.5% in next 4k steps
+            elif current_step < 10000:
+                required_movement = 0.01  # Require 1% in next 5k steps
+            elif current_step < 50000:
+                required_movement = 0.005  # Require 0.5% in next 40k steps
+            
             if price_change_pct < required_movement and action != 1:
                 strict_price_requirement = True
                 logger.debug(f"Enforcing hold: price movement {price_change_pct:.4f}% < required {required_movement:.4f}%")
                 action = 1  # Force hold
             
         # Check for min profit threshold violations
-        min_profit_violation = False
         if current_price is not None:
             # If trying to sell, check if price is higher than last buy
             if action == 0 and self.last_buy_price is not None:
@@ -309,9 +482,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Handle cooldown violations
         if in_cooldown and action != 1:  # Not a hold action
-            # Agent is trying to trade during cooldown
+            # Track violation attempt
             attempted_trade_during_cooldown = True
-            # Force a hold action instead
+            
+            # Force a hold action
             action = 1
             self.forced_actions += 1
             
@@ -323,23 +497,28 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if min_profit_violation or strict_price_requirement:
             action = 1
         
-        # Record the action in history before checking for oscillation
-        self.action_history.append(original_action)
-        if len(self.action_history) > self.max_history_size:
-            self.action_history = self.action_history[-self.max_history_size:]
+        # Check for oscillation patterns and adjust cooldown if needed
+        if len(self.action_history) > 4:
+            last_four = self.action_history[-4:]
             
-        # Check for oscillation patterns and force hold if detected
-        if self._detect_oscillation_patterns():
-            # Oscillation detected - force a hold
-            action = 1
-            self.oscillation_count += 1
-            
-            # Apply stronger oscillation prevention for repeated violations
-            if self.oscillation_count > 5:
-                # Extend cooldown period for severe oscillation
-                extended_cooldown = min(self.oscillation_count * 20, 1000)  # More aggressive extension
-                self.last_trade_step = current_step - self.current_cooldown + extended_cooldown
-                logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
+            # Apply progressive penalty for oscillatory behavior
+            if last_four and (
+                last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2] or
+                last_four == [2, 0, 2, 1] or last_four == [0, 2, 0, 1] or
+                last_four == [1, 0, 2, 0] or last_four == [1, 2, 0, 2]):
+                
+                # Force hold action for the next several steps
+                action = 1
+                
+                # Count the oscillation
+                self.oscillation_count += 1
+                
+                # Extend cooldown for severe oscillation cases
+                if self.oscillation_count > 5:
+                    # Extend cooldown period for severe oscillation
+                    extended_cooldown = min(self.oscillation_count * 20, 1000)  # More aggressive extension
+                    self.last_trade_step = current_step - self.current_cooldown + extended_cooldown
+                    logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
         # Early training stabilization (first 1000 steps) - reduce trade frequency drastically
         if current_step < 1000 and action != 1 and current_step % 100 != 0:
@@ -351,25 +530,22 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Get current price and position after the step
         current_price = None
-        current_position = 0
-        
-        # Extract the current price from the environment if available
-        if hasattr(self.env, '_get_current_price'):
-            current_price = self.env._get_current_price()
-        elif 'close_price' in info:
+        if 'close_price' in info:
             current_price = info['close_price']
-        elif hasattr(self.env, 'current_price'):
-            current_price = self.env.current_price
-            
-        # Extract current position from the environment if available
-        if hasattr(self.env, 'position'):
-            current_position = self.env.position
-        elif 'position' in info:
-            current_position = info['position']
+        elif hasattr(self.env, '_get_current_price'):
+            current_price = self.env._get_current_price()
         
-        # Record position
-        self.previous_position = self.current_position
-        self.current_position = current_position
+        # Get new position
+        if 'assets_owned' in info and len(info['assets_owned']) > 0:
+            self.current_position = info['assets_owned'][0]
+        
+        # Update action history
+        self.action_history.append(action)
+        if len(self.action_history) > self.max_history_size:
+            self.action_history = self.action_history[-self.max_history_size:]
+        
+        # Update position history
+        current_position = self.current_position
         self.position_history.append(current_position)
         if len(self.position_history) > self.max_history_size:
             self.position_history = self.position_history[-self.max_history_size:]
@@ -377,7 +553,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Detect if a trade occurred by checking position change
         trade_occurred = self.previous_position != self.current_position
         
-        # Apply penalties for concerning trading patterns
+        # Calculate additional penalties
         additional_penalty = 0.0
         
         # Penalty for attempted trades during cooldown
@@ -391,11 +567,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             
             # Add cooldown violation to info dict
             info['cooldown_violation'] = True
-            info['cooldown_penalty'] = cooldown_penalty
         
-        # Penalty for action oscillation
+        # Penalty for oscillations
         if len(self.action_history) >= 4:
             last_four = self.action_history[-4:]
+            
             if last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]:
                 # Increase oscillation penalty exponentially based on count
                 oscillation_penalty = OSCILLATION_PENALTY * (1.0 + min(self.oscillation_count, 5) ** 1.5)
@@ -404,7 +580,6 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 
                 # Add oscillation detection to info dict
                 info['oscillation_detected'] = True
-                info['oscillation_penalty'] = oscillation_penalty
         
         # Penalty for same-price trades
         if trade_occurred and current_price is not None and self.last_trade_price is not None:
@@ -417,19 +592,20 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 
                 # Add same-price trade to info dict
                 info['same_price_trade'] = True
-                info['same_price_penalty'] = same_price_penalty
         
-        # If a trade occurred, update the last trade step and price
+        # Update last trade info if a trade occurred
         if trade_occurred:
             self.last_trade_step = current_step
-            if current_price is not None:
-                self.last_trade_price = current_price
+            self.last_trade_price = current_price
+            
+            # Track buy/sell prices for profit calculation
+            if action == 2:  # Buy
+                self.last_buy_price = current_price
+            elif action == 0:  # Sell
+                self.last_sell_price = current_price
                 
-                # Update buy/sell price tracking
-                if original_action == 2:  # Buy action
-                    self.last_buy_price = current_price
-                elif original_action == 0:  # Sell action
-                    self.last_sell_price = current_price
+            # Update info dict
+            info['trade'] = True
             
             # Reset cooldown violation count after successful trade
             if self.cooldown_violations > 0:
@@ -437,15 +613,38 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 self.cooldown_violations = 0
         
         # Apply any penalties to the reward
-        if additional_penalty != 0:
-            reward += additional_penalty
-            info['additional_penalty'] = additional_penalty
+        reward += additional_penalty
         
-        # Add cooldown information to info dict
-        info['steps_since_last_trade'] = current_step - self.last_trade_step
-        info['in_cooldown'] = in_cooldown
+        # Apply risk-aware reward adjustments
+        reward = self._calculate_risk_rewards(reward, info, trade_occurred, current_step)
         
-        return observation, reward, terminated, truncated, info
+        # Add consistency rewards
+        if self.last_action is not None:
+            if action == self.last_action:
+                # Reward consistent actions (staying in a position or holding)
+                consistency_reward = 0.05  # Small bonus for consistency
+                
+                # Additional bonus for holding
+                if action == 1:  # Hold
+                    consistency_reward += 0.03  # Extra bonus for holding
+                    
+                reward += consistency_reward
+        
+        # Update last action
+        self.last_action = action
+        
+        # Curriculum learning - scale down rewards in early training
+        if self.training_progress < 0.2:
+            reward *= 0.5  # Reduce reward magnitude early in training
+        
+        # Augment observation with action history and risk metrics
+        augmented_observation = self._augment_observation(observation)
+        
+        # Add training progress to info dict
+        info['training_progress'] = self.training_progress
+        info['action_taken'] = action
+        
+        return augmented_observation, reward, terminated, truncated, info
 
 
 class TensorboardCallback(BaseCallback):
@@ -935,128 +1134,465 @@ def train_dqn(env, args):
 
 
 def train_ppo(env, args):
-    """Train a PPO agent"""
-    logger.info("Starting PPO training...")
+    """
+    Train a PPO agent on the cryptocurrency trading environment with enhanced
+    stability and curriculum learning through population-based training.
     
-    # Setup callbacks
-    checkpoint_dir = os.path.join('models', 'checkpoints')
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    Args:
+        env: Vector environment for training
+        args: Command line arguments with configuration
     
-    callbacks = []
-    
-    # Add checkpoint callback
-    checkpoint_callback = CheckpointCallback(
-        save_freq=args.checkpoint_freq,
-        save_path=checkpoint_dir,
-        name_prefix="ppo_model",
-        save_vecnormalize=True
-    )
-    callbacks.append(checkpoint_callback)
-    
-    # Add tensorboard callback
-    tensorboard_callback = TensorboardCallback()
-    callbacks.append(tensorboard_callback)
-    
-    # Combine callbacks
-    callback = CallbackList(callbacks)
-    
-    # Create PPO model with custom policy kwargs and improved stability parameters
-    policy_kwargs = dict(
-        net_arch=[dict(pi=[64, 64], vf=[64, 64])],  # Smaller networks for stability
-        activation_fn=torch.nn.Tanh,  # Tanh keeps values bounded between -1 and 1
-        log_std_init=-2.0  # More conservative initial exploration
-    )
-    
-    # Lower learning rate and use a scheduler for stability
-    learning_rate = args.learning_rate
-    if learning_rate > 0.001:
-        logger.warning(f"Reducing learning rate from {learning_rate} to 0.001 for stability")
-        learning_rate = 0.001
-    
-    # Calculate appropriate clip range based on action space
-    clip_range = min(args.clip_range, 0.1)  # Conservative clipping
-    
-    # Set appropriate batch size and n_steps based on parameters
-    # Use larger values if specified without arbitrary caps
-    batch_size = args.batch_size
-    n_steps = args.n_steps
-    
-    # Apply sensible minimums rather than arbitrary maximums
-    min_n_steps = 1024
-    min_batch_size = 64
-    
-    # Ensure n_steps is at least the minimum value
-    if n_steps < min_n_steps:
-        logger.warning(f"Increasing n_steps from {n_steps} to {min_n_steps} for stability")
-        n_steps = min_n_steps
-    else:
-        logger.info(f"Using requested n_steps value: {n_steps}")
-    
-    # Ensure batch_size is at least the minimum value
-    if batch_size < min_batch_size:
-        logger.warning(f"Increasing batch_size from {batch_size} to {min_batch_size} for stability")
-        batch_size = min_batch_size
-    else:
-        logger.info(f"Using requested batch_size value: {batch_size}")
-    
-    # Create model
-    model = PPO(
-        "MlpPolicy",
-        env,
-        learning_rate=learning_rate,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        n_epochs=max(args.n_epochs, 5),  # At least 5 epochs
-        gamma=args.gamma,
-        ent_coef=max(args.ent_coef, 0.01),  # Ensure sufficient exploration
-        clip_range=clip_range,
-        clip_range_vf=clip_range,  # Also clip value function for stability
-        normalize_advantage=True,  # Normalize advantages for stability
-        max_grad_norm=0.5,  # Add strong gradient clipping
-        policy_kwargs=policy_kwargs,
-        verbose=1 if args.verbose else 0,
-        tensorboard_log="tensorboard_log",
-        device=args.device
-    )
-    
-    # Apply torch float32 precision for better numerical stability
-    torch.set_default_dtype(torch.float32)
-    torch.set_printoptions(precision=10)
-    
-    # Log the training parameters
-    logger.info(f"Training PPO with parameters:")
-    logger.info(f" - Learning rate: {learning_rate}")
-    logger.info(f" - Batch size: {model.batch_size}")
-    logger.info(f" - n_steps: {model.n_steps}")
-    logger.info(f" - clip_range: {clip_range}")
-    logger.info(f" - max_grad_norm: 0.5")
-    
-    # Train model
+    Returns:
+        Trained PPO model
+    """
     try:
-        # Create a learning rate scheduler for stability
-        def lr_schedule(remaining_progress):
-            # Start with the base learning rate and decay to 10% of the initial value
-            return learning_rate * (0.1 + 0.9 * remaining_progress)
+        # Setup checkpoint dir
+        checkpoint_dir = os.path.join('models', 'checkpoints', f"ppo_{int(time.time())}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
         
-        model.learn(
-            total_timesteps=args.timesteps,
-            callback=callback,
-            tb_log_name="ppo_run",
-            progress_bar=True
+        # Setup tensorboard callback
+        tensorboard_log = os.path.join('logs', 'tensorboard')
+        os.makedirs(tensorboard_log, exist_ok=True)
+        
+        # Setup callbacks
+        callbacks = []
+        
+        # Add TensorBoard callback for visualization
+        callbacks.append(TensorboardCallback(verbose=1))
+        
+        # Add checkpoint callback for saving models
+        checkpoint_freq = min(args.checkpoint_freq, args.timesteps // 10)
+        checkpoint_callback = CheckpointCallback(
+            save_freq=checkpoint_freq,
+            save_path=checkpoint_dir,
+            name_prefix="ppo_model",
+            save_replay_buffer=False,
+            save_vecnormalize=True,
+        )
+        callbacks.append(checkpoint_callback)
+        
+        # Population-based training callback
+        pbt_callback = PopulationBasedTrainingCallback(
+            num_models=3,  # Train 3 models in parallel
+            eval_freq=50000,  # Evaluate every 50k steps
+            checkpoint_dir=checkpoint_dir
+        )
+        callbacks.append(pbt_callback)
+        
+        # Combine all callbacks
+        callback = CallbackList(callbacks)
+        
+        # Find LSTM model if provided
+        lstm_model = None
+        if args.lstm_model_path:
+            lstm_model = load_lstm_model(args.lstm_model_path)
+        
+        # Create PPO model with enhanced architecture and stability parameters
+        policy_kwargs = dict(
+            # Larger network dimensions
+            net_arch=[
+                dict(
+                    pi=[256, 128, 64],  # Larger policy network
+                    vf=[256, 128, 64]   # Larger value network
+                )
+            ],
+            # Use Tanh activation for better gradient behavior
+            activation_fn=torch.nn.Tanh,
+            # More conservative exploration
+            log_std_init=-2.0  
         )
         
-        # Save trained model
-        model_save_path = os.path.join('models', f"ppo_model_{int(time.time())}")
-        model.save(model_save_path)
-        logger.info(f"Model saved to {model_save_path}")
+        # Add LSTM features if model was loaded
+        if lstm_model is not None:
+            # Update to use LSTM features
+            logger.info("Integrating pre-trained LSTM model into policy network")
+            policy_kwargs['lstm_hidden_size'] = 64
+            policy_kwargs['enable_critic_lstm'] = True
+            policy_kwargs['lstm_model'] = lstm_model
+            
+            # Create custom feature extractor that uses the pre-trained LSTM
+            policy_kwargs['features_extractor_class'] = LSTMAugmentedFeatureExtractor
+            policy_kwargs['features_extractor_kwargs'] = {
+                'lstm_model': lstm_model,
+                'features_dim': 128
+            }
+            
+        # Adjust learning rate for stability
+        learning_rate = args.learning_rate
+        if learning_rate > 0.0005:
+            logger.warning(f"Reducing learning rate from {learning_rate} to 0.0005 for stability")
+            learning_rate = 0.0005
         
-        return model
+        # Calculate appropriate clip range based on action space
+        clip_range = 0.1  # Conservative clipping by default
         
+        # Calculate appropriate batch size and n_steps
+        batch_size = args.batch_size
+        n_steps = args.n_steps
+        
+        # Ensure minimum values for stability
+        min_batch_size = 64  # Minimum batch size
+        min_n_steps = 512    # Minimum steps
+        
+        # For large networks, prefer larger batch sizes
+        recommended_min_batch_size = 256
+        
+        # Ensure n_steps is at least the minimum value
+        if n_steps < min_n_steps:
+            logger.warning(f"Increasing n_steps from {n_steps} to {min_n_steps} for stability")
+            n_steps = min_n_steps
+        else:
+            logger.info(f"Using requested n_steps value: {n_steps}")
+        
+        # Ensure batch_size is at least the minimum value
+        if batch_size < recommended_min_batch_size:
+            logger.warning(f"Increasing batch_size from {batch_size} to {recommended_min_batch_size} for larger network")
+            batch_size = recommended_min_batch_size
+        else:
+            logger.info(f"Using requested batch_size value: {batch_size}")
+        
+        # Increased entropy coefficient for better exploration
+        ent_coef = 0.01
+        if args.ent_coef < 0.01:
+            ent_coef = 0.01
+            logger.info(f"Setting entropy coefficient to {ent_coef} for better exploration")
+        
+        # Initialize models for population-based training
+        models = []
+        
+        # Create models with slightly different hyperparameters
+        for i in range(pbt_callback.num_models):
+            # Adjust hyperparameters slightly for diversity
+            model_lr = learning_rate * (0.8 + 0.4 * random.random())  # 0.8x to 1.2x
+            model_ent = ent_coef * (0.8 + 0.4 * random.random())      # 0.8x to 1.2x
+            
+            # Create model
+            model = PPO(
+                policy="MlpPolicy",
+                env=env,
+                learning_rate=model_lr,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                gamma=args.gamma,
+                ent_coef=model_ent,
+                clip_range=clip_range,
+                policy_kwargs=policy_kwargs,
+                tensorboard_log=tensorboard_log,
+                verbose=1 if args.verbose else 0,
+                device=args.device
+            )
+            
+            models.append(model)
+            
+            logger.info(f"Created PPO model #{i} with lr={model_lr:.6f}, ent_coef={model_ent:.4f}")
+        
+        # Initialize the callback with the models
+        pbt_callback.init_models(models)
+        
+        # Use the first model as our main model
+        model = models[0]
+        
+        # Log the training parameters
+        logger.info(f"Training PPO with population-based training:")
+        logger.info(f" - Models in population: {pbt_callback.num_models}")
+        logger.info(f" - Base learning rate: {learning_rate}")
+        logger.info(f" - Base entropy coefficient: {ent_coef}")
+        logger.info(f" - Batch size: {batch_size}")
+        logger.info(f" - n_steps: {n_steps}")
+        logger.info(f" - clip_range: {clip_range}")
+        logger.info(f" - max_grad_norm: 0.5")
+        
+        # Train model
+        try:
+            # Create a learning rate scheduler for stability
+            def lr_schedule(remaining_progress):
+                # Start with the base learning rate and decay to 10% of the initial value
+                return learning_rate * (0.1 + 0.9 * remaining_progress)
+            
+            # Train with population-based training
+            pbt_callback.train(total_timesteps=args.timesteps, callback=callback)
+            
+            # Get the best model
+            model = pbt_callback.get_best_model()
+            
+            # Save trained model
+            model_save_path = os.path.join('models', f"ppo_model_{int(time.time())}")
+            model.save(model_save_path)
+            logger.info(f"Best model from population saved to {model_save_path}")
+            
+            return model
+            
+        except KeyboardInterrupt:
+            logger.warning("Training interrupted by user")
+            # Save the model even if interrupted
+            model_save_path = os.path.join('models', f"ppo_model_interrupted_{int(time.time())}")
+            model.save(model_save_path)
+            logger.info(f"Interrupted model saved to {model_save_path}")
+            return model
+    
     except Exception as e:
-        logger.error(f"Error during PPO training: {str(e)}")
-        import traceback
+        logger.error(f"Error training PPO model: {e}")
         logger.error(traceback.format_exc())
         return None
+
+
+# Add a custom feature extractor class that uses the pre-trained LSTM
+class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
+    """
+    Feature extractor that uses a pre-trained LSTM model to enhance the features.
+    """
+    
+    def __init__(self, observation_space, lstm_model=None, features_dim=128):
+        super(LSTMAugmentedFeatureExtractor, self).__init__(observation_space, features_dim)
+        
+        # Save the LSTM model
+        self.lstm_model = lstm_model
+        
+        # Calculate input size from observation space
+        input_size = int(np.prod(observation_space.shape))
+        
+        # Create neural network to process features
+        self.feature_net = nn.Sequential(
+            nn.Linear(input_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, features_dim)
+        )
+        
+    def forward(self, observations):
+        # Extract features using the feature network
+        features = self.feature_net(observations.float())
+        
+        # If we have an LSTM model, use it to enhance features
+        if self.lstm_model is not None:
+            # Format the observations for the LSTM
+            with torch.no_grad():
+                lstm_features = self.lstm_model.forward_features(observations.float())
+            
+            # Combine the features
+            if lstm_features is not None:
+                # Ensure compatible sizes
+                if lstm_features.shape[0] == features.shape[0]:
+                    # For simplicity, average the LSTM features if multi-dimensional
+                    if len(lstm_features.shape) > 2:
+                        lstm_features = lstm_features.mean(dim=1)
+                    
+                    # Resize if needed
+                    if lstm_features.shape[1] != features.shape[1]:
+                        lstm_adapter = nn.Linear(lstm_features.shape[1], features.shape[1])
+                        lstm_features = lstm_adapter(lstm_features)
+                    
+                    # Add LSTM features to our features (weighted addition)
+                    features = features + 0.5 * lstm_features
+        
+        return features
+        
+
+class PopulationBasedTrainingCallback:
+    """
+    Implements Population-Based Training (PBT) for reinforcement learning.
+    
+    PBT trains a population of models in parallel, and periodically replaces
+    the worst-performing models with mutations of the best-performing ones.
+    """
+    
+    def __init__(self, num_models=3, eval_freq=50000, checkpoint_dir='pbt_checkpoints'):
+        """
+        Initialize the PBT callback.
+        
+        Args:
+            num_models: Number of models in the population
+            eval_freq: Frequency of evaluation (in timesteps)
+            checkpoint_dir: Directory to save checkpoints
+        """
+        self.num_models = num_models
+        self.eval_freq = eval_freq
+        self.checkpoint_dir = checkpoint_dir
+        self.models = []
+        self.performances = [0] * num_models
+        self.timesteps_trained = [0] * num_models
+        self.total_timesteps = 0
+        self.best_performance = float('-inf')
+        self.best_model_idx = 0
+        
+        # Create checkpoint directory
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    def init_models(self, models):
+        """Initialize with pre-created models"""
+        assert len(models) == self.num_models, "Number of models must match num_models"
+        self.models = models
+    
+    def _evaluate_model(self, model_idx, num_episodes=5):
+        """
+        Evaluate a model on a separate evaluation environment.
+        
+        Args:
+            model_idx: Index of the model to evaluate
+            num_episodes: Number of episodes to evaluate
+            
+        Returns:
+            Average episodic reward
+        """
+        model = self.models[model_idx]
+        
+        # Create evaluation environment
+        eval_env = model.get_env()
+        
+        # Run evaluation
+        episode_rewards = []
+        for _ in range(num_episodes):
+            obs = eval_env.reset()[0]
+            done = False
+            episode_reward = 0
+            
+            while not done:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, done, _, _ = eval_env.step(action)
+                episode_reward += reward
+                
+                # Handle vectorized environments
+                if isinstance(done, (list, np.ndarray)):
+                    if np.any(done):
+                        break
+            
+            episode_rewards.append(episode_reward)
+        
+        # Calculate average reward
+        avg_reward = sum(episode_rewards) / len(episode_rewards)
+        
+        # Update best model if this is better
+        if avg_reward > self.best_performance:
+            self.best_performance = avg_reward
+            self.best_model_idx = model_idx
+            
+            # Save best model checkpoint
+            model_path = os.path.join(self.checkpoint_dir, f"best_model_{model_idx}")
+            model.save(model_path)
+            logger.info(f"New best model (idx {model_idx}) with performance {avg_reward:.2f}")
+        
+        return avg_reward
+    
+    def _exploit_and_explore(self):
+        """
+        Replace worst-performing models with mutations of best-performing ones.
+        """
+        # Find the worst-performing model(s)
+        sorted_indices = np.argsort(self.performances)
+        
+        # Replace worst model(s) with mutations of better ones
+        num_replace = max(1, self.num_models // 3)  # Replace bottom third
+        
+        for i in range(num_replace):
+            # Get the worst model index
+            worst_idx = sorted_indices[i]
+            
+            # Get a random model from the top half
+            top_half = sorted_indices[self.num_models // 2:]
+            source_idx = np.random.choice(top_half)
+            
+            logger.info(f"Replacing model {worst_idx} (perf: {self.performances[worst_idx]:.2f}) "
+                       f"with mutation of model {source_idx} (perf: {self.performances[source_idx]:.2f})")
+            
+            # Copy parameters from source to target
+            source_model = self.models[source_idx]
+            target_model = self.models[worst_idx]
+            
+            # Extract source parameters
+            source_params = source_model.get_parameters()
+            
+            # Mutate some hyperparameters
+            # Learning rate mutation
+            lr = source_model.learning_rate
+            if isinstance(lr, float):
+                # Perturb by up to ±20%
+                lr_factor = 0.8 + 0.4 * np.random.random()
+                new_lr = lr * lr_factor
+                logger.info(f"Mutating learning rate: {lr:.6f} -> {new_lr:.6f}")
+            else:
+                new_lr = lr  # Handle case where lr is a schedule
+            
+            # Entropy coefficient mutation for PPO
+            if hasattr(source_model, 'ent_coef'):
+                ent_coef = source_model.ent_coef
+                ent_factor = 0.8 + 0.4 * np.random.random()
+                new_ent_coef = ent_coef * ent_factor
+                logger.info(f"Mutating entropy coefficient: {ent_coef:.4f} -> {new_ent_coef:.4f}")
+            else:
+                new_ent_coef = None
+            
+            # Load parameters to target model
+            target_model.load_parameters(source_params)
+            
+            # Update hyperparameters
+            target_model.learning_rate = new_lr
+            if new_ent_coef is not None:
+                target_model.ent_coef = new_ent_coef
+            
+            # Reset performance counter for the replaced model
+            self.performances[worst_idx] = 0
+    
+    def train(self, total_timesteps, callback=None):
+        """
+        Train the population of models using PBT.
+        
+        Args:
+            total_timesteps: Total timesteps to train for
+            callback: Additional callback to use during training
+            
+        Returns:
+            The best model from the population
+        """
+        self.total_timesteps = total_timesteps
+        steps_per_round = self.eval_freq
+        num_rounds = total_timesteps // steps_per_round
+        
+        logger.info(f"Starting population-based training with {self.num_models} models")
+        logger.info(f"Training for {total_timesteps} timesteps in {num_rounds} rounds")
+        
+        for round_idx in range(num_rounds):
+            logger.info(f"Starting training round {round_idx+1}/{num_rounds}")
+            
+            # Train each model for steps_per_round timesteps
+            for i, model in enumerate(self.models):
+                logger.info(f"Training model {i+1}/{self.num_models} for {steps_per_round} timesteps")
+                
+                # Train the model
+                model.learn(
+                    total_timesteps=steps_per_round,
+                    callback=callback,
+                    reset_num_timesteps=False
+                )
+                
+                self.timesteps_trained[i] += steps_per_round
+                
+                # Evaluate the model
+                performance = self._evaluate_model(i)
+                self.performances[i] = performance
+                
+                logger.info(f"Model {i+1} performance: {performance:.2f}")
+            
+            # Exploit and explore phase
+            self._exploit_and_explore()
+            
+            # Log progress
+            logger.info(f"Completed round {round_idx+1}/{num_rounds}")
+            logger.info(f"Best model so far: {self.best_model_idx} with performance {self.best_performance:.2f}")
+        
+        # Final evaluation of all models
+        for i in range(self.num_models):
+            performance = self._evaluate_model(i, num_episodes=10)  # More episodes for final eval
+            self.performances[i] = performance
+            
+            logger.info(f"Final model {i+1} performance: {performance:.2f}")
+        
+        # Return the best model
+        return self.get_best_model()
+    
+    def get_best_model(self):
+        """Return the best model from the population"""
+        return self.models[self.best_model_idx]
 
 
 def train_a2c(env, args):
