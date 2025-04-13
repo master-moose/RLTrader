@@ -225,7 +225,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
     def __init__(self, *args, **kwargs):
         self.debug_mode = kwargs.pop('debug_mode', False)
         # Dramatically increase default trade cooldown to 2000 steps
-        self.trade_cooldown = kwargs.pop('trade_cooldown', 2000)  # Dramatically increased cooldown
+        self.trade_cooldown = kwargs.pop('trade_cooldown', 5000)  # Dramatically increased cooldown
         
         # Initialize trading tracking variables
         self._last_trade_step = None
@@ -243,11 +243,22 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.consecutive_attempts = 0
         
         # Force hold actions for initial period to prevent early rapid trades
-        self.initial_forced_hold_period = 500
+        self.initial_forced_hold_period = 2000  # Increased from 500 to 2000
         
         # Add frozen period after trades where only holds are allowed
         self.post_trade_frozen = False
         self.frozen_until_step = 0
+        
+        # Add strict action history to detect and prevent oscillating behavior
+        self.action_history = []
+        self.max_action_history = 100
+        self.position_history = []
+        self.max_position_history = 100
+        
+        # Add tracking for last several positions to detect oscillation
+        self.last_positions = []
+        self.max_last_positions = 10
+        self.oscillation_counter = 0
         
         super().__init__(*args, **kwargs)
         
@@ -261,10 +272,42 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Save original actions for logging
         original_actions = actions
         
+        # Track beginning total asset value for reward calculation
         begin_total_asset = self.get_total_asset_value()
         
-        # Detect if this step includes a trade
+        # Detect if this step includes a trade - store current holdings
         current_holdings = self.state[1:self.stock_dim+1].copy() if self.stock_dim > 0 else []
+        
+        # Store action in history for oscillation detection
+        if isinstance(actions, (int, float, np.int64, np.float64)):
+            self.action_history.append(int(actions))
+        else:
+            # For array actions, store the first element
+            if isinstance(actions, np.ndarray) and len(actions) > 0:
+                self.action_history.append(int(actions[0]))
+            else:
+                self.action_history.append(1)  # Default to hold
+                
+        # Keep action history within maximum size
+        if len(self.action_history) > self.max_action_history:
+            self.action_history = self.action_history[-self.max_action_history:]
+            
+        # Detect action oscillation (buy-sell-buy-sell pattern)
+        if len(self.action_history) >= 4:
+            last_four = self.action_history[-4:]
+            # Check for buy-sell-buy-sell (2-0-2-0) or sell-buy-sell-buy (0-2-0-2) patterns
+            if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
+                logger.warning(f"Detected action oscillation at step {self.current_step}: {last_four}")
+                # Force hold for oscillation and add extended frozen period
+                if isinstance(actions, np.ndarray) and len(actions) > 0:
+                    actions = np.ones_like(actions)  # Force hold (1)
+                else:
+                    actions = 1  # Hold action
+                self.oscillation_counter += 1
+                # If we see multiple oscillations, extend the frozen period
+                self.post_trade_frozen = True
+                # Extend frozen period to 10000 steps on oscillation
+                self.frozen_until_step = self.current_step + 10000
         
         # Check for forced holding during initialization period
         in_initial_period = self.current_step < self.initial_forced_hold_period
@@ -274,7 +317,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 actions = np.ones_like(actions)  # Force hold (1)
             else:
                 actions = 1  # Hold action
-            if self.current_step % 100 == 0:
+            if self.current_step % 1000 == 0:
                 logger.info(f"Initial forced hold period: {self.current_step}/{self.initial_forced_hold_period}")
         
         # Enforce frozen period after trades
@@ -283,7 +326,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 actions = np.ones_like(actions)  # Force hold (1)
             else:
                 actions = 1  # Hold action
-            logger.debug(f"Post-trade frozen period: {self.current_step}/{self.frozen_until_step}")
+            if self.current_step % 1000 == 0:
+                logger.debug(f"Post-trade frozen period: {self.current_step}/{self.frozen_until_step}")
         
         # Enforce trade cooldown to prevent excessive trading
         steps_since_last_trade = (
@@ -358,6 +402,36 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         if self.stock_dim > 0:
             new_holdings = self.state[1:self.stock_dim+1]
             trade_occurred = not np.array_equal(current_holdings, new_holdings)
+            
+            # Store position history for oscillation detection
+            current_position = 0
+            if len(new_holdings) > 0:
+                current_position = int(new_holdings[0])
+            self.position_history.append(current_position)
+            if len(self.position_history) > self.max_position_history:
+                self.position_history = self.position_history[-self.max_position_history:]
+                
+            # Also track position changes in separate list for oscillation detection
+            if trade_occurred:
+                self.last_positions.append(current_position)
+                if len(self.last_positions) > self.max_last_positions:
+                    self.last_positions = self.last_positions[-self.max_last_positions:]
+                
+                # Check for position oscillation
+                if len(self.last_positions) >= 4:
+                    # Check for alternating positive and negative
+                    alternating = True
+                    for i in range(1, len(self.last_positions)):
+                        if (self.last_positions[i] > 0 and self.last_positions[i-1] > 0) or (self.last_positions[i] < 0 and self.last_positions[i-1] < 0):
+                            alternating = False
+                            break
+                    
+                    if alternating and len(set(self.last_positions)) > 1:  # Not all the same position
+                        logger.warning(f"Position oscillation detected at step {self.current_step}: {self.last_positions}")
+                        # Enforce a longer frozen period
+                        self.post_trade_frozen = True
+                        self.frozen_until_step = self.current_step + 10000  # Extremely long frozen period
+                        reward -= 100.0 * end_total_asset * self.reward_scaling  # Severe penalty
         else:
             trade_occurred = False
             
@@ -376,9 +450,9 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             # Update last trade step
             self._last_trade_step = self.current_step
             
-            # Start post-trade frozen period
+            # Start post-trade frozen period - much longer period to prevent sequential trades
             self.post_trade_frozen = True
-            self.frozen_until_step = self.current_step + min(500, self.trade_cooldown // 4)
+            self.frozen_until_step = self.current_step + min(2000, self.trade_cooldown // 2)  # Much longer frozen period
             logger.info(f"Starting post-trade frozen period from step {self.current_step} to {self.frozen_until_step}")
             
             # Update last trade prices and log trade details
@@ -393,6 +467,8 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                         # Check for same-price trades (could indicate a problem)
                         if old_price is not None and abs(old_price - new_price) < 0.0001:
                             logger.warning(f"Same price trade detected at step {self.current_step}: asset {i} at price {new_price:.4f}")
+                            # Extra penalty for same-price trades
+                            reward -= 50.0 * end_total_asset * self.reward_scaling
                         
                         # Always log trades for debugging
                         change = new_holdings[i] - current_holdings[i]
@@ -405,13 +481,14 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         info['attempted_rapid_trade'] = attempted_trade_during_cooldown
         info['rapid_trade_attempts'] = self.rapid_trade_attempts
         info['in_frozen_period'] = self.post_trade_frozen and self.current_step < self.frozen_until_step
+        info['oscillation_counter'] = self.oscillation_counter
         
         # Add rapid trade penalty to reward components if available
         if attempted_trade_during_cooldown:
             reward_components = info.get('reward_components', {})
             # Increase penalty based on consecutive attempts
-            penalty_multiplier = min(5.0, 1.0 + (self.consecutive_attempts / 10.0))
-            penalty_value = -3.0 * penalty_multiplier  # Base penalty of -3.0, scaling up with consecutive attempts
+            penalty_multiplier = min(10.0, 2.0 + (self.consecutive_attempts / 5.0))  # Much stronger penalty scaling
+            penalty_value = -5.0 * penalty_multiplier  # Base penalty of -5.0, scaling up with consecutive attempts
             reward_components['rapid_trade_penalty'] = penalty_value  # Increased penalty
             info['reward_components'] = reward_components
         
@@ -440,6 +517,10 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.consecutive_attempts = 0
         self.post_trade_frozen = False
         self.frozen_until_step = 0
+        self.action_history = []
+        self.position_history = []
+        self.last_positions = []
+        self.oscillation_counter = 0
         return super().reset()
     
     def _calculate_reward(self, begin_total_asset, end_total_asset, attempted_trade_during_cooldown=False):
@@ -460,16 +541,16 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Apply penalty for attempted rapid trading
         if attempted_trade_during_cooldown:
             # Apply an extremely severe penalty for rapid trading attempts
-            # Increase penalty to 300% of asset value
-            penalty = -3.0 * end_total_asset * self.reward_scaling
+            # Increase penalty to 500% of asset value
+            penalty = -5.0 * end_total_asset * self.reward_scaling
             
             # Increase penalty for consecutive attempts
             if self.consecutive_attempts > 20:
-                penalty *= 5.0  # 5x penalty for persistent attempts
+                penalty *= 10.0  # 10x penalty for persistent attempts
             elif self.consecutive_attempts > 10:
-                penalty *= 3.0  # 3x penalty for many consecutive attempts
+                penalty *= 5.0  # 5x penalty for many consecutive attempts
             elif self.consecutive_attempts > 5:
-                penalty *= 2.0  # Double penalty for persistent attempts
+                penalty *= 3.0  # Triple penalty for persistent attempts
             
             # Ensure penalty is applied immediately in the reward
             base_reward += penalty
@@ -742,6 +823,22 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
                 action_type = "sell" if action == 0 else ("hold" if action == 1 else "buy")
                 logger.info(f"Step {self.step_counter}: Taking action {action} ({action_type})")
+                
+        # Additional cooldown enforcement at wrapper level
+        try:
+            # If this is a PatchedStockTradingEnv, check cooldown
+            if hasattr(self.env, '_last_trade_step') and hasattr(self.env, 'current_step') and hasattr(self.env, 'trade_cooldown'):
+                steps_since_last_trade = float('inf')
+                if self.env._last_trade_step is not None:
+                    steps_since_last_trade = self.env.current_step - self.env._last_trade_step
+                
+                # If in cooldown and trying to trade, force a hold action
+                if steps_since_last_trade < self.env.trade_cooldown and action != 1:
+                    logger.warning(f"StockTradingEnvWrapper extra protection: Forcing hold during cooldown ({steps_since_last_trade}/{self.env.trade_cooldown})")
+                    action = 1  # Force hold
+        except Exception as e:
+            # If we encounter any error in the additional protection, log but continue
+            logger.error(f"Error in additional cooldown protection: {e}")
         
         try:
             # Try gymnasium API first
@@ -790,6 +887,20 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                     info['action_type'] = 'hold'
                 elif action == 2:
                     info['action_type'] = 'buy'
+            
+            # Track our own last trade step to enable wrapper-level cooldown
+            if not hasattr(self, '_last_trade_step'):
+                self._last_trade_step = None
+                
+            # Check for a trade by looking at action_type
+            if info.get('action_type') in ['buy', 'sell'] and info.get('trade_occurred', False):
+                if self._last_trade_step is not None:
+                    steps_since = self.step_counter - self._last_trade_step
+                    if steps_since < 10:  # Rapid trade detection at wrapper level
+                        logger.warning(f"Wrapper detected rapid trade: {steps_since} steps since last trade")
+                        # Apply additional penalty
+                        reward -= 10.0
+                self._last_trade_step = self.step_counter
             
             # Add position if available from env or track it ourselves
             if 'position' not in info:
@@ -1164,8 +1275,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
     
     # Get trade cooldown setting with dramatically increased default value
-    trade_cooldown = getattr(args, 'trade_cooldown', 2000)
-    logger.info(f"Setting strict trade cooldown to {trade_cooldown} steps")
+    base_trade_cooldown = getattr(args, 'trade_cooldown', 5000)
+    logger.info(f"Setting strict base trade cooldown to {base_trade_cooldown} steps")
     
     # Calculate maximum number of shares to trade per step (hmax)
     if 'close' in df.columns:
@@ -1177,7 +1288,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     logger.info(f"Environment config: initial_amount={initial_amount}, "
                 f"transaction_cost_pct={transaction_cost_pct}, "
                 f"reward_scaling={reward_scaling}, stock_dim={stock_dim}, hmax={hmax}, "
-                f"trade_cooldown={trade_cooldown}")
+                f"base_trade_cooldown={base_trade_cooldown}")
     
     # Process the DataFrame to ensure it's correctly formatted for FinRL
     try:
@@ -1245,7 +1356,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 action_space=action_space,
                 tech_indicator_list=tech_indicator_list,
                 print_verbosity=1,
-                trade_cooldown=trade_cooldown,  # Pass trade cooldown to test environment
+                trade_cooldown=base_trade_cooldown,  # Pass trade cooldown to test environment
             )
             
             # Try to reset the environment to see if it works
@@ -1273,8 +1384,19 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     # Create environment functions
     
     for i in range(num_workers * num_envs_per_worker):
+        # Calculate a progressively increasing trade cooldown for each environment
+        # This prevents synchronized rapid trading across environments
+        env_index = i + 1  # Start from 1 to avoid division by zero
+        # Add additional cooldown based on environment index to create staggered cooldowns
+        env_trade_cooldown = base_trade_cooldown + (1000 * (i % 5))  # Add 0, 1000, 2000, 3000, 4000 steps in a cycle
+        
+        # Increase the initial hold period as well
+        env_initial_hold = 2000 + (500 * (i % 4))  # Add 0, 500, 1000, 1500 initial hold period
+        
+        logger.info(f"Environment {i}: Setting trade_cooldown={env_trade_cooldown}, initial_hold={env_initial_hold}")
+        
         # Define a function that creates a new environment instance each time it's called
-        def make_env(idx=i):
+        def make_env(idx=i, trade_cooldown=env_trade_cooldown, initial_hold=env_initial_hold):
             try:
                 # Create basic environment parameters
                 env_config = {
@@ -1291,8 +1413,9 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
                     'state_space': state_space,  # Add the missing state_space parameter
                     'print_verbosity': 1 if idx == 0 else 0,  # Only print verbose output for the first env
-                    'trade_cooldown': trade_cooldown,  # Explicitly set the trade cooldown
-                    'debug_mode': idx == 0  # Enable debug mode for first environment
+                    'trade_cooldown': trade_cooldown,  # Use the environment-specific cooldown
+                    'debug_mode': idx == 0,  # Enable debug mode for first environment
+                    'initial_forced_hold_period': initial_hold  # Set the initial hold period
                 }
                 
                 # Create the environment
@@ -1318,8 +1441,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 return wrap_env_with_monitor(wrapped_env)
         
         # Add the environment creation function to the list with proper closure handling
-        def env_fn(idx=i):
-            return make_env(idx)
+        def env_fn(idx=i, trade_cooldown=env_trade_cooldown, initial_hold=env_initial_hold):
+            return make_env(idx, trade_cooldown, initial_hold)
         env_list.append(env_fn)
     
     # Create the vectorized environment
@@ -2435,9 +2558,22 @@ def wrap_env_with_monitor(env):
         logger.info("Wrapped environment with StockTradingEnvWrapper for gymnasium compatibility")
     
     # Custom monitor wrapper that ensures compatibility with both gym and gymnasium APIs
+    # and preserves the cooldown mechanism
     class CompatibleMonitor(Monitor):
         def step(self, action):
-            """Step the environment with compatibility for both APIs."""
+            """Step the environment with compatibility for both APIs and preserve cooldown."""
+            # IMPORTANT: We need to directly pass through the action without modification
+            # to ensure the PatchedStockTradingEnv cooldown mechanism works properly
+            if hasattr(self.env, 'env') and hasattr(self.env.env, '_last_trade_step'):
+                # This is to help debug if the cooldown isn't working
+                env_step = getattr(self.env.env, 'current_step', 0)
+                last_trade = getattr(self.env.env, '_last_trade_step', None)
+                if last_trade is not None:
+                    steps_since = env_step - last_trade
+                    if steps_since < 10 and action != 1:  # Not a hold action
+                        logger.warning(f"CompatibleMonitor: Detected potential rapid trade attempt in Monitor wrapper ({steps_since} steps since last trade)")
+            
+            # Call parent step method exactly as is to preserve action
             result = super().step(action)
             
             # If we get a 4-tuple result (old gym API), convert to 5-tuple (gymnasium API)
