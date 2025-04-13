@@ -2475,7 +2475,8 @@ def parse_args():
     parser.add_argument('--end_date', type=str, default='2021-12-31', help='End date for data')
     parser.add_argument('--tickers', type=str, default='BTC', help='Comma-separated list of tickers')
     parser.add_argument('--lstm_model_path', type=str, help='Path to pre-trained LSTM model for market predictions')
-    parser.add_argument('--data_path', type=str, help='Path to preprocessed market data file')
+    parser.add_argument('--data_path', type=str, default='data/synthetic/synthetic_dataset.h5', 
+                      help='Path to preprocessed market data file (HDF5 format preferred)')
     
     # Training parameters
     parser.add_argument('--device', type=str, default='cpu', help='Device to use for training (cpu, cuda:0, etc.)')
@@ -2506,43 +2507,68 @@ def load_and_preprocess_market_data(args):
     Returns:
         Preprocessed market data
     """
-    # Load data from specified file
-    if args.data_path:
-        logger.info(f"Loading market data from {args.data_path}")
-        try:
-            # Try to load as CSV first
-            if args.data_path.endswith('.csv'):
-                df = pd.read_csv(args.data_path)
-                logger.info(f"Loaded CSV market data with shape {df.shape}")
-            # Then try HDF5 format
-            elif args.data_path.endswith('.h5') or args.data_path.endswith('.hdf5'):
-                logger.info(f"Loading HDF5 market data from {args.data_path}")
-                # Read the first key in the HDF5 file
-                with pd.HDFStore(args.data_path, mode='r') as store:
-                    # Get keys - they typically start with '/'
-                    keys = store.keys()
-                    if not keys:
-                        raise ValueError(f"No datasets found in HDF5 file {args.data_path}")
+    # Use default path if not provided
+    data_path = args.data_path if args.data_path else 'data/synthetic/synthetic_dataset.h5'
+    logger.info(f"Loading market data from {data_path}")
+    
+    try:
+        # Try to load HDF5 format first (preferred)
+        if data_path.endswith('.h5') or data_path.endswith('.hdf5'):
+            logger.info(f"Loading HDF5 market data from {data_path}")
+            # Read from the HDF5 file
+            with pd.HDFStore(data_path, mode='r') as store:
+                # Get keys - they typically start with '/'
+                keys = store.keys()
+                if not keys:
+                    raise ValueError(f"No datasets found in HDF5 file {data_path}")
+                
+                # Try to load the '15m' timeframe first as it has the most data
+                if '/15m' in keys:
+                    df = store['/15m']
+                    logger.info(f"Loaded 15m timeframe data with shape {df.shape}")
+                else:
+                    # Otherwise, load the first key
+                    first_key = keys[0]
+                    df = store[first_key]
+                    logger.info(f"Loaded {first_key} timeframe data with shape {df.shape}")
                     
-                    # Try to load the '15m' timeframe first as it has the most data
-                    if '/15m' in keys:
-                        df = store['/15m']
-                        logger.info(f"Loaded 15m timeframe data with shape {df.shape}")
-                    else:
-                        # Otherwise, load the first key
-                        first_key = keys[0]
-                        df = store[first_key]
-                        logger.info(f"Loaded {first_key} timeframe data with shape {df.shape}")
-            else:
-                raise ValueError(f"Unsupported file format: {args.data_path}")
+                # Ensure date column is datetime
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                
+                # Make sure we have a 'tic' column
+                if 'tic' not in df.columns:
+                    df['tic'] = 'BTC'  # Default to BTC
+                    logger.info("Added 'tic' column with default value 'BTC'")
+                
+                # Make sure we have a 'day' column
+                if 'day' not in df.columns and 'date' in df.columns:
+                    df['day'] = df['date'].factorize()[0]
+                    logger.info(f"Added 'day' column with factorized dates")
+                
+                return df
+        
+        # Fallback to CSV if not HDF5
+        elif data_path.endswith('.csv'):
+            logger.warning("CSV format is not preferred. Consider using HDF5 format for better performance.")
+            df = pd.read_csv(data_path)
+            logger.info(f"Loaded CSV market data with shape {df.shape}")
             
+            # Process CSV data for compatibility
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+            if 'tic' not in df.columns:
+                df['tic'] = 'BTC'  # Default to BTC
+            if 'day' not in df.columns and 'date' in df.columns:
+                df['day'] = df['date'].factorize()[0]
+                
             return df
-        except Exception as e:
-            logger.error(f"Failed to load market data: {e}")
-            logger.error(traceback.format_exc())
-            return None
-    else:
-        logger.error("No data_path provided. Cannot load market data.")
+        else:
+            raise ValueError(f"Unsupported file format: {data_path}. Use .h5, .hdf5, or .csv file.")
+        
+    except Exception as e:
+        logger.error(f"Failed to load market data: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 def train_with_custom_dqn(args, market_data, data_length, device):
@@ -2704,282 +2730,121 @@ def wrap_env_with_monitor(env):
 
 def main():
     """Main entry point for the script."""
-    # Record start time
-    start_time = time.time()
-    
-    # Import torch at the beginning of main to ensure it's available
-    import torch
-    
-    # Configure logging
-    global logger
+    # Set up logging
     logger = setup_logging()
+    logger.info("Starting cryptocurrency trading DQN agent training")
     
     # Parse arguments
     args = parse_args()
+    logger.info(f"Command line arguments: {args}")
     
-    # Set device
-    device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith('cuda') else 'cpu')
-    logger.info(f"Using device: {device}")
-    
-    # Check if using FinRL framework
-    if args.use_finrl:
-        logger.info("Using FinRL-compatible framework")
-        
-        # Set default values if not provided in args
-        start_date = getattr(args, 'start_date', '2018-01-01')
-        end_date = getattr(args, 'end_date', '2021-12-31')
-        
-        # Set tickers - use provided tickers or default to ['BTC']
-        tickers = getattr(args, 'tickers', ['BTC', 'ETH', 'LTC'])
-        if isinstance(tickers, str):
-            tickers = tickers.split(',')
-        
-        # Set number of workers
-        num_workers = getattr(args, 'num_workers', 8)
-        num_envs_per_worker = getattr(args, 'num_envs_per_worker', 8)
-        total_envs = num_workers * num_envs_per_worker
-        logger.info(f"Creating {total_envs} total environments ({num_workers} workers × {num_envs_per_worker} envs each)")
-        
-        # Load LSTM model if specified
-        lstm_model = None
-        lstm_processor = None
-        if args.lstm_model_path:
-            try:
-                from crypto_trading_model.models.time_series.model import MultiTimeframeModel
-                from crypto_trading_model.data_processing.preprocessing import TimeSeriesDataProcessor
-                import torch
-                
-                logger.info(f"Loading LSTM model from {args.lstm_model_path}")
-                
-                # Actually load the LSTM model
-                try:
-                    lstm_model = MultiTimeframeModel.load_model(args.lstm_model_path)
-                    lstm_model.eval()  # Set to evaluation mode
-                    logger.info(f"Successfully loaded LSTM model: {lstm_model}")
-                    
-                    # Create data processor for LSTM
-                    lstm_processor = TimeSeriesDataProcessor(
-                        sequence_length=10,  # Use same as model training
-                        prediction_horizon=5  # Predict 5 steps ahead
-                    )
-                    
-                    logger.info("LSTM model will be used for market predictions")
-                except Exception as e:
-                    logger.error(f"Failed to load LSTM model: {e}")
-                    lstm_model = None
-            except ImportError as e:
-                logger.error(f"Error importing required modules for LSTM: {e}")
-        
-        # Load existing data instead of generating synthetic data
-        if getattr(args, 'data_path', None):
-            logger.info(f"Loading market data from {args.data_path}")
-            try:
-                df = pd.read_csv(args.data_path)
-                logger.info(f"Loaded market data with shape {df.shape}")
-                
-                # Ensure date column is datetime
-                if 'date' in df.columns:
-                    df['date'] = pd.to_datetime(df['date'])
-            except Exception as e:
-                logger.error(f"Failed to load market data: {e}")
-                logger.error(traceback.format_exc())
-                return
+    # Set device for training
+    device = 'cpu'
+    if args.device and args.device.startswith('cuda'):
+        import torch
+        if torch.cuda.is_available():
+            device = args.device
+            logger.info(f"Using device: {device}")
         else:
-            logger.error("No data_path provided. Cannot proceed without market data.")
-            logger.error("Please provide --data_path argument pointing to your market data CSV file.")
-            return
-        
-        # Define necessary technical indicators
-        tech_indicators = [
-            'macd', 'rsi_14', 'cci_30', 'dx_30', 
-            'close_5_sma', 'close_10_sma', 'close_20_sma',
-            'volatility_30', 'volume_change'
-        ]
-        
-        # Ensure all technical indicators are present
-        df = ensure_technical_indicators(df, tech_indicators)
-        
-        # If we have a loaded LSTM model, add price predictions to data
-        if lstm_model is not None and lstm_processor is not None:
-            try:
-                logger.info("Adding LSTM price predictions to training data")
-                
-                # Prepare data for LSTM prediction
-                price_data = df[['open', 'high', 'low', 'close', 'volume']].values
-                
-                # Normalize the data
-                price_mean = price_data.mean(axis=0)
-                price_std = price_data.std(axis=0)
-                normalized_data = (price_data - price_mean) / price_std
-                
-                # Create sequences
-                sequences = []
-                for i in range(len(normalized_data) - lstm_processor.sequence_length):
-                    seq = normalized_data[i:i+lstm_processor.sequence_length]
-                    sequences.append(seq)
-                
-                # Convert to tensor for batch prediction
-                if sequences:
-                    tensor_sequences = torch.FloatTensor(sequences).to(device)
-                    
-                    # Run prediction
-                    with torch.no_grad():
-                        price_predictions = lstm_model(tensor_sequences).cpu().numpy()
-                    
-                    # Denormalize predictions
-                    denorm_predictions = price_predictions * price_std[3] + price_mean[3]  # For close price
-                    
-                    # Add predictions to dataframe
-                    for i in range(lstm_processor.prediction_horizon):
-                        pred_col = f'lstm_pred_{i+1}'
-                        df[pred_col] = 0.0  # Initialize column
-                        
-                        # Fill with predictions (offset by sequence_length due to first sequences)
-                        for j in range(len(denorm_predictions)):
-                            if j + lstm_processor.sequence_length + i < len(df):
-                                df.loc[j + lstm_processor.sequence_length + i, pred_col] = denorm_predictions[j][i]
-                    
-                    # Add prediction columns to technical indicators
-                    for i in range(lstm_processor.prediction_horizon):
-                        pred_col = f'lstm_pred_{i+1}'
-                        if pred_col not in tech_indicators:
-                            tech_indicators.append(pred_col)
-                    
-                    logger.info(f"Added LSTM predictions for {lstm_processor.prediction_horizon} steps ahead")
-                else:
-                    logger.warning("Could not create sequences for LSTM prediction")
-            except Exception as e:
-                logger.error(f"Error generating LSTM predictions: {e}")
-                logger.error(traceback.format_exc())
-        
-        # Create a CryptocurrencyTradingEnv (our custom implementation)
-        env_params = {
-            'df': df,
-            'initial_amount': getattr(args, 'initial_balance', 1000000.0),
-            'buy_cost_pct': 0.00075,  # Transaction cost
-            'sell_cost_pct': 0.00075,  # Transaction cost
-            'state_space': len(tech_indicators) + 3,  # Indicators + cash + price + owned
-            'stock_dim': 1,  # Single asset trading
-            'tech_indicator_list': tech_indicators,
-            'action_space': 3,  # Sell, hold, buy
-            'reward_scaling': getattr(args, 'reward_scaling', 1e-4),  # Get reward scaling from args
-            'print_verbosity': 10 if args.verbose else 0
-        }
-        
-        logger.info(f"Creating CryptocurrencyTradingEnv with state_space={env_params['state_space']}")
-        base_env = CryptocurrencyTradingEnv(**env_params)
-        
-        # Wrap with Monitor for metrics
-        env = wrap_env_with_monitor(base_env)
-        
-        # Create vectorized environment
-        vec_env = create_parallel_finrl_envs(df, args, num_workers=num_workers)
-        
-        # Check the action space type and use appropriate algorithm
-        if isinstance(vec_env.action_space, gym.spaces.Discrete) or isinstance(vec_env.action_space, gymnasium.spaces.Discrete):
-            # For discrete action spaces, use algorithms that support them
-            if args.finrl_model.lower() == 'ppo':
-                logger.info("Training with PPO model (supports discrete actions)")
-                
-                # Get PPO hyperparameters
-                n_steps = getattr(args, 'n_steps', 2048)
-                batch_size = getattr(args, 'batch_size', 64)
-                n_epochs = getattr(args, 'n_epochs', 10)
-                learning_rate = getattr(args, 'learning_rate', 0.0003)  # Increased from 0.0001
-                
-                logger.info(f"PPO parameters: n_steps={n_steps}, batch_size={batch_size}, n_epochs={n_epochs}, lr={learning_rate}")
-                
-                # Create PPO model with enhanced GPU utilization
-                model = PPO(
-                    "MlpPolicy", 
-                    vec_env,
-                    learning_rate=lambda progress: learning_rate * (1.0 - progress),  # Linear schedule
-                    gamma=getattr(args, 'gamma', 0.99),
-                    n_steps=n_steps,       # Larger batch size for better GPU utilization
-                    batch_size=batch_size, # Minibatch size for updates
-                    n_epochs=n_epochs,     # Number of epoch when optimizing the surrogate
-                    ent_coef=0.01,  # Fixed value instead of schedule
-                    vf_coef=0.5,           # Reduced value function coefficient
-                    clip_range_vf=0.4,     # Enable value function clipping
-                    target_kl=0.02,        # Limit policy update size
-                    verbose=1 if args.verbose else 0,
-                    tensorboard_log="./tensorboard_logs",
-                    device=device,
-                    policy_kwargs={
-                        'net_arch': [512, 256, 128]  # Adjusted network architecture
-                    }
-                )
-                
-                # Check if we should normalize observations
-                if getattr(args, 'normalize_observations', 'true').lower() == 'true':
-                    from stable_baselines3.common.vec_env import VecNormalize
-                    logger.info("Wrapping environment with VecNormalize for observation normalization")
-                    vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False)
-                
-                # Log GPU memory usage before training
-                if torch.cuda.is_available():
-                    logger.info(f"GPU memory allocated before training: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
-                    logger.info(f"GPU memory reserved before training: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
-                
-                # Train the model
-                total_timesteps = getattr(args, 'timesteps', 50000)
-                logger.info(f"Training for {total_timesteps} timesteps with {vec_env.num_envs} environments...")
-                
-                # Log GPU usage during training
-                class GPUMonitorCallback(BaseCallback):
-                    def __init__(self, verbose=0):
-                        super().__init__(verbose)
-                        self.step_count = 0
-                    
-                    def _on_step(self):
-                        self.step_count += 1
-                        if self.step_count % 1000 == 0 and torch.cuda.is_available():
-                            allocated = torch.cuda.memory_allocated() / 1024**2
-                            reserved = torch.cuda.memory_reserved() / 1024**2
-                            logger.info(f"Step {self.step_count}: GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
-                        return True
-                
-                # Initialize callbacks
-                gpu_monitor = GPUMonitorCallback()
-                tensorboard_callback = TensorboardCallback()
-                callbacks = [gpu_monitor, tensorboard_callback]
-                
-                model.learn(total_timesteps=total_timesteps, callback=callbacks, tb_log_name=args.finrl_model.lower())
-                
-                # Save the model
-                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                model_path = f"models/finrl_{args.finrl_model.lower()}_{timestamp}"
-                os.makedirs(model_path, exist_ok=True)
-                model.save(f"{model_path}/model")
-                logger.info(f"Model saved to {model_path}/model")
-                
-                # Save arguments used for training
-                with open(f"{model_path}/training_args.json", 'w') as f:
-                    json.dump(vars(args), f, indent=4)
-                logger.info(f"Training arguments saved to {model_path}/training_args.json")
+            logger.warning("CUDA requested but not available. Using CPU instead.")
     
-    else:
-        # Use our custom DQN implementation
-        logger.info("Using custom DQN implementation")
-        
-        # Load market data from provided path
-        if getattr(args, 'data_path', None):
-            logger.info(f"Loading market data from {args.data_path}")
-            try:
-                market_data = pd.read_csv(args.data_path)
-                logger.info(f"Loaded market data with shape {market_data.shape}")
-                
-                # Call the custom DQN training function
-                train_with_custom_dqn(args, market_data, len(market_data), device)
-            except Exception as e:
-                logger.error(f"Failed to load market data or train custom DQN: {e}")
-                logger.error(traceback.format_exc())
+    # Load and preprocess market data
+    market_data = load_and_preprocess_market_data(args)
+    
+    if market_data is None:
+        logger.error("Failed to load market data, exiting")
+        return
+    
+    logger.info(f"Loaded market data with shape: {market_data.shape}")
+    
+    # Parse tickers
+    tickers = [t.strip() for t in args.tickers.split(',')]
+    logger.info(f"Using tickers: {tickers}")
+    
+    # Parse dates
+    start_date = args.start_date
+    end_date = args.end_date
+    logger.info(f"Training period: {start_date} to {end_date}")
+    
+    # Create the training environment
+    try:
+        if args.use_finrl:
+            # Train with FinRL
+            train_with_finrl(
+                args=args,
+                logger=logger,
+                start_date=start_date,
+                end_date=end_date,
+                tickers=tickers,
+                data_source="binance",
+                num_workers=args.num_workers
+            )
         else:
-            logger.error("No data_path provided. Cannot proceed without market data.")
-            logger.error("Please provide --data_path argument pointing to your market data CSV file.")
+            # Train with our custom DQN implementation
+            data_length = len(market_data)
+            logger.info(f"Total data length: {data_length}")
+            train_with_custom_dqn(args, market_data, data_length, device)
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        logger.error(traceback.format_exc())
+        raise
+        
+    logger.info("Training completed successfully")
     
-    # Log total execution time
-    logger.info(f"Total execution time: {time.time() - start_time:.2f} seconds")
+    # Add metadata logging
+    import psutil
+    memory_info = psutil.virtual_memory()
+    logger.info(f"System memory usage: {memory_info.percent}%")
+    
+    # Try to get GPU info if available
+    try:
+        import torch
+        import subprocess
+        if torch.cuda.is_available():
+            # Log GPU memory info
+            gpu_memory = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+            logger.info(f"GPU memory allocated: {gpu_memory:.2f} GB")
+            
+            # Create a callback that monitors GPU memory
+            class GPUMonitorCallback(BaseCallback):
+                def __init__(self, verbose=0):
+                    super(GPUMonitorCallback, self).__init__(verbose)
+                
+                def _on_step(self):
+                    if self.n_calls % 1000 == 0:  # Log every 1000 steps
+                        gpu_memory = torch.cuda.memory_allocated() / (1024 ** 3)  # Convert to GB
+                        logger.info(f"Step {self.n_calls}: GPU memory: {gpu_memory:.2f} GB")
+                    return True
+            
+            # Get GPU info from nvidia-smi
+            try:
+                gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')
+                logger.info(f"GPU Info:\n{gpu_info}")
+            except:
+                logger.info("Could not get GPU info from nvidia-smi")
+    except Exception as e:
+        logger.info(f"Could not log GPU info: {e}")
+        
+    # Create metrics dictionary
+    metrics = {
+        "data_length": data_length,
+        "training_duration": 0,  # Will be filled by the training function
+        "model_size": 0,  # Will be filled by the training function
+        "memory_usage": memory_info.percent,
+    }
+    
+    # Save metrics to JSON
+    try:
+        import json
+        metrics_file = 'metrics.json'
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+        logger.info(f"Saved metrics to {metrics_file}")
+    except Exception as e:
+        logger.error(f"Failed to save metrics: {e}")
+        
+    logger.info("Exiting successfully")
+    return 0
 
 def create_dummy_vectorized_env(env_function, n_envs=1):
     """
