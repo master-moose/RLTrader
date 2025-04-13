@@ -853,16 +853,24 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             self.metadata = env.metadata if hasattr(env, 'metadata') else {'render_modes': []}
             self.num_envs = 1
             
-            # CRITICAL FIX: Add environment spec attributes needed by Gymnasium
+            # CRITICAL FIX: Create EnvSpec instance but don't assign directly - use _set_spec
             from gymnasium.envs.registration import EnvSpec
-            self._cached_spec = None
-            self.spec = EnvSpec(
+            env_spec = EnvSpec(
                 id="StockTrading-v0",
                 entry_point=None,
                 reward_threshold=None,
                 max_episode_steps=None,
                 kwargs={}
             )
+            # Set _cached_spec and spec attributes safely
+            object.__setattr__(self, '_cached_spec', env_spec)
+            # Try setting the spec in a way that bypasses property setters
+            try:
+                object.__setattr__(self, 'spec', env_spec)
+            except Exception as e:
+                logger.warning(f"Could not set spec directly: {e}")
+                # Fallback method: create a _spec attribute that spec property can use
+                object.__setattr__(self, '_spec', env_spec)
             
             logger.info(f"Created StockTradingEnvWrapper with observation space: {self.observation_space}")
         else:
@@ -876,17 +884,23 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # CRITICAL FIX: If we inherit from a gymnasium environment but it doesn't have the spec attribute
             if not hasattr(self, 'spec') or self.spec is None:
                 from gymnasium.envs.registration import EnvSpec
-                self._cached_spec = None
-                self.spec = EnvSpec(
+                env_spec = EnvSpec(
                     id="StockTrading-v0",
                     entry_point=None,
                     reward_threshold=None,
                     max_episode_steps=None,
                     kwargs={}
                 )
+                # Set attributes safely
+                object.__setattr__(self, '_cached_spec', env_spec)
+                try:
+                    object.__setattr__(self, 'spec', env_spec)
+                except Exception as e:
+                    logger.warning(f"Could not set spec directly: {e}")
+                    object.__setattr__(self, '_spec', env_spec)
             else:
                 # If the wrapped environment has a spec, ensure we have _cached_spec
-                self._cached_spec = self.spec
+                object.__setattr__(self, '_cached_spec', self.spec)
                 
             logger.info(f"Wrapped Gymnasium environment with observation space: {self.observation_space}")
         
@@ -918,314 +932,19 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # CRITICAL FIX: Stronger penalty mechanisms
         self._oscillation_penalty_multiplier = 1.0  # Will increase with detected oscillations
-
-    def step(self, action):
-        """Step the environment, with compatibility for both gym and gymnasium APIs.
-           Includes enhanced safeguards against rapid trading and oscillation.
-        """
-        # CRITICAL FIX: Enforce wrapper-level frozen period first
-        if hasattr(self, '_frozen_until_step') and self._frozen_until_step > self.step_counter:
-            if action != 1:  # If not a hold action
-                logger.warning(f"Wrapper frozen period active - forcing hold action at step {self.step_counter}")
-                action = 1  # Force hold
-        
-        # Add debug logging for actions every 10000 steps
-        if hasattr(self, 'step_counter'):
-            if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
-                action_type = "sell" if action == 0 else ("hold" if action == 1 else "buy")
-                logger.info(f"Step {self.step_counter}: Taking action {action} ({action_type})")
-                
-        # Additional cooldown enforcement at wrapper level
-        try:
-            # If this is a PatchedStockTradingEnv, check cooldown
-            if hasattr(self.env, '_last_trade_step') and hasattr(self.env, 'current_step') and hasattr(self.env, 'trade_cooldown'):
-                steps_since_last_trade = float('inf')
-                if self.env._last_trade_step is not None:
-                    steps_since_last_trade = self.env.current_step - self.env._last_trade_step
-                
-                # If in cooldown and trying to trade, force a hold action
-                if steps_since_last_trade < self.env.trade_cooldown and action != 1:
-                    logger.warning(f"StockTradingEnvWrapper extra protection: Forcing hold during cooldown ({steps_since_last_trade}/{self.env.trade_cooldown})")
-                    action = 1  # Force hold
-        except Exception as e:
-            # If we encounter any error in the additional protection, log but continue
-            logger.error(f"Error in additional cooldown protection: {e}")
-        
-        # Additional double-check cooldown protection at wrapper level
-        if not hasattr(self, '_last_wrapper_trade_step'):
-            self._last_wrapper_trade_step = None
-            self._wrapper_trade_cooldown = 1000  # Much larger cooldown at wrapper level as additional protection
-            self._wrapper_position_history = []
-        
-        # Check wrapper-level cooldown
-        steps_since_last_wrapper_trade = float('inf')
-        if self._last_wrapper_trade_step is not None:
-            steps_since_last_wrapper_trade = getattr(self, 'step_counter', 0) - self._last_wrapper_trade_step
-            
-            # If in cooldown period and attempting to trade, force hold
-            if steps_since_last_wrapper_trade < self._wrapper_trade_cooldown and action != 1:
-                logger.warning(f"Wrapper emergency cooldown enforcement: Forcing hold ({steps_since_last_wrapper_trade}/{self._wrapper_trade_cooldown})")
-                action = 1
-        
-        # Initialize default variables that will be updated in the try block
-        obs = np.zeros(self.observation_space.shape)
-        reward = 0.0
-        terminated = False
-        truncated = False
-        done = False
-        info = {}
-        
-        try:
-            # Try to use the gymnasium-style step interface
-            result = self.env.step(action)
-            
-            # Handle different return formats
-            if isinstance(result, tuple):
-                if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
-                    obs, reward, terminated, truncated, info = result
-                    done = terminated or truncated
-                elif len(result) == 4:  # gym API (obs, reward, done, info)
-                    obs, reward, done, info = result
-                    terminated, truncated = done, False
-                else:
-                    # Unexpected number of return values - use defaults
-                    logger.warning(f"Unexpected number of return values from step: {len(result)}")
-                    obs = result[0] if len(result) > 0 else np.zeros(self.observation_space.shape)
-                    reward = result[1] if len(result) > 1 else 0.0
-                    done = result[2] if len(result) > 2 else False
-                    info = result[3] if len(result) > 3 else {}
-                    terminated, truncated = done, False
-            else:
-                # Handle unexpected return type (should not happen)
-                logger.error(f"Unexpected return type from step: {type(result)}")
-                obs = np.zeros(self.observation_space.shape)
-                reward = 0.0
-                done = True
-                info = {}
-                terminated, truncated = done, False
-                
-            # Initialize info dict if it's None or not a dict
-            if info is None or not isinstance(info, dict):
-                info = {}
-                
-            # Add trading metrics to info dictionary if not already present
-            if isinstance(info, dict):
-                # Ensure action_type is present
-                if 'action_type' not in info:
-                    if action == 0:
-                        info['action_type'] = 'sell'
-                    elif action == 1:
-                        info['action_type'] = 'hold'
-                    elif action == 2:
-                        info['action_type'] = 'buy'
-                
-                # Track our own last trade step to enable wrapper-level cooldown
-                if not hasattr(self, '_last_trade_step'):
-                    self._last_trade_step = None
-                    
-                # Check for a trade by looking at action_type
-                if info.get('action_type') in ['buy', 'sell'] and info.get('trade_occurred', False):
-                    if self._last_trade_step is not None:
-                        steps_since = self.step_counter - self._last_trade_step
-                        # CRITICAL FIX: Much stricter rapid trade detection
-                        if steps_since < 20:  # Reduced from 10 to detect even closer trades 
-                            logger.warning(f"CRITICAL: Wrapper detected extremely rapid trade: {steps_since} steps since last trade")
-                            # Apply additional severe penalty
-                            reward -= 100.0  # Increased from 30.0
-                            # Force extended cooldown
-                            self._last_wrapper_trade_step = self.step_counter
-                            # CRITICAL FIX: Add extra frozen period for rapid trading
-                            self._frozen_until_step = self.step_counter + 10000
-                            self._frozen_for_oscillation = True
-                    
-                    self._last_trade_step = self.step_counter
-                    # Also update wrapper-level trade tracking
-                    self._last_wrapper_trade_step = self.step_counter
-                
-                # Additional position tracking to detect rapid position changes
-                current_position = info.get('position', 0)
-                
-                # CRITICAL FIX: Track position changes to detect oscillation
-                if hasattr(self, '_last_position') and self._last_position is not None:
-                    if current_position != self._last_position:
-                        # Position changed - add to tracking
-                        self._position_change_steps.append(self.step_counter)
-                        
-                        # Keep only the most recent position changes
-                        if len(self._position_change_steps) > 10:
-                            self._position_change_steps = self._position_change_steps[-10:]
-                            
-                        # Check for rapid position changes
-                        if len(self._position_change_steps) >= 2:
-                            steps_between_changes = self._position_change_steps[-1] - self._position_change_steps[-2]
-                            if steps_between_changes < 20:  # Very rapid position change
-                                logger.warning(f"CRITICAL: Wrapper detected extremely rapid position change: {steps_between_changes} steps between changes")
-                                # Apply extreme penalty
-                                reward -= 200.0
-                                # Force extended frozen period
-                                self._frozen_until_step = self.step_counter + 20000
-                                self._frozen_for_oscillation = True
-                
-                # Update wrapper position history for oscillation detection
-                if current_position != 0:  # Only track non-zero positions for oscillation
-                    self._wrapper_position_history.append(current_position)
-                    # Keep history manageable
-                    if len(self._wrapper_position_history) > 5:
-                        self._wrapper_position_history = self._wrapper_position_history[-5:]
-                    
-                    # Check for position flip-flopping (e.g., 1, -1, 1, -1)
-                    if len(self._wrapper_position_history) >= 4:
-                        # Check for alternating patterns
-                        alternating = True
-                        for i in range(1, len(self._wrapper_position_history[-4:])):
-                            p1 = self._wrapper_position_history[-i-1]
-                            p2 = self._wrapper_position_history[-i]
-                            if (p1 > 0 and p2 > 0) or (p1 < 0 and p2 < 0):
-                                alternating = False
-                                break
-                        
-                        if alternating and len(set(self._wrapper_position_history[-4:])) > 1:
-                            logger.warning(f"CRITICAL: Wrapper detected position oscillation pattern: {self._wrapper_position_history[-4:]}")
-                            # CRITICAL FIX: Apply much more severe penalty
-                            self._oscillation_penalty_multiplier += 1.0
-                            penalty = 300.0 * self._oscillation_penalty_multiplier
-                            reward -= penalty
-                            logger.warning(f"Applied severe oscillation penalty: {penalty}")
-                            
-                            # Force cooldown for much longer period
-                            self._last_wrapper_trade_step = self.step_counter
-                            # Increase wrapper cooldown for next trades
-                            self._wrapper_trade_cooldown = min(20000, self._wrapper_trade_cooldown * 2)
-                            # CRITICAL FIX: Add extended frozen period
-                            self._frozen_until_step = self.step_counter + 50000
-                            self._frozen_for_oscillation = True
-                    
-                    # Check for same trade price
-                    if hasattr(self, '_last_price'):
-                        current_price = info.get('close', None)
-                        if current_price is not None and self._last_price is not None:
-                            # CRITICAL FIX: More strict same price detection
-                            if abs(current_price - self._last_price) < 0.0001:
-                                self._same_price_trade_counter += 1
-                                logger.warning(f"CRITICAL: Wrapper detected same price trade: {current_price:.4f} (#{self._same_price_trade_counter})")
-                                # Apply extreme penalty that increases with repeated same-price trades
-                                penalty = 300.0 * min(10, self._same_price_trade_counter)
-                                reward -= penalty
-                                logger.warning(f"Applied same-price trade penalty: {penalty}")
-                                
-                                # Force extended cooldown
-                                self._last_wrapper_trade_step = self.step_counter
-                                self._wrapper_trade_cooldown = min(20000, self._wrapper_trade_cooldown * 2)
-                                # CRITICAL FIX: Add extended frozen period
-                                self._frozen_until_step = self.step_counter + 30000
-                        
-                        # Update last price
-                        self._last_price = current_price
-                
-                # Update last position for next step
-                self._last_position = current_position
-                
-                # CRITICAL FIX: Add info about wrapper-level protection
-                info['wrapper_cooldown_remaining'] = max(0, self._wrapper_trade_cooldown - steps_since_last_wrapper_trade) if self._last_wrapper_trade_step is not None else 0
-                info['wrapper_frozen_period'] = max(0, self._frozen_until_step - self.step_counter) if hasattr(self, '_frozen_until_step') else 0 
-                info['wrapper_frozen_for_oscillation'] = self._frozen_for_oscillation
-                info['wrapper_same_price_trades'] = getattr(self, '_same_price_trade_counter', 0)
-                
-            # Add position information if missing
-            if 'position' not in info:
-                # Try to get position from env
-                position = getattr(self.env, 'position', 0) if hasattr(self.env, 'position') else 0
-                
-                # If the env doesn't track position, we can estimate it based on action
-                if not hasattr(self, 'current_position'):
-                    self.current_position = 0
-                
-                # Update position based on action
-                if action == 0:  # Sell
-                    # If already in a position, close it
-                    if self.current_position == 1:
-                        self.current_position = 0  # Flat
-                    # Otherwise open a short position
-                    elif self.current_position == 0:
-                        self.current_position = -1  # Short
-                elif action == 2:  # Buy
-                    # If already in a position, close it
-                    if self.current_position == -1:
-                        self.current_position = 0  # Flat
-                    # Otherwise open a long position
-                    elif self.current_position == 0:
-                        self.current_position = 1  # Long
-                
-                # Set position in info
-                info['position'] = position if position != 0 else self.current_position
-            
-            # Add price information if available
-            if 'close' not in info and hasattr(self.env, 'data') and hasattr(self.env.data, 'get'):
-                info['close'] = self.env.data.get('close', 0)
-            
-            # Add portfolio value if not present
-            if 'portfolio_value' not in info and hasattr(self.env, 'initial_amount'):
-                # Estimate portfolio value if we can
-                cash = getattr(self.env, 'initial_amount', 100000)
-                position = info.get('position', 0)
-                position_value = 0
-                if position != 0 and 'close' in info:
-                    position_value = abs(position) * info['close']
-                
-                portfolio_value = cash + position_value
-                info['portfolio_value'] = portfolio_value
-
-        except Exception as e:
-            # Log any errors during step execution
-            logger.error(f"Error in StockTradingEnvWrapper step function: {str(e)}")
-            # Use default values if the step method fails
-            if not isinstance(obs, np.ndarray) or obs.shape != self.observation_space.shape:
-                obs = np.zeros(self.observation_space.shape)
-            terminated, truncated = True, False
-            done = True
-        
-        finally:
-            # Log step observation for debugging (only on some steps to avoid excessive logging)
-            if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
-                self.step_counter = getattr(self, 'step_counter', 0) + 1
-                # Only log every 10000 steps and only if env_id is 0 (first environment)
-                if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
-                    logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
-            
-            # Ensure observation is a numpy array
-            if not isinstance(obs, np.ndarray):
-                logger.warning(f"Step returned non-numpy observation of type {type(obs)}")
-                # Try to convert to numpy array
-                try:
-                    obs = np.array(obs, dtype=np.float32)
-                except Exception as e:
-                    logger.error(f"Could not convert observation to numpy array: {e}")
-                    # Use a default observation
-                    obs = np.zeros(self.observation_space.shape)
-            
-            # Check if observation is scalar and convert to array
-            if np.isscalar(obs):
-                obs = np.array([obs], dtype=np.float32)
-                
-            # If observation dimension doesn't match our state space, update the dimension
-            if len(obs) != self.state_space:
-                # Only track this the first time it happens or when it changes
-                if self.actual_state_space is None or self.actual_state_space != len(obs):
-                    self.actual_state_space = len(obs)
-                    logger.info(f"Step returned observation with different dimension: {self.actual_state_space}")
-                    self.observation_space = gymnasium.spaces.Box(
-                        low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
-                    )
-            
-            # Clip observation values to reasonable range
-            obs = np.clip(obs, -10.0, 10.0)
-        
-        # Return in gymnasium format (obs, reward, terminated, truncated, info)
-        if 'gymnasium' in str(type(self.env)) or len(inspect.signature(self.env.step).parameters) > 1:
-            return obs, reward, terminated, truncated, info
-        else:
-            # Return in gym format for compatibility (obs, reward, done, info)
-            return obs, reward, done, info
+    
+    # Add a property getter for spec to ensure compatibility
+    @property
+    def spec(self):
+        """Get the environment spec - compatibility with gymnasium."""
+        if hasattr(self, '_spec'):
+            return self._spec
+        elif hasattr(self, '_cached_spec'):
+            return self._cached_spec
+        # Fall back to wrapped environment's spec if available
+        elif hasattr(self.env, 'spec'):
+            return self.env.spec
+        return None
 
 def setup_finrl_import():
     """Setup import for FinRL DRLAgent with version detection"""
@@ -2277,107 +1996,123 @@ def ensure_technical_indicators(df, indicators):
     logger.info(f"Added {len(missing_indicators)} missing technical indicators")
     return df_result
 
-def wrap_env_with_monitor(env):
-    """
-    Wrap environment with Monitor for metrics tracking.
+def wrap_env_with_monitor(env, log_dir='logs'):
+    """Wrap environment with Monitor wrapper to record metrics.
     
     Args:
-        env: Environment to wrap
+        env: The environment to wrap
+        log_dir: Directory to save logs
         
     Returns:
-        Monitor-wrapped environment
+        Wrapped environment with Monitor
     """
-    from stable_baselines3.common.monitor import Monitor
+    # Create logs directory if it doesn't exist
+    os.makedirs(log_dir, exist_ok=True)
+    folder_name = os.path.join(log_dir, f"monitor_{int(time.time())}")
+    os.makedirs(folder_name, exist_ok=True)
     
-    # Create a temporary directory if it doesn't exist
-    monitor_dir = './logs/monitor'
-    os.makedirs(monitor_dir, exist_ok=True)
-    
-    # Check if the environment is a gymnasium.Env
+    # Ensure environment is wrapped with StockTradingEnvWrapper for consistent Gymnasium API
     if not isinstance(env, gymnasium.Env):
-        # If not, wrap it with a gymnasium adapter
+        logger.info("Wrapping environment with StockTradingEnvWrapper before applying Monitor")
         env = StockTradingEnvWrapper(env)
-        logger.info("Wrapped environment with StockTradingEnvWrapper for gymnasium compatibility")
     
-    # Custom monitor wrapper that ensures compatibility with both gym and gymnasium APIs
-    # and preserves the cooldown mechanism
+    # Custom Monitor class to handle missing spec attribute and ensure compatibility
     class CompatibleMonitor(Monitor):
-        def __init__(self, env, filename=None, allow_early_resets=True, reset_keywords=(), info_keywords=()):
-            """Modified monitor initialization that handles missing spec attributes."""
-            # Ensure the environment has a spec attribute
-            if not hasattr(env, 'spec') or env.spec is None:
-                from gymnasium.envs.registration import EnvSpec
-                env._cached_spec = None
-                env.spec = EnvSpec(
-                    id="StockTrading-v0",
-                    entry_point=None,
-                    reward_threshold=None,
-                    max_episode_steps=None,
-                    kwargs={}
-                )
-                logger.info("Added missing spec attribute to environment for Monitor compatibility")
-            
-            # Now call the parent init
+        """Compatible Monitor wrapper that handles missing spec and wrapper.spec attribute issues."""
+        
+        def __init__(self, env, filename, *args, **kwargs):
             try:
-                super().__init__(env, filename, allow_early_resets, reset_keywords, info_keywords)
+                # First check if there's an issue with the spec attribute
+                if hasattr(env, 'spec') and env.spec is None:
+                    logger.warning("Environment has spec attribute but it's None, setting a default spec")
+                    from gymnasium.envs.registration import EnvSpec
+                    # Use object.__setattr__ to bypass property setters
+                    object.__setattr__(env, '_cached_spec', EnvSpec(
+                        id="CompatMonitor-v0",
+                        entry_point=None,
+                        reward_threshold=None,
+                        max_episode_steps=None,
+                        kwargs={}
+                    ))
+                
+                # Properly initialize Monitor
+                super().__init__(env, filename, *args, **kwargs)
+                logger.info(f"Successfully created Monitor wrapper at {filename}")
             except Exception as e:
-                logger.error(f"Error initializing Monitor: {e}")
-                # As a fallback, try with a simple spec id
-                if isinstance(e, AttributeError) and 'spec' in str(e):
-                    logger.warning("AttributeError with spec, trying fallback initialization")
-                    self.env = env
-                    self.file_handler = None
-                    self.total_steps = 0
-                    self.rewards = []
-                    self.needs_reset = True
-                    self.episode_returns = []
-                    self.episode_lengths = []
-                    self.episode_times = []
-                    self.total_steps = 0
-                    self.t_start = None
-
+                # If there's still an issue, try to diagnose and fix it
+                logger.error(f"Error initializing CompatibleMonitor: {e}")
+                # Fall back to minimal initialization if needed
+                self.env = env
+                self.file_prefix = filename
+                self.file_infix = ""
+                self.stats_recorder = None
+                self.enabled = False
+                logger.warning("CompatibleMonitor initialized in fallback mode (metrics recording disabled)")
+        
         def step(self, action):
-            """Step the environment with compatibility for both APIs and preserve cooldown."""
-            # IMPORTANT: We need to directly pass through the action without modification
-            # to ensure the PatchedStockTradingEnv cooldown mechanism works properly
-            if hasattr(self.env, 'env') and hasattr(self.env.env, '_last_trade_step'):
-                # This is to help debug if the cooldown isn't working
-                env_step = getattr(self.env.env, 'current_step', 0)
-                last_trade = getattr(self.env.env, '_last_trade_step', None)
-                if last_trade is not None:
-                    steps_since = env_step - last_trade
-                    if steps_since < 10 and action != 1:  # Not a hold action
-                        logger.warning(f"CompatibleMonitor: Detected potential rapid trade attempt in Monitor wrapper ({steps_since} steps since last trade)")
-            
+            """
+            Step the environment, with compatibility for both gym and gymnasium APIs.
+            Preserves the StockTradingEnvWrapper cooldown and penalty mechanisms.
+            """
             try:
-                # Call parent step method exactly as is to preserve action
+                # Check if we need to enforce cooldown from StockTradingEnvWrapper
+                if hasattr(self.env, '_frozen_until_step') and hasattr(self.env, 'step_counter'):
+                    if self.env._frozen_until_step > self.env.step_counter and action != 1:
+                        logger.warning(f"Monitor detected frozen period - forcing hold action at step {self.env.step_counter}")
+                        action = 1  # Force hold
+                
+                # Call parent step method
                 result = super().step(action)
                 
-                # If we get a 4-tuple result (old gym API), convert to 5-tuple (gymnasium API)
-                if isinstance(result, tuple) and len(result) == 4:
-                    obs, reward, done, info = result
-                    return obs, reward, done, False, info  # Add truncated=False
+                # Pass through additional info from StockTradingEnvWrapper
+                if isinstance(result, tuple) and len(result) >= 4:
+                    info_idx = 4 if len(result) == 5 else 3
+                    if result[info_idx] is None:
+                        result = list(result)
+                        result[info_idx] = {}
+                        result = tuple(result)
+                    
+                    # Ensure info contains wrapper cooldown info
+                    if isinstance(result[info_idx], dict):
+                        if hasattr(self.env, '_wrapper_trade_cooldown') and hasattr(self.env, '_last_wrapper_trade_step'):
+                            cooldown_remaining = 0
+                            if self.env._last_wrapper_trade_step is not None:
+                                steps_since = getattr(self.env, 'step_counter', 0) - self.env._last_wrapper_trade_step
+                                cooldown_remaining = max(0, self.env._wrapper_trade_cooldown - steps_since)
+                            
+                            result[info_idx]['wrapper_cooldown_remaining'] = cooldown_remaining
                 
                 return result
+                
             except Exception as e:
-                logger.error(f"Error in CompatibleMonitor.step: {e}")
-                # Fallback to direct environment call in case of monitor issues
-                try:
-                    result = self.env.step(action)
-                    return result
-                except Exception as e2:
-                    logger.error(f"Error in direct environment step: {e2}")
-                    # Last resort fallback with dummy values
-                    obs = np.zeros(self.env.observation_space.shape)
-                    return obs, 0.0, True, False, {}  # obs, reward, terminated, truncated, info
+                # Handle errors gracefully
+                logger.error(f"Error in CompatibleMonitor step: {e}")
+                # Try to get observation space from env
+                obs_space = getattr(self.env, 'observation_space', None)
+                obs_shape = getattr(obs_space, 'shape', (1,)) if obs_space else (1,)
+                
+                # Return fallback values
+                if len(inspect.signature(self.env.step).parameters) > 1:
+                    # Gymnasium API
+                    return np.zeros(obs_shape), 0.0, True, True, {}
+                else:
+                    # Gym API
+                    return np.zeros(obs_shape), 0.0, True, {}
     
     try:
-        # Use our compatible monitor wrapper
-        return CompatibleMonitor(env, monitor_dir)
+        # Wrap environment with our compatible Monitor
+        wrapped_env = CompatibleMonitor(
+            env=env,
+            filename=folder_name,
+            allow_early_resets=True,
+            info_keywords=('portfolio_value', 'position')
+        )
+        logger.info(f"Environment successfully wrapped with Monitor in {folder_name}")
+        return wrapped_env
     except Exception as e:
-        logger.error(f"Failed to create monitor wrapper: {e}")
-        # Return the unwrapped environment as fallback
-        logger.warning("Returning unwrapped environment without Monitor")
+        # If Monitor wrapping fails, log error and return unwrapped environment
+        logger.error(f"Failed to wrap environment with Monitor: {e}")
+        logger.warning("Continuing without Monitor wrapper")
         return env
 
 def create_dummy_vectorized_env(env_function, n_envs=1):
