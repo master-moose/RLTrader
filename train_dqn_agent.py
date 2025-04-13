@@ -938,117 +938,283 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
         
         # Ensure observation is a numpy array
         if not isinstance(obs, np.ndarray):
-                logger.warning(f"Error delegating to original agent: {e}")
-                # Fall through to our manual implementation
-        
-        # Import MODELS dictionary from finrl with better error handling
-        try:
-            # Try the main path first
-            from finrl.agents.stablebaselines3.models import MODELS
-            logger.info("Imported MODELS dictionary from finrl.agents.stablebaselines3.models")
-        except ImportError:
+            logger.warning(f"Reset returned non-numpy observation of type {type(obs)}")
+            # Try to convert to numpy array
             try:
-                # Try alternate path (newer versions)
-                from finrl.applications.agents.stablebaselines3.models import MODELS
-                logger.info("Imported MODELS dictionary from finrl.applications.agents.stablebaselines3.models")
-            except ImportError:
-                try:
-                    # Last resort for very old versions
-                    from finrl.model.models import MODELS
-                    logger.info("Imported MODELS dictionary from finrl.model.models")
-                except ImportError:
-                    raise ImportError("Could not import MODELS dictionary from any known FinRL paths")
-            
-        # Use the environment directly without patching
-        env = self.env
-        
-        # Add common params for all models
-        model_kwargs.update({
-            "env": env,
-            "verbose": self.verbose,
-            "policy": "MlpPolicy",
-            "policy_kwargs": {"net_arch": self.net_arch},
-        })
-        
-        # Get the model class
-        if model_name not in MODELS:
-            raise NotImplementedError(f"Model {model_name} not supported. Available models: {list(MODELS.keys())}")
-            
-        # Create model instance with original init method but with special handling for env
-        model_class = MODELS[model_name]
-        
-        # Special handling for different model types
-        if model_name.lower() == 'sac':
-            # SAC has different parameters - try to create it directly from Stable-Baselines3
-            try:
-                from stable_baselines3 import SAC
-                logger.info("Creating SAC model directly from stable_baselines3")
-                
-                # Add SAC-specific parameters if not present
-                if 'buffer_size' in model_kwargs and 'replay_buffer_class' not in model_kwargs:
-                    from stable_baselines3.common.buffers import ReplayBuffer
-                    model_kwargs['replay_buffer_class'] = ReplayBuffer
-                
-                # Create the model directly
-                model = SAC(**model_kwargs)
-                return model
-            except Exception as e:
-                logger.warning(f"Failed to create SAC directly, falling back to FinRL approach: {e}")
-                # Fall back to normal approach
-        
-        # Monkey patch the _wrap_env method to disable patching
-        original_wrap_env = model_class._wrap_env if hasattr(model_class, '_wrap_env') else None
-        
-        if original_wrap_env:
-            def no_patch_wrap_env(self, env, verbose=0, monitor_wrapper=True):
-                """Do not apply any patching to the environment"""
-                # Skip the patching completely - return env directly
-                return env
-                
-            # Apply monkey patch
-            model_class._wrap_env = no_patch_wrap_env
-        
-        # Create model
-        try:
-            logger.info(f"Creating {model_name} model with kwargs: {model_kwargs}")
-            model = model_class(**model_kwargs)
-        except TypeError as e:
-            logger.error(f"TypeError creating {model_name} model: {e}")
-            
-            # Special handling for common errors
-            if "unexpected keyword argument" in str(e):
-                # Identify problematic args and remove them
-                problematic_arg = str(e).split("unexpected keyword argument '")[1].split("'")[0]
-                logger.info(f"Removing problematic argument: {problematic_arg}")
-                if problematic_arg in model_kwargs:
-                    del model_kwargs[problematic_arg]
-                    # Try again with cleaned args
-                    model = model_class(**model_kwargs)
-            else:
-                # Log the model parameters and expected signature
-                try:
-                    from inspect import signature
-                    logger.info(f"Expected signature: {signature(model_class.__init__)}")
-                    logger.info(f"Model kwargs: {model_kwargs}")
-                except Exception:
-                    pass
-                raise
-        except Exception as e:
-            logger.error(f"Error creating {model_name} model: {e}")
-            # Log the model parameters and expected signature
-            try:
-                from inspect import signature
-                logger.info(f"Expected signature: {signature(model_class.__init__)}")
-                logger.info(f"Model kwargs: {model_kwargs}")
+                obs = np.array(obs, dtype=np.float32)
             except Exception:
-                pass
-            raise
+                # If conversion fails, return zeros
+                obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+                
+        # Store the actual observation dimension if not already stored
+        if self.actual_state_space is None:
+            self.actual_state_space = len(obs)
+            logger.info(f"First reset - detected actual observation dimension: {self.actual_state_space}")
+                
+            # Update observation space if needed to match the actual dimension
+            if self.actual_state_space != self.observation_space.shape[0]:
+                logger.info(f"Updating observation space from shape {self.observation_space.shape} to ({self.actual_state_space},)")
+                self.observation_space = gymnasium.spaces.Box(
+                    low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
+                )
         
-        # Restore original method
-        if original_wrap_env:
-            model_class._wrap_env = original_wrap_env
+        logger.debug(f"Reset observation shape: {obs.shape if hasattr(obs, 'shape') else 'scalar'}, observation space shape: {self.observation_space.shape}")
+            
+        # Ensure observation has the right shape
+        if len(obs) != self.state_space:
+            logger.warning(f"Observation shape mismatch: got {len(obs)}, expected {self.state_space}")
+            # Pad or truncate the observation to match the expected shape
+            if len(obs) < self.state_space:
+                # Pad with zeros if observation is too short
+                padded_obs = np.zeros(self.state_space, dtype=np.float32)
+                padded_obs[:len(obs)] = obs
+                obs = padded_obs
+                logger.info(f"Padded observation from shape {obs.shape} to {self.state_space}")
+            else:
+                # Truncate if observation is too long
+                obs = obs[:self.state_space]
+                logger.info(f"Truncated observation from shape {len(obs)} to {self.state_space}")
+            
+        # Clip observation values to reasonable range
+        obs = np.clip(obs, -10.0, 10.0)
+            
+        return obs, info
         
-        return model
+    def step(self, action):
+        """Step the environment, with compatibility for both gym and gymnasium APIs."""
+        # Add debug logging for actions every 10000 steps
+        if hasattr(self, 'step_counter'):
+            if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
+                action_type = "sell" if action == 0 else ("hold" if action == 1 else "buy")
+                logger.info(f"Step {self.step_counter}: Taking action {action} ({action_type})")
+                
+        # Additional cooldown enforcement at wrapper level
+        try:
+            # If this is a PatchedStockTradingEnv, check cooldown
+            if hasattr(self.env, '_last_trade_step') and hasattr(self.env, 'current_step') and hasattr(self.env, 'trade_cooldown'):
+                steps_since_last_trade = float('inf')
+                if self.env._last_trade_step is not None:
+                    steps_since_last_trade = self.env.current_step - self.env._last_trade_step
+                
+                # If in cooldown and trying to trade, force a hold action
+                if steps_since_last_trade < self.env.trade_cooldown and action != 1:
+                    logger.warning(f"StockTradingEnvWrapper extra protection: Forcing hold during cooldown ({steps_since_last_trade}/{self.env.trade_cooldown})")
+                    action = 1  # Force hold
+        except Exception as e:
+            # If we encounter any error in the additional protection, log but continue
+            logger.error(f"Error in additional cooldown protection: {e}")
+        
+        # Additional double-check cooldown protection at wrapper level
+        if not hasattr(self, '_last_wrapper_trade_step'):
+            self._last_wrapper_trade_step = None
+            self._wrapper_trade_cooldown = 50  # Much smaller cooldown at wrapper level as additional protection
+            self._wrapper_position_history = []
+        
+        # Check wrapper-level cooldown
+        steps_since_last_wrapper_trade = float('inf')
+        if self._last_wrapper_trade_step is not None:
+            steps_since_last_wrapper_trade = getattr(self, 'step_counter', 0) - self._last_wrapper_trade_step
+            
+            # If in cooldown period and attempting to trade, force hold
+            if steps_since_last_wrapper_trade < self._wrapper_trade_cooldown and action != 1:
+                logger.warning(f"Wrapper emergency cooldown enforcement: Forcing hold ({steps_since_last_wrapper_trade}/{self._wrapper_trade_cooldown})")
+                action = 1
+        
+        try:
+            # Try gymnasium API first
+            result = self.env.step(action)
+            
+            # Handle different return formats
+            if isinstance(result, tuple):
+                if len(result) == 5:  # gymnasium API (obs, reward, terminated, truncated, info)
+                    obs, reward, terminated, truncated, info = result
+                    done = terminated or truncated
+                elif len(result) == 4:  # gym API (obs, reward, done, info)
+                    obs, reward, done, info = result
+                    terminated, truncated = done, False
+                else:
+                    # Unexpected number of return values - use defaults
+                    logger.warning(f"Unexpected number of return values from step: {len(result)}")
+                    obs = result[0] if len(result) > 0 else np.zeros(self.observation_space.shape)
+                    reward = result[1] if len(result) > 1 else 0.0
+                    done = result[2] if len(result) > 2 else False
+                    info = result[3] if len(result) > 3 else {}
+                    terminated, truncated = done, False
+            else:
+                # Handle unexpected return type (should not happen)
+                logger.error(f"Unexpected return type from step: {type(result)}")
+                obs = np.zeros(self.observation_space.shape)
+                reward = 0.0
+                done = True
+                info = {}
+                terminated, truncated = done, False
+        except Exception as e:
+            # If step fails for any reason, return a default observation
+            logger.error(f"Error in environment step: {e}")
+            obs = np.zeros(self.observation_space.shape)
+            reward = 0.0
+            done = True
+            info = {"error": str(e)}
+            terminated, truncated = done, False
+        
+        # Add trading metrics to info dictionary if not already present
+        if isinstance(info, dict):
+            # Ensure action_type is present
+            if 'action_type' not in info:
+                if action == 0:
+                    info['action_type'] = 'sell'
+                elif action == 1:
+                    info['action_type'] = 'hold'
+                elif action == 2:
+                    info['action_type'] = 'buy'
+            
+            # Track our own last trade step to enable wrapper-level cooldown
+            if not hasattr(self, '_last_trade_step'):
+                self._last_trade_step = None
+                
+            # Check for a trade by looking at action_type
+            if info.get('action_type') in ['buy', 'sell'] and info.get('trade_occurred', False):
+                if self._last_trade_step is not None:
+                    steps_since = self.step_counter - self._last_trade_step
+                    if steps_since < 10:  # Rapid trade detection at wrapper level
+                        logger.warning(f"Wrapper detected rapid trade: {steps_since} steps since last trade")
+                        # Apply additional severe penalty
+                        reward -= 30.0
+                        # Force extra cooldown by updating wrapper-level trade step
+                        self._last_wrapper_trade_step = self.step_counter
+                
+                self._last_trade_step = self.step_counter
+                # Also update wrapper-level trade tracking
+                self._last_wrapper_trade_step = self.step_counter
+            
+            # Additional position tracking to detect rapid position changes
+            current_position = info.get('position', 0)
+            if not hasattr(self, '_wrapper_position_history'):
+                self._wrapper_position_history = []
+                self._wrapper_last_position = 0
+            
+            # Check if a trade occurred using the info dictionary
+            trade_occurred = info.get('trade_occurred', False)
+            
+            if hasattr(self, '_wrapper_last_position') and trade_occurred:
+                if self._wrapper_last_position != current_position:
+                    # Position changed - record it
+                    self._wrapper_position_history.append(current_position)
+                    # Only keep last 5 positions
+                    if len(self._wrapper_position_history) > 5:
+                        self._wrapper_position_history = self._wrapper_position_history[-5:]
+                    
+                    # Check for position flip-flopping (e.g., 1, -1, 1, -1)
+                    if len(self._wrapper_position_history) >= 4:
+                        # Check for alternating patterns
+                        alternating = True
+                        for i in range(1, len(self._wrapper_position_history[-4:])):
+                            p1 = self._wrapper_position_history[-i-1]
+                            p2 = self._wrapper_position_history[-i]
+                            if (p1 > 0 and p2 > 0) or (p1 < 0 and p2 < 0):
+                                alternating = False
+                                break
+                        
+                        if alternating and len(set(self._wrapper_position_history[-4:])) > 1:
+                            logger.warning(f"CRITICAL: Wrapper detected position oscillation pattern: {self._wrapper_position_history[-4:]}")
+                            # Apply severe penalty
+                            reward -= 100.0
+                            # Force cooldown for much longer period
+                            self._last_wrapper_trade_step = self.step_counter
+                            # Increase wrapper cooldown for next trades
+                            self._wrapper_trade_cooldown = min(500, self._wrapper_trade_cooldown * 2)
+                    
+                    # Check for same trade price
+                    if hasattr(self, '_last_price'):
+                        current_price = info.get('close', None)
+                        if current_price is not None and self._last_price is not None:
+                            if abs(current_price - self._last_price) < 0.001:
+                                logger.warning(f"CRITICAL: Wrapper detected same price trade: {current_price:.4f}")
+                                # Apply extreme penalty
+                                reward -= 200.0
+                                # Force extended cooldown
+                                self._last_wrapper_trade_step = self.step_counter
+                                self._wrapper_trade_cooldown = min(1000, self._wrapper_trade_cooldown * 3)
+                        
+                        # Update last price
+                        self._last_price = current_price
+            
+            # Store current position for next comparison
+            self._wrapper_last_position = current_position
+            
+            # Add position if available from env or track it ourselves
+            if 'position' not in info:
+                # Try to get position from env
+                position = getattr(self.env, 'position', 0) if hasattr(self.env, 'position') else 0
+                
+                # If the env doesn't track position, we can estimate it based on action
+                if not hasattr(self, 'current_position'):
+                    self.current_position = 0
+                
+                # Update our position estimate based on action
+                if info.get('action_type') == 'buy':
+                    self.current_position = 1
+                elif info.get('action_type') == 'sell':
+                    self.current_position = -1
+                elif info.get('action_type') == 'hold':
+                    # Keep current position
+                    pass
+                
+                # Add position to info
+                info['position'] = getattr(self, 'current_position', 0)
+            
+            # Add price information if available
+            if 'close' not in info and hasattr(self.env, 'data') and hasattr(self.env.data, 'get'):
+                info['close'] = self.env.data.get('close', 0)
+            
+            # Add portfolio value if not present
+            if 'portfolio_value' not in info and hasattr(self.env, 'initial_amount'):
+                # Estimate portfolio value if we can
+                cash = getattr(self.env, 'initial_amount', 100000)
+                position = info.get('position', 0)
+                close_price = info.get('close', 0)
+                
+                # Simple estimate of portfolio value
+                portfolio_value = cash + (position * close_price)
+                info['portfolio_value'] = portfolio_value
+        
+        # Log step observation for debugging (only on some steps to avoid excessive logging)
+        if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
+            self.step_counter = getattr(self, 'step_counter', 0) + 1
+            # Only log every 10000 steps and only if env_id is 0 (first environment)
+            if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
+                logger.info(f"Step {self.step_counter} observation shape: {obs.shape}, observation space shape: {self.observation_space.shape}")
+        
+        # Ensure observation is a numpy array
+        if not isinstance(obs, np.ndarray):
+            logger.warning(f"Step returned non-numpy observation of type {type(obs)}")
+            # Try to convert to numpy array
+            try:
+                obs = np.array(obs, dtype=np.float32)
+            except Exception as e:
+                logger.error(f"Could not convert observation to numpy array: {e}")
+                # Use a default observation
+                obs = np.zeros(self.observation_space.shape)
+        
+        # Ensure proper observation shape
+        if len(obs.shape) == 0:  # Scalar observation
+            obs = np.array([obs], dtype=np.float32)
+            
+        # If observation dimension doesn't match our state space, update the dimension
+        if len(obs) != self.state_space:
+            # Only track this the first time it happens or when it changes
+            if self.actual_state_space is None or self.actual_state_space != len(obs):
+                self.actual_state_space = len(obs)
+                logger.info(f"Step returned observation with different dimension: {self.actual_state_space}")
+                self.observation_space = gymnasium.spaces.Box(
+                    low=-10.0, high=10.0, shape=(self.actual_state_space,), dtype=np.float32
+                )
+        
+        # Clip observation values to reasonable range
+        obs = np.clip(obs, -10.0, 10.0)
+        
+        # Always return in gymnasium format (5-tuple)
+        return obs, reward, terminated, truncated, info
 
 def setup_finrl_import():
     """Setup import for FinRL DRLAgent with version detection"""
