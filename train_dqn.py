@@ -508,7 +508,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
             # Log detailed growth information for debugging at less frequent intervals
-            if current_step % 10000 == 0 or (trade_occurred and current_step % 1000 == 0):
+            if current_step % 50000 == 0 or (trade_occurred and current_step % 5000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
             growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0
             risk_adjusted_reward += growth_reward
