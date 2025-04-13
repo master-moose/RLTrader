@@ -231,6 +231,12 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self._last_trade_price = {}  # Track last trade price per asset
         self.info_buffer = {}  # Buffer for additional info
         
+        # Add feature_dimension attribute (default to 1 if not specified)
+        self.feature_dimension = kwargs.pop('feature_dimension', 1)
+        
+        # Initialize current step counter
+        self.current_step = 0
+        
         super().__init__(*args, **kwargs)
         
         # Log creation of environment
@@ -247,6 +253,9 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         
         # Call parent step method
         next_state, reward, done, info = super().step(actions)
+        
+        # Increment step counter
+        self.current_step += 1
         
         # Update reward based on our custom calculation
         end_total_asset = self.get_total_asset_value()
@@ -291,7 +300,22 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self._last_trade_step = None
         self._last_trade_price = {}
         self.info_buffer = {}
+        self.current_step = 0
         return super().reset()
+    
+    def _calculate_reward(self, begin_total_asset, end_total_asset):
+        """
+        Calculate reward based on change in total asset value
+        
+        Args:
+            begin_total_asset: Asset value at beginning of step
+            end_total_asset: Asset value at end of step
+            
+        Returns:
+            float: Reward value
+        """
+        # Calculate percentage change in asset value
+        return (end_total_asset - begin_total_asset) * self.reward_scaling
         
     def get_total_asset_value(self):
         """
