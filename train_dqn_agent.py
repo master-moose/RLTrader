@@ -1754,7 +1754,8 @@ def train_with_finrl(
             # Debug info
             self.debug_steps = 0
             self.last_debug_output = 0
-            self.debug_frequency = 10000  # Output debug info every 10000 steps
+            self.debug_frequency = 5000  # Reduce logging frequency (was 10000)
+            self.log_flush_frequency = 20000  # Flush logs every 20000 steps
             
             logger.info("TensorboardCallback initialized - Will track trading metrics")
         
@@ -1768,6 +1769,10 @@ def train_with_finrl(
                 if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
                     logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
                 self.last_debug_output = self.debug_steps
+            
+            # Force tensorboard log flushing periodically
+            if hasattr(self.logger, "dump_tabular") and self.debug_steps % self.log_flush_frequency == 0:
+                self.logger.dump_tabular()
             
             # Track step reward
             if hasattr(self, 'locals') and 'rewards' in self.locals:
@@ -1946,6 +1951,10 @@ def train_with_finrl(
     # Create the model
     logger.info(f"Creating {finrl_model.upper()} model with policy_kwargs: {policy_kwargs}")
     try:
+        # Set a higher tensorboard queue size to handle more metrics
+        import os
+        os.environ['STABLE_BASELINES_TENSORBOARD_QUEUE_SIZE'] = '100000'
+        
         model = model_class(
             "MlpPolicy", 
             vec_env, 
