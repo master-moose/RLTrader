@@ -311,15 +311,21 @@ class CryptocurrencyTradingEnv(gym.Env):
                 logger.warning(f"Portfolio value ({self.portfolio_value:.2f}) too close to max, skipping buy")
                 return
                 
-            # Calculate the maximum buy value (limited to 30% of portfolio)
-            max_buy_pct = 0.3
+            # Calculate the maximum buy value with VARIABLE percentage (5-15%) instead of fixed 30%
+            # This prevents the model from always using exactly 30% of portfolio
+            max_buy_pct = min(0.05 + (self.day / 1000) * 0.1, 0.15)  # Scale from 5% to 15% over time
             max_buy_value = min(available_amount, self.portfolio_value * max_buy_pct)
             
+            # Additional check to prevent rapid portfolio growth in early training
+            if self.portfolio_value > self.initial_amount * 1.5 and self.day < 100:
+                # More conservative buying in early stages if portfolio has already grown
+                max_buy_value = min(max_buy_value, self.portfolio_value * 0.05)
+                
             # Calculate max shares to buy with conservative limits
             max_shares = max_buy_value / (price * (1 + self.buy_cost_pct[asset_index]))
             
-            # Apply further conservative limit (max 500 units)
-            max_shares = min(max_shares, 500)
+            # Apply further conservative limit (max 100 units instead of 500)
+            max_shares = min(max_shares, 100)
             
             # Buy shares with minimum purchase size
             min_purchase = self.initial_amount * 0.001  # 0.1% of initial capital
@@ -339,7 +345,7 @@ class CryptocurrencyTradingEnv(gym.Env):
                     purchase_total = price * shares_bought + (self.buy_cost_pct[asset_index] * price * shares_bought)
                 
                 # Update assets owned with safety check
-                new_assets = min(self.assets_owned[asset_index] + shares_bought, 1e3)  # 1000 unit absolute max
+                new_assets = min(self.assets_owned[asset_index] + shares_bought, 1e2)  # 100 unit absolute max (reduced from 1000)
                 if new_assets != self.assets_owned[asset_index] + shares_bought:
                     logger.warning(f"Limiting asset position from {self.assets_owned[asset_index] + shares_bought:.2f} to {new_assets:.2f}")
                     shares_bought = new_assets - self.assets_owned[asset_index]
@@ -351,7 +357,7 @@ class CryptocurrencyTradingEnv(gym.Env):
                 new_portfolio_value = max(0, self.portfolio_value - purchase_total)
                 
                 # Log if significant change
-                if purchase_total / max(1, self.portfolio_value) > 0.3:
+                if purchase_total / max(1, self.portfolio_value) > 0.1:  # Reduced threshold from 0.3 to 0.1
                     logger.warning(f"Buy operation is using {(purchase_total/self.portfolio_value)*100:.1f}% of portfolio")
                     
                 self.portfolio_value = new_portfolio_value
@@ -363,10 +369,15 @@ class CryptocurrencyTradingEnv(gym.Env):
         if self.assets_owned[asset_index] > 0:
             total_value += self.assets_owned[asset_index] * price
             
-        # If total value is more than double initial or asset position is too large, log and reset
-        if total_value > self.initial_amount * 3 or self.assets_owned[asset_index] > 1000:
-            logger.warning(f"Post-trade check: Portfolio value {total_value:.2f} > 3x initial or assets {self.assets_owned[asset_index]:.2f} > 1000")
-            # Don't reset here, let calculate_portfolio_value handle it
+        # If total value is more than 1.5x initial (reduced from 3x) or asset position is too large, log and apply limit
+        if total_value > self.initial_amount * 1.5 or self.assets_owned[asset_index] > 100:  # Reduced from 1000 to 100
+            logger.warning(f"Post-trade check: Portfolio value {total_value:.2f} > 1.5x initial or assets {self.assets_owned[asset_index]:.2f} > 100")
+            
+            # Actually apply a limit here instead of leaving it to calculate_portfolio_value
+            if total_value > self.initial_amount * 1.5:
+                reduction_factor = (self.initial_amount * 1.5) / total_value
+                self.portfolio_value *= reduction_factor
+                self.assets_owned[asset_index] *= reduction_factor
     
     def _calculate_portfolio_value(self):
         """
@@ -386,7 +397,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         original_value = self.portfolio_value
         
         # Start with cash (with safety bound)
-        cash_value = min(max(0, self.portfolio_value), self.max_portfolio_value * 0.8)
+        cash_value = min(max(0, self.portfolio_value), self.max_portfolio_value * 0.6)  # Reduced from 0.8 to 0.6
         if cash_value != self.portfolio_value and abs(cash_value - self.portfolio_value) > 100:
             logger.warning(f"Clipping cash value from {self.portfolio_value} to {cash_value}")
             self.portfolio_value = cash_value
@@ -394,8 +405,8 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Calculate asset value with multiple safety measures
         asset_value = 0
         if self.assets_owned[0] > 0:
-            # Use a very conservative asset limit (1k units max)
-            max_asset_units = 1e3
+            # Use a very conservative asset limit (100 units max - reduced from 1000)
+            max_asset_units = 1e2
             
             # Apply a stricter safety limit to prevent overflow
             original_assets = self.assets_owned[0]
@@ -411,17 +422,17 @@ class CryptocurrencyTradingEnv(gym.Env):
             
             # Detect if asset value is unreasonably large compared to initial amount
             asset_value_ratio = asset_value / self.initial_amount
-            if asset_value_ratio > 10:  # Reduce from 100 to 10
+            if asset_value_ratio > 5:  # Reduce from 10 to 5
                 logger.warning(f"Asset value extremely high: {asset_value_ratio:.2f}x initial amount")
                 # Now actually clip it
-                max_reasonable_value = self.initial_amount * 10
+                max_reasonable_value = self.initial_amount * 5  # Reduced from 10 to 5
                 if asset_value > max_reasonable_value:
                     asset_value = max_reasonable_value
                     # Update assets owned to match the clipped value
                     self.assets_owned[0] = asset_value / price
                 
-            # More conservative value limit (20% of max instead of 40%)
-            max_asset_value = self.max_portfolio_value * 0.2
+            # More conservative value limit (15% of max instead of 20%)
+            max_asset_value = self.max_portfolio_value * 0.15
             if asset_value > max_asset_value:
                 logger.warning(f"Asset value too large: {asset_value:.2f}, clipping to {max_asset_value:.2f}")
                 
@@ -432,8 +443,8 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Calculate total value with stronger safety checks
         total_value = cash_value + asset_value
         
-        # Apply stricter maximum - never allow more than 20x initial amount (reduced from 50x)
-        absolute_max = self.initial_amount * 20
+        # Apply stricter maximum - never allow more than 10x initial amount (reduced from 20x)
+        absolute_max = self.initial_amount * 10
         if total_value > absolute_max:
             logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
             
@@ -457,16 +468,16 @@ class CryptocurrencyTradingEnv(gym.Env):
                 self.portfolio_value = absolute_max
                 total_value = absolute_max
         
-        # Add rate limiting - prevent changes of more than 100% in a single step
+        # Add rate limiting - prevent changes of more than 50% (reduced from 100%) in a single step
         # This is crucial for early training stability
         if original_value > 0 and total_value > 0:
             change_pct = abs(total_value - original_value) / original_value
             
-            # If change is too large (over 100%), limit it
-            if change_pct > 1.0:
-                # If increasing, limit to doubling
+            # If change is too large (over 50%), limit it
+            if change_pct > 0.5:  # Reduced from 1.0 to 0.5
+                # If increasing, limit to 50% growth (instead of doubling)
                 if total_value > original_value:
-                    limited_value = original_value * 2.0
+                    limited_value = original_value * 1.5  # Reduced from 2.0 to 1.5
                     logger.warning(f"Rate limiting portfolio increase: {total_value:.2f} -> {limited_value:.2f}")
                     
                     # Adjust both the portfolio value and asset balance
@@ -483,9 +494,9 @@ class CryptocurrencyTradingEnv(gym.Env):
                     
                     total_value = limited_value
                     
-                # If decreasing, limit to halving
+                # If decreasing, limit to 30% loss (instead of halving)
                 elif total_value < original_value:
-                    limited_value = original_value * 0.5
+                    limited_value = original_value * 0.7  # Changed from 0.5 to 0.7
                     logger.warning(f"Rate limiting portfolio decrease: {total_value:.2f} -> {limited_value:.2f}")
                     
                     # Similar adjustment approach for decreases
@@ -497,6 +508,19 @@ class CryptocurrencyTradingEnv(gym.Env):
                         self.portfolio_value = limited_value
                         
                     total_value = limited_value
+        
+        # Add day-based growth limiting for early training (first 500 steps)
+        if self.day < 500 and total_value > self.initial_amount:
+            # Linear growth cap: allow max 20% increase over initial amount for first 500 steps
+            max_allowed = self.initial_amount * (1.0 + 0.2 * (self.day / 500))
+            if total_value > max_allowed:
+                logger.warning(f"Early training growth limiting: {total_value:.2f} -> {max_allowed:.2f} at day {self.day}")
+                # Scale everything down proportionally
+                scale_factor = max_allowed / total_value
+                if asset_value > 0:
+                    self.assets_owned[0] *= scale_factor
+                self.portfolio_value = max_allowed - (asset_value * scale_factor)
+                total_value = max_allowed
         
         # Final sanity check for numerical stability
         if not np.isfinite(total_value) or total_value <= 0:

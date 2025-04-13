@@ -1,16 +1,16 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-DQN and PPO Agent Training for Cryptocurrency Trading
+DQN, PPO, A2C, and SAC Agent Training for Cryptocurrency Trading
 
-This script trains DQN and PPO agents for cryptocurrency trading using parallel environments
+This script trains reinforcement learning agents for cryptocurrency trading using parallel environments
 with safeguards against rapid trading and action oscillation issues.
 
 Ensures compatibility with:
-- FinRL 0.3.7+
-- Gymnasium and Gym
-- Stable Baselines 3
+- StableBaselines3
+- Gymnasium 0.28+
+- PyTorch 2.0+
 """
 
 import os
@@ -22,12 +22,12 @@ import random
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-import gymnasium
+import json
+import gc
 import traceback
 from gymnasium import spaces
 from gymnasium.wrappers import TimeLimit
-from stable_baselines3 import DQN, PPO, A2C
+from stable_baselines3 import DQN, PPO, A2C, SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
@@ -42,7 +42,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import datetime
 import matplotlib
-matplotlib.use('Agg')  # Set non-interactive backend for server environments
+matplotlib.use('Agg')  # Use non-interactive backend
 
 # Set project root to path
 project_root = str(Path(__file__).parent)
@@ -780,7 +780,7 @@ def setup_logging(log_dir=None):
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Train DQN or PPO agent for cryptocurrency trading")
+    parser = argparse.ArgumentParser(description="Train DQN, PPO, A2C, or SAC agent for cryptocurrency trading")
     
     # Training parameters
     parser.add_argument("--timesteps", type=int, default=1000000, help="Number of timesteps for training")
@@ -791,7 +791,7 @@ def parse_args():
     
     # Model parameters
     parser.add_argument("--finrl_model", type=str, default="ppo", 
-                        choices=["ppo", "a2c", "dqn"], help="Type of RL model to use")
+                        choices=["ppo", "a2c", "dqn", "sac"], help="Type of RL model to use")
     parser.add_argument("--use_finrl", action="store_true", help="Use FinRL library for training")
     parser.add_argument("--lstm_model_path", type=str, default=None, 
                         help="Path to pre-trained LSTM model for state representation")
@@ -814,13 +814,13 @@ def parse_args():
     parser.add_argument("--num_envs_per_worker", type=int, default=1, 
                        help="Number of environments per worker")
     
-    # PPO-specific parameters
+    # PPO/A2C-specific parameters
     parser.add_argument("--n_steps", type=int, default=2048, help="Number of steps per update")
     parser.add_argument("--ent_coef", type=float, default=0.01, help="Entropy coefficient")
     parser.add_argument("--n_epochs", type=int, default=10, help="Number of epochs per update")
     parser.add_argument("--clip_range", type=float, default=0.2, help="PPO clip range")
     
-    # DQN-specific parameters
+    # DQN/SAC-specific parameters
     parser.add_argument("--buffer_size", type=int, default=100000, help="Replay buffer size")
     parser.add_argument("--exploration_fraction", type=float, default=0.1, 
                        help="Fraction of training time for exploration")
@@ -1187,6 +1187,15 @@ def train_ppo(env, args):
     def lr_schedule(remaining_progress):
         return learning_rate * remaining_progress  # Linear schedule
     
+    # Force CPU for MlpPolicy to avoid the GPU utilization warning
+    # Only use GPU if specifically requested via args.device and not auto-detected
+    device = "cpu"
+    if args.device == "cuda" and torch.cuda.is_available() and "--device=cuda" in sys.argv:
+        logger.info("Using CUDA as explicitly requested via --device=cuda")
+        device = "cuda"
+    else:
+        logger.info("Using CPU for PPO with MlpPolicy as recommended for better performance")
+    
     logger.info(f"Creating PPO model with n_steps={n_steps}, batch_size={batch_size}")
     model = PPO(
         "MlpPolicy",
@@ -1199,7 +1208,7 @@ def train_ppo(env, args):
         clip_range=0.2,
         verbose=1 if args.verbose else 0,
         tensorboard_log=tensorboard_log_dir,
-        device=args.device
+        device=device
     )
     
     # Train model with standard approach
@@ -1220,6 +1229,191 @@ def train_ppo(env, args):
         
     except Exception as e:
         logger.error(f"Error during PPO training: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def train_a2c(env, args):
+    """Train an A2C agent"""
+    logger.info("Starting A2C training...")
+    
+    # Create directories for checkpoints and logs
+    checkpoint_dir = os.path.join('models', 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Setup tensorboard logging
+    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_log_dir = os.path.join("tensorboard_log", f"A2C_{current_time}")
+    
+    # Set up standard callbacks
+    callbacks = []
+    
+    # Add checkpoint callback to save models periodically
+    checkpoint_callback = CheckpointCallback(
+        save_freq=50000,
+        save_path=checkpoint_dir,
+        name_prefix="a2c_model",
+        save_vecnormalize=True
+    )
+    callbacks.append(checkpoint_callback)
+    
+    # Add tensorboard callback for logging
+    tensorboard_callback = TensorboardCallback()
+    callbacks.append(tensorboard_callback)
+    
+    # Combine callbacks
+    callback = CallbackList(callbacks)
+    
+    # Create model with appropriate parameters for stability
+    # Cap learning rate for stability
+    learning_rate = min(0.0007, args.learning_rate)
+    if learning_rate != args.learning_rate:
+        logger.warning(f"Capped learning rate from {args.learning_rate} to {learning_rate} for A2C training stability")
+    
+    # Learning rate schedule for stability
+    def lr_schedule(remaining_progress):
+        return learning_rate * remaining_progress  # Linear schedule
+    
+    # Force CPU for MlpPolicy to avoid the GPU utilization warning, similar to PPO
+    device = "cpu"
+    if args.device == "cuda" and torch.cuda.is_available() and "--device=cuda" in sys.argv:
+        logger.info("Using CUDA as explicitly requested via --device=cuda")
+        device = "cuda"
+    else:
+        logger.info("Using CPU for A2C with MlpPolicy as recommended for better performance")
+    
+    logger.info(f"Creating A2C model with n_steps={args.n_steps}")
+    from stable_baselines3 import A2C
+    model = A2C(
+        "MlpPolicy",
+        env,
+        learning_rate=lr_schedule,
+        n_steps=args.n_steps,
+        gamma=args.gamma,
+        gae_lambda=0.95,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        use_rms_prop=True,  # Use RMSProp optimizer instead of Adam for A2C
+        rms_prop_eps=1e-5,
+        normalize_advantage=True,
+        verbose=1 if args.verbose else 0,
+        tensorboard_log=tensorboard_log_dir,
+        device=device
+    )
+    
+    # Train model with standard approach
+    try:
+        logger.info(f"Training A2C model for {args.timesteps} timesteps...")
+        model.learn(
+            total_timesteps=args.timesteps,
+            callback=callback,
+            tb_log_name="a2c_run"
+        )
+        
+        # Save trained model
+        model_save_path = os.path.join('models', f"a2c_model_{int(time.time())}.zip")
+        model.save(model_save_path)
+        logger.info(f"Model saved to {model_save_path}")
+        
+        return model
+        
+    except Exception as e:
+        logger.error(f"Error during A2C training: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def train_sac(env, args):
+    """Train a Soft Actor-Critic (SAC) agent"""
+    logger.info("Starting SAC training...")
+    
+    # Create directories for checkpoints and logs
+    checkpoint_dir = os.path.join('models', 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Setup tensorboard logging
+    current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_log_dir = os.path.join("tensorboard_log", f"SAC_{current_time}")
+    
+    # Set up standard callbacks
+    callbacks = []
+    
+    # Add checkpoint callback to save models periodically
+    checkpoint_callback = CheckpointCallback(
+        save_freq=50000,
+        save_path=checkpoint_dir,
+        name_prefix="sac_model",
+        save_vecnormalize=True
+    )
+    callbacks.append(checkpoint_callback)
+    
+    # Add tensorboard callback for logging
+    tensorboard_callback = TensorboardCallback()
+    callbacks.append(tensorboard_callback)
+    
+    # Combine callbacks
+    callback = CallbackList(callbacks)
+    
+    # Cap learning rate for stability
+    learning_rate = min(0.0003, args.learning_rate)
+    if learning_rate != args.learning_rate:
+        logger.warning(f"Capped learning rate from {args.learning_rate} to {learning_rate} for SAC training stability")
+    
+    # SAC can effectively use GPU as it doesn't have the same issues as PPO/A2C with MlpPolicy
+    device = args.device
+    
+    logger.info(f"Creating SAC model with buffer_size={args.buffer_size}, batch_size={args.batch_size}")
+    
+    # Import only if needed to avoid dependency issues if not installed
+    from stable_baselines3 import SAC
+    
+    # Create SAC-specific policy_kwargs
+    policy_kwargs = {
+        'net_arch': {
+            'pi': [256, 256],  # Actor network architecture
+            'qf': [256, 256]   # Critic network architecture
+        }
+    }
+    
+    model = SAC(
+        "MlpPolicy",
+        env,
+        learning_rate=learning_rate,
+        buffer_size=args.buffer_size,
+        learning_starts=1000,  # Start learning after 1000 steps
+        batch_size=args.batch_size,
+        gamma=args.gamma,
+        tau=0.005,  # Target network update rate (soft update)
+        ent_coef='auto',  # Automatic entropy tuning
+        target_update_interval=1,
+        gradient_steps=1,
+        train_freq=1,  # Update the policy every step
+        use_sde=False,  # No state-dependent exploration
+        policy_kwargs=policy_kwargs,
+        verbose=1 if args.verbose else 0,
+        tensorboard_log=tensorboard_log_dir,
+        device=device
+    )
+    
+    # Train model
+    try:
+        logger.info(f"Training SAC model for {args.timesteps} timesteps...")
+        model.learn(
+            total_timesteps=args.timesteps,
+            callback=callback,
+            tb_log_name="sac_run"
+        )
+        
+        # Save trained model
+        model_save_path = os.path.join('models', f"sac_model_{int(time.time())}.zip")
+        model.save(model_save_path)
+        logger.info(f"Model saved to {model_save_path}")
+        
+        return model
+        
+    except Exception as e:
+        logger.error(f"Error during SAC training: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -1297,28 +1491,30 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
         
 
 def main():
-    """Main training function"""
+    """Main entry point"""
     # Parse arguments
     args = parse_args()
     
-    # Set up logging
+    # Setup logging
     log_path = setup_logging()
     logger.info(f"Log file created at: {log_path}")
     
     # Log environment information
     logger.info(f"Python version: {sys.version}")
     logger.info(f"PyTorch version: {torch.__version__}")
-    logger.info(f"Gym/Gymnasium version: {gymnasium.__version__}")
     logger.info(f"Number of available CPUs: {psutil.cpu_count(logical=False)}")
     if torch.cuda.is_available():
         logger.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
     else:
         logger.info("CUDA not available, using CPU")
     
-    # Set random seeds if provided
+    # Set random seed if provided
     if args.seed is not None:
-        set_random_seed(args.seed)
         logger.info(f"Setting random seed to: {args.seed}")
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(args.seed)
     
     # Log key parameters
     logger.info(f"Training with model: {args.finrl_model}")
@@ -1334,49 +1530,59 @@ def main():
     os.makedirs('tensorboard_log', exist_ok=True)
     
     # Load market data
-    market_data = load_and_preprocess_market_data(args)
-    
-    # Create vectorized environment
-    total_envs = args.num_workers * args.num_envs_per_worker
-    logger.info(f"Creating {total_envs} parallel environments")
-    vec_env = create_vec_env(market_data, args, num_envs=total_envs)
-    
-    # Load pre-trained LSTM model if provided
-    lstm_model = None
-    if args.lstm_model_path:
-        lstm_model = load_lstm_model(args.lstm_model_path)
-    
-    # Train the specified model
-    trained_model = None
+    df = load_and_preprocess_market_data(args)
     
     try:
+        # Create vectorized environment
+        total_envs = args.num_workers * args.num_envs_per_worker
+        logger.info(f"Creating {total_envs} parallel environments")
+        vec_env = create_vec_env(df, args, num_envs=total_envs)
+        
+        # Load LSTM model if path provided
+        lstm_model = None
+        if args.lstm_model_path:
+            lstm_model = load_lstm_model(args.lstm_model_path)
+        
+        # Train the specified model
+        trained_model = None
+        
+        # Standard SB3 training
         if args.finrl_model.lower() == "dqn":
             trained_model = train_dqn(vec_env, args)
         elif args.finrl_model.lower() == "ppo":
             trained_model = train_ppo(vec_env, args)
         elif args.finrl_model.lower() == "a2c":
             trained_model = train_a2c(vec_env, args)
+        elif args.finrl_model.lower() == "sac":
+            trained_model = train_sac(vec_env, args)
         else:
             logger.error(f"Unknown model type: {args.finrl_model}")
             return
         
         logger.info("Training completed successfully")
         
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user.")
     except Exception as e:
         logger.error(f"Error during training: {str(e)}")
-        import traceback
         logger.error(traceback.format_exc())
-    
     finally:
-        # Clean up resources
-        vec_env.close()
-        logger.info("Environment resources cleaned up")
-        
         # Save any final models if training was interrupted
         if trained_model is not None:
             final_save_path = os.path.join('models', f"final_{args.finrl_model}_model")
             trained_model.save(final_save_path)
             logger.info(f"Final model saved to {final_save_path}")
+            
+        # Clean up
+        try:
+            if 'vec_env' in locals():
+                vec_env.close()
+                logger.info("Environment resources cleaned up")
+        except Exception as cleanup_error:
+            logger.warning(f"Error during cleanup: {cleanup_error}")
+        
+        # Log completion
+        logger.info("Script execution completed.")
 
 
 if __name__ == "__main__":
