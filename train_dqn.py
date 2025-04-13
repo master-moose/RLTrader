@@ -1431,7 +1431,7 @@ def main():
     parser.add_argument("--data_path", type=str, default="data/crypto_data.csv",
                         help="Path to the data file (default: data/crypto_data.csv)")
     parser.add_argument("--data_key", type=str, default=None,
-                        help="Specific key/group to use when HDF5 file contains multiple datasets")
+                        help="Key for HDF5 file (default: '/15m' for synthetic data)")
     parser.add_argument("--symbol", type=str, default="BTC/USDT",
                         help="Trading symbol (default: BTC/USDT)")
     
@@ -1509,8 +1509,32 @@ def main():
                 logger.info(f"Loading HDF5 with key: {args.data_key}")
                 data = pd.read_hdf(args.data_path, key=args.data_key)
             else:
-                logger.info("Loading HDF5 without specified key")
-                data = pd.read_hdf(args.data_path)
+                # Default to '15m' timeframe if no key specified for synthetic data
+                try:
+                    # Try to get a list of keys from the file
+                    with pd.HDFStore(args.data_path, mode='r') as store:
+                        keys = store.keys()
+                    
+                    # If there are multiple keys and no specific key provided
+                    if len(keys) > 1:
+                        # Default to '15m' timeframe
+                        default_key = '/15m'
+                        if default_key in keys:
+                            logger.info(f"Multiple datasets found. Defaulting to '{default_key}' timeframe")
+                            data = pd.read_hdf(args.data_path, key=default_key)
+                        else:
+                            # If '15m' isn't available, use the first key
+                            selected_key = keys[0]
+                            logger.info(f"Multiple datasets found, '15m' not available. Using {selected_key}")
+                            data = pd.read_hdf(args.data_path, key=selected_key)
+                    else:
+                        # Only one dataset in the file
+                        logger.info("Loading the only HDF5 dataset available")
+                        data = pd.read_hdf(args.data_path)
+                except Exception as e:
+                    logger.error(f"Error examining HDF5 structure: {e}")
+                    logger.error("Please specify a data_key (e.g., --data_key /15m)")
+                    return
         elif file_ext == '.csv':
             # Load CSV file
             data = pd.read_csv(args.data_path)
