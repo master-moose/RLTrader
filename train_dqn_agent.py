@@ -1960,7 +1960,7 @@ def train_with_finrl(
             vec_env, 
             learning_rate=getattr(args, 'learning_rate', 0.0003),
             gamma=getattr(args, 'gamma', 0.99),
-            verbose=1,
+            verbose=2,  # Change from 1 to 2 for more detailed logging
             policy_kwargs=policy_kwargs,
             tensorboard_log="./tensorboard_logs"
         )
