@@ -1302,7 +1302,7 @@ class ResourceCheckCallback(BaseCallback):
 
 
 def check_resources():
-    """Check and log system resources"""
+    """Check system resources and print their status"""
     # Memory usage
     memory = psutil.virtual_memory()
     logger.info(f"Memory: {memory.percent}% used, {memory.available / (1024**3):.1f}GB available")
@@ -1311,7 +1311,7 @@ def check_resources():
     cpu_percent = psutil.cpu_percent(interval=1)
     logger.info(f"CPU: {cpu_percent}% used")
     
-    # GPU info if available
+    # GPU usage (if available)
     if torch.cuda.is_available():
         try:
             gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)  # in GB
@@ -1321,9 +1321,67 @@ def check_resources():
             logger.warning(f"Error checking GPU resources: {e}")
 
 
+def update_observation_spaces_recursively(env, target_dim, logger):
+    """
+    Recursively update observation spaces in a potentially nested environment.
+    
+    This function traverses through all layers of a nested VecEnv environment
+    and updates the observation space and running mean/std dimension to match
+    the target dimension.
+    
+    Args:
+        env: The environment to update
+        target_dim: The target dimension for the observation space
+        logger: Logger for debugging information
+    """
+    if env is None:
+        return
+        
+    # Update this environment's observation space if it exists
+    if hasattr(env, 'observation_space'):
+        current_shape = env.observation_space.shape
+        if len(current_shape) == 1 and current_shape[0] != target_dim:
+            logger.info(f"Updating observation space from {current_shape} to {(target_dim,)}")
+            env.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, 
+                shape=(target_dim,), 
+                dtype=np.float32
+            )
+    
+    # Update running mean/std if it exists
+    if hasattr(env, 'obs_rms') and hasattr(env.obs_rms, 'mean'):
+        if len(env.obs_rms.mean) != target_dim:
+            logger.info(f"Updating obs_rms from dim {len(env.obs_rms.mean)} to {target_dim}")
+            env.obs_rms.mean = np.zeros(target_dim)
+            env.obs_rms.var = np.ones(target_dim)
+            env.obs_rms.count = 0
+    
+    # Check for common VecEnv attributes that might contain nested environments
+    for attr_name in ['venv', 'env', 'envs', 'unwrapped']:
+        if hasattr(env, attr_name):
+            attr = getattr(env, attr_name)
+            
+            # Handle different types of nested environments
+            if isinstance(attr, list):
+                # For environment lists (e.g., SubprocVecEnv)
+                for nested_env in attr:
+                    update_observation_spaces_recursively(nested_env, target_dim, logger)
+            else:
+                # For single nested environment
+                update_observation_spaces_recursively(attr, target_dim, logger)
+
+
 def train_dqn(env, args, callbacks=None):
     """
-    Train a DQN model for trading.
+    Train a DQN agent for cryptocurrency trading
+    
+    Args:
+        env: Training environment
+        args: Command line arguments
+        callbacks: List of callbacks for training
+        
+    Returns:
+        Trained DQN model
     """
     logger.info("Setting up DQN model with parameters from command line")
     
@@ -1596,17 +1654,11 @@ def train_a2c(env, args, callbacks=None):
             }
             logger.info("Successfully configured LSTM feature extractor")
             
-            # If we're using a VecNormalize wrapper, we need to update its observation space
-            # to match the output dimension of the LSTM feature extractor
-            if hasattr(env, 'observation_space') and hasattr(env, 'obs_rms'):
-                logger.info(f"Updating VecNormalize observation space from {env.observation_space.shape} to {(features_dim,)}")
-                # Update the observation space to match the LSTM output dimension
-                env.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(features_dim,), dtype=np.float32)
-                # Reset the running mean and std with the new dimension
-                env.obs_rms.mean = np.zeros(features_dim)
-                env.obs_rms.var = np.ones(features_dim)
-                env.obs_rms.count = 0
-                logger.info(f"Updated observation space to: {env.observation_space.shape}")
+            # Update all observation spaces in the environment to match the LSTM feature dimension
+            logger.info(f"Updating all observation spaces to match feature dimension {features_dim}")
+            update_observation_spaces_recursively(env, features_dim, logger)
+            logger.info("Completed updating observation spaces in all environment wrappers")
+            
         except Exception as e:
             logger.error(f"Error setting up LSTM feature extractor: {e}")
             logger.error(traceback.format_exc())
