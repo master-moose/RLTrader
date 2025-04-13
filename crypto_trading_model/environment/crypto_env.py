@@ -226,7 +226,8 @@ class CryptocurrencyTradingEnv(gym.Env):
     
     def _trade(self, action_type):
         """
-        Execute a trade based on the action type.
+        Execute a trade based on the action type with enhanced safety measures
+        to prevent numerical issues and extreme trades.
         
         Parameters:
             action_type: Type of action (0: sell, 1: hold, 2: buy)
@@ -248,45 +249,124 @@ class CryptocurrencyTradingEnv(gym.Env):
             logger.warning(f"Invalid price value detected in _trade: {price}, using 1.0")
             price = 1.0
         
-        # Execute the order based on action
+        # Store original portfolio state for reference
+        original_portfolio_value = self.portfolio_value
+        original_assets_owned = self.assets_owned[asset_index]
+        
+        # Execute the order based on action, with enhanced risk management
         if action_type == 0:  # Sell
+            # Only sell if we actually own assets
             if self.assets_owned[asset_index] > 0:
+                # Calculate sell amount with position sizing
+                # Never sell more than what we have and apply gradual position sizing
+                # Sell at most 50% of position to prevent extreme value changes
+                max_sell_pct = 0.5
+                sell_amount = min(
+                    self.assets_owned[asset_index], 
+                    self.assets_owned[asset_index] * max_sell_pct
+                )
+                
+                # Apply a minimum sell amount to avoid dust
+                min_sell_value = self.initial_amount * 0.001  # 0.1% of initial capital
+                if sell_amount * price < min_sell_value and self.assets_owned[asset_index] * price > min_sell_value:
+                    sell_amount = min_sell_value / price
+                
                 # Calculate transaction cost with safety
                 sell_cost = min(
-                    self.sell_cost_pct[asset_index] * price * self.assets_owned[asset_index],
-                    self.portfolio_value * 0.1  # Limit cost to 10% of portfolio
+                    self.sell_cost_pct[asset_index] * price * sell_amount,
+                    original_portfolio_value * 0.01  # Limit cost to 1% of portfolio
                 )
                 
                 # Update portfolio with safety limits
-                sale_value = price * self.assets_owned[asset_index] - sell_cost
-                self.portfolio_value = min(self.portfolio_value + sale_value, self.max_portfolio_value)
+                sale_value = price * sell_amount - sell_cost
+                
+                # Don't allow sale value to exceed reasonable limits
+                if sale_value > original_portfolio_value:
+                    logger.warning(f"Sale value ({sale_value:.2f}) exceeds portfolio value ({original_portfolio_value:.2f}), limiting")
+                    sale_value = original_portfolio_value * 0.5
+                    sell_amount = sale_value / price
+                
+                # Update portfolio value with rate limiting
+                new_portfolio_value = min(self.portfolio_value + sale_value, self.max_portfolio_value * 0.8)
+                
+                # Log if significant change
+                if abs(new_portfolio_value - self.portfolio_value) / max(1, self.portfolio_value) > 0.5:
+                    logger.warning(f"Sell operation resulted in large portfolio change: {self.portfolio_value:.2f} -> {new_portfolio_value:.2f}")
+                
+                self.portfolio_value = new_portfolio_value
                 self.cost += sell_cost
                 self.trades += 1
-                self.assets_owned[asset_index] = 0
+                
+                # Update assets owned with safety check
+                self.assets_owned[asset_index] -= sell_amount
+                if self.assets_owned[asset_index] < 0.00001:
+                    self.assets_owned[asset_index] = 0  # Clean up dust
                 
         elif action_type == 2:  # Buy
-            # Calculate available cash
-            available_amount = max(0, min(self.portfolio_value, self.max_portfolio_value))
+            # Calculate available cash with safety margin
+            available_amount = max(0, min(self.portfolio_value * 0.9, self.max_portfolio_value * 0.2))
             
-            # Safety check: don't allow purchases if portfolio is already at maximum
-            if self.portfolio_value >= self.max_portfolio_value * 0.9:
+            # Safety check: don't allow purchases if portfolio is already near maximum
+            if self.portfolio_value >= self.max_portfolio_value * 0.7:
+                logger.warning(f"Portfolio value ({self.portfolio_value:.2f}) too close to max, skipping buy")
                 return
                 
-            # Calculate max shares to buy with available cash (limit to prevent extreme values)
-            max_possible_shares = available_amount // (price * (1 + self.buy_cost_pct[asset_index]))
-            max_shares = min(max_possible_shares, 1e5)  # Limit to 100,000 units
+            # Calculate the maximum buy value (limited to 30% of portfolio)
+            max_buy_pct = 0.3
+            max_buy_value = min(available_amount, self.portfolio_value * max_buy_pct)
             
-            # Buy shares
-            if max_shares > 0:
+            # Calculate max shares to buy with conservative limits
+            max_shares = max_buy_value / (price * (1 + self.buy_cost_pct[asset_index]))
+            
+            # Apply further conservative limit (max 500 units)
+            max_shares = min(max_shares, 500)
+            
+            # Buy shares with minimum purchase size
+            min_purchase = self.initial_amount * 0.001  # 0.1% of initial capital
+            if max_shares > 0 and max_shares * price >= min_purchase:
                 shares_bought = max_shares
                 buy_cost = self.buy_cost_pct[asset_index] * price * shares_bought
                 
-                # Update with safety checks
-                self.assets_owned[asset_index] = min(self.assets_owned[asset_index] + shares_bought, 1e6)
+                # Calculate total purchase amount with safety checks
                 purchase_total = price * shares_bought + buy_cost
-                self.portfolio_value = max(0, self.portfolio_value - purchase_total)
+                
+                # Ensure purchase doesn't exceed available funds
+                if purchase_total > self.portfolio_value:
+                    logger.warning(f"Purchase amount ({purchase_total:.2f}) exceeds available funds ({self.portfolio_value:.2f}), scaling down")
+                    # Scale down the purchase
+                    scale_factor = (self.portfolio_value * 0.9) / purchase_total
+                    shares_bought *= scale_factor
+                    purchase_total = price * shares_bought + (self.buy_cost_pct[asset_index] * price * shares_bought)
+                
+                # Update assets owned with safety check
+                new_assets = min(self.assets_owned[asset_index] + shares_bought, 1e3)  # 1000 unit absolute max
+                if new_assets != self.assets_owned[asset_index] + shares_bought:
+                    logger.warning(f"Limiting asset position from {self.assets_owned[asset_index] + shares_bought:.2f} to {new_assets:.2f}")
+                    shares_bought = new_assets - self.assets_owned[asset_index]
+                    purchase_total = price * shares_bought + (self.buy_cost_pct[asset_index] * price * shares_bought)
+                
+                self.assets_owned[asset_index] = new_assets
+                
+                # Update portfolio value with rate limiting
+                new_portfolio_value = max(0, self.portfolio_value - purchase_total)
+                
+                # Log if significant change
+                if purchase_total / max(1, self.portfolio_value) > 0.3:
+                    logger.warning(f"Buy operation is using {(purchase_total/self.portfolio_value)*100:.1f}% of portfolio")
+                    
+                self.portfolio_value = new_portfolio_value
                 self.cost += buy_cost
                 self.trades += 1
+                
+        # Final check to ensure we haven't created an impossible state
+        total_value = self.portfolio_value
+        if self.assets_owned[asset_index] > 0:
+            total_value += self.assets_owned[asset_index] * price
+            
+        # If total value is more than double initial or asset position is too large, log and reset
+        if total_value > self.initial_amount * 3 or self.assets_owned[asset_index] > 1000:
+            logger.warning(f"Post-trade check: Portfolio value {total_value:.2f} > 3x initial or assets {self.assets_owned[asset_index]:.2f} > 1000")
+            # Don't reset here, let calculate_portfolio_value handle it
     
     def _calculate_portfolio_value(self):
         """
@@ -314,8 +394,8 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Calculate asset value with multiple safety measures
         asset_value = 0
         if self.assets_owned[0] > 0:
-            # Use a much more conservative asset limit (10k units max)
-            max_asset_units = 1e4
+            # Use a very conservative asset limit (1k units max)
+            max_asset_units = 1e3
             
             # Apply a stricter safety limit to prevent overflow
             original_assets = self.assets_owned[0]
@@ -331,11 +411,17 @@ class CryptocurrencyTradingEnv(gym.Env):
             
             # Detect if asset value is unreasonably large compared to initial amount
             asset_value_ratio = asset_value / self.initial_amount
-            if asset_value_ratio > 100:
+            if asset_value_ratio > 10:  # Reduce from 100 to 10
                 logger.warning(f"Asset value extremely high: {asset_value_ratio:.2f}x initial amount")
+                # Now actually clip it
+                max_reasonable_value = self.initial_amount * 10
+                if asset_value > max_reasonable_value:
+                    asset_value = max_reasonable_value
+                    # Update assets owned to match the clipped value
+                    self.assets_owned[0] = asset_value / price
                 
-            # More conservative value limit (40% of max)
-            max_asset_value = self.max_portfolio_value * 0.4
+            # More conservative value limit (20% of max instead of 40%)
+            max_asset_value = self.max_portfolio_value * 0.2
             if asset_value > max_asset_value:
                 logger.warning(f"Asset value too large: {asset_value:.2f}, clipping to {max_asset_value:.2f}")
                 
@@ -346,8 +432,8 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Calculate total value with stronger safety checks
         total_value = cash_value + asset_value
         
-        # Apply stricter maximum - never allow more than 50x initial amount
-        absolute_max = self.initial_amount * 50
+        # Apply stricter maximum - never allow more than 20x initial amount (reduced from 50x)
+        absolute_max = self.initial_amount * 20
         if total_value > absolute_max:
             logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
             
@@ -370,6 +456,47 @@ class CryptocurrencyTradingEnv(gym.Env):
                 # If no assets, just clip cash
                 self.portfolio_value = absolute_max
                 total_value = absolute_max
+        
+        # Add rate limiting - prevent changes of more than 100% in a single step
+        # This is crucial for early training stability
+        if original_value > 0 and total_value > 0:
+            change_pct = abs(total_value - original_value) / original_value
+            
+            # If change is too large (over 100%), limit it
+            if change_pct > 1.0:
+                # If increasing, limit to doubling
+                if total_value > original_value:
+                    limited_value = original_value * 2.0
+                    logger.warning(f"Rate limiting portfolio increase: {total_value:.2f} -> {limited_value:.2f}")
+                    
+                    # Adjust both the portfolio value and asset balance
+                    if asset_value > 0:
+                        # Proportionally adjust
+                        reduction_ratio = limited_value / total_value
+                        # Apply to assets
+                        self.assets_owned[0] *= reduction_ratio
+                        # Reset portfolio value (cash component)
+                        self.portfolio_value = limited_value - (asset_value * reduction_ratio)
+                    else:
+                        # Just cash, simpler adjustment
+                        self.portfolio_value = limited_value
+                    
+                    total_value = limited_value
+                    
+                # If decreasing, limit to halving
+                elif total_value < original_value:
+                    limited_value = original_value * 0.5
+                    logger.warning(f"Rate limiting portfolio decrease: {total_value:.2f} -> {limited_value:.2f}")
+                    
+                    # Similar adjustment approach for decreases
+                    if asset_value > 0:
+                        scale_up_ratio = limited_value / total_value
+                        self.assets_owned[0] *= scale_up_ratio
+                        self.portfolio_value = limited_value - (asset_value * scale_up_ratio)
+                    else:
+                        self.portfolio_value = limited_value
+                        
+                    total_value = limited_value
         
         # Final sanity check for numerical stability
         if not np.isfinite(total_value) or total_value <= 0:

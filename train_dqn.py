@@ -259,23 +259,55 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         elif hasattr(self.env, 'current_price'):
             current_price = self.env.current_price
             
+        # Add strict price movement requirement for early trading
+        # Only allow trading when price has moved significantly from last trade
+        strict_price_requirement = False
+        if current_price is not None and self.last_trade_price is not None:
+            price_change_pct = abs(current_price - self.last_trade_price) / self.last_trade_price
+            
+            # Require larger price movements early in training
+            required_movement = self.min_profit_threshold
+            if current_step < 1000:  # Very early in training
+                required_movement = 0.01  # Require 1% price movement
+            elif current_step < 10000:  # Early in training
+                required_movement = 0.005  # Require 0.5% price movement
+                
+            # If price hasn't moved enough, enforce a hold
+            if price_change_pct < required_movement and action != 1:
+                strict_price_requirement = True
+                logger.debug(f"Enforcing hold: price movement {price_change_pct:.4f}% < required {required_movement:.4f}%")
+                action = 1  # Force hold
+            
         # Check for min profit threshold violations
         min_profit_violation = False
         if current_price is not None:
             # If trying to sell, check if price is higher than last buy
             if action == 0 and self.last_buy_price is not None:
                 profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
-                if profit_pct < self.min_profit_threshold:
+                
+                # Increase profit threshold early in training
+                min_profit = self.min_profit_threshold
+                if current_step < 5000:
+                    min_profit = 0.01  # Require at least 1% profit in early training
+                
+                if profit_pct < min_profit:
                     min_profit_violation = True
                     logger.debug(f"Prevented selling at loss/small profit: {profit_pct:.4f}% at step {current_step}")
             
             # If trying to buy, check if price is lower than last sell
             elif action == 2 and self.last_sell_price is not None:
                 discount_pct = (self.last_sell_price - current_price) / self.last_sell_price
-                if discount_pct < self.min_profit_threshold:
+                
+                # Increase discount threshold early in training
+                min_discount = self.min_profit_threshold
+                if current_step < 5000:
+                    min_discount = 0.01  # Require at least 1% discount in early training
+                
+                if discount_pct < min_discount:
                     min_profit_violation = True
                     logger.debug(f"Prevented buying too close to last sell: -{discount_pct:.4f}% at step {current_step}")
         
+        # Handle cooldown violations
         if in_cooldown and action != 1:  # Not a hold action
             # Agent is trying to trade during cooldown
             attempted_trade_during_cooldown = True
@@ -287,8 +319,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
                               f"{current_step - self.last_trade_step}/{self.current_cooldown} steps since last trade")
         
-        # Also force hold for min profit violations
-        if min_profit_violation:
+        # Also force hold for min profit violations and price movement requirements
+        if min_profit_violation or strict_price_requirement:
             action = 1
         
         # Record the action in history before checking for oscillation
@@ -308,6 +340,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 extended_cooldown = min(self.oscillation_count * 20, 1000)  # More aggressive extension
                 self.last_trade_step = current_step - self.current_cooldown + extended_cooldown
                 logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
+        
+        # Early training stabilization (first 1000 steps) - reduce trade frequency drastically
+        if current_step < 1000 and action != 1 and current_step % 100 != 0:
+            logger.debug(f"Early training stability: forcing hold at step {current_step}")
+            action = 1  # Force hold action during early training except every 100th step
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
