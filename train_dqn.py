@@ -1074,19 +1074,17 @@ def train_dqn(env, args, callbacks=None):
     Returns:
         Trained DQN model
     """
-    logger.info("Setting up DQN model with optimized parameters")
+    logger.info("Setting up DQN model with parameters from command line")
     
-    # Optimize hyperparameters for better trading
-    # Increased buffer size for better memory
-    buffer_size = 100000
-    
-    # Decreased learning rate for more stable learning
-    learning_rate = 2.5e-4
-    
-    # More exploration with higher epsilon values
-    exploration_fraction = 0.3
-    exploration_initial_eps = 1.0
-    exploration_final_eps = 0.1
+    # Get parameters from args
+    buffer_size = args.buffer_size
+    learning_rate = args.learning_rate
+    batch_size = args.batch_size
+    gamma = args.gamma
+    exploration_fraction = args.exploration_fraction
+    exploration_initial_eps = args.exploration_initial_eps
+    exploration_final_eps = args.exploration_final_eps
+    target_update_interval = args.target_update_interval
     
     # Create tensorboard callback
     tb_callback = TensorboardCallback(verbose=1, model_name="DQN", debug_frequency=1000)
@@ -1105,19 +1103,19 @@ def train_dqn(env, args, callbacks=None):
     if callbacks:
         all_callbacks.extend(callbacks)
     
-    # Create the model with enhanced parameters
+    # Create the model with parameters from args
     model = DQN(
         "MlpPolicy",
         env,
         buffer_size=buffer_size,
         learning_rate=learning_rate,
         learning_starts=1000,
-        batch_size=64,
+        batch_size=batch_size,
         tau=1.0,
-        gamma=0.99,
+        gamma=gamma,
         train_freq=4,
         gradient_steps=1,
-        target_update_interval=500,
+        target_update_interval=target_update_interval,
         exploration_fraction=exploration_fraction,
         exploration_initial_eps=exploration_initial_eps,
         exploration_final_eps=exploration_final_eps,
@@ -1167,14 +1165,16 @@ def train_ppo(env, args, callbacks=None):
     Returns:
         Trained PPO model
     """
-    logger.info("Setting up PPO model with optimized parameters")
+    logger.info("Setting up PPO model with parameters from command line")
     
-    # Optimize hyperparameters for better trading
-    learning_rate = 3e-4
-    
-    # Increased entropy coefficient for more exploration
-    # This should help find more profitable trading patterns
-    ent_coef = 0.01
+    # Get parameters from args
+    learning_rate = args.learning_rate
+    batch_size = args.batch_size
+    gamma = args.gamma
+    n_steps = args.n_steps
+    n_epochs = args.n_epochs
+    ent_coef = args.ent_coef
+    clip_range = args.clip_range
     
     # Create tensorboard callback
     tb_callback = TensorboardCallback(verbose=1, model_name="PPO", debug_frequency=1000)
@@ -1192,17 +1192,17 @@ def train_ppo(env, args, callbacks=None):
     if callbacks:
         all_callbacks.extend(callbacks)
     
-    # Create the model with enhanced parameters
+    # Create the model with parameters from args
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=learning_rate,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        gamma=gamma,
         gae_lambda=0.95,
-        clip_range=0.2,
+        clip_range=clip_range,
         clip_range_vf=None,
         ent_coef=ent_coef,
         vf_coef=0.5,
@@ -1253,10 +1253,13 @@ def train_a2c(env, args, callbacks=None):
     Returns:
         Trained A2C model
     """
-    logger.info("Setting up A2C model with optimized parameters")
+    logger.info("Setting up A2C model with parameters from command line")
     
-    # Optimize hyperparameters for better trading
-    learning_rate = 7e-4
+    # Get parameters from args
+    learning_rate = args.learning_rate
+    gamma = args.gamma
+    n_steps = args.n_steps
+    ent_coef = args.ent_coef
     
     # Create tensorboard callback
     tb_callback = TensorboardCallback(verbose=1, model_name="A2C", debug_frequency=1000)
@@ -1274,15 +1277,15 @@ def train_a2c(env, args, callbacks=None):
     if callbacks:
         all_callbacks.extend(callbacks)
     
-    # Create the model with enhanced parameters
+    # Create the model with parameters from args
     model = A2C(
         "MlpPolicy",
         env,
         learning_rate=learning_rate,
-        n_steps=5,
-        gamma=0.99,
+        n_steps=n_steps,
+        gamma=gamma,
         gae_lambda=0.95,
-        ent_coef=0.01,
+        ent_coef=ent_coef,
         vf_coef=0.5,
         max_grad_norm=0.5,
         rms_prop_eps=1e-5,
@@ -1332,11 +1335,14 @@ def train_sac(env, args, callbacks=None):
     Returns:
         Trained SAC model
     """
-    logger.info("Setting up SAC model with optimized parameters")
+    logger.info("Setting up SAC model with parameters from command line")
     
-    # Optimize hyperparameters for better trading
-    learning_rate = 3e-4
-    buffer_size = 100000
+    # Get parameters from args
+    learning_rate = args.learning_rate
+    buffer_size = args.buffer_size
+    batch_size = args.batch_size
+    gamma = args.gamma
+    target_update_interval = args.target_update_interval
     
     # Create tensorboard callback
     tb_callback = TensorboardCallback(verbose=1, model_name="SAC", debug_frequency=1000)
@@ -1355,16 +1361,16 @@ def train_sac(env, args, callbacks=None):
     if callbacks:
         all_callbacks.extend(callbacks)
     
-    # Create the model with enhanced parameters
+    # Create the model with parameters from args
     model = SAC(
         "MlpPolicy",
         env,
         learning_rate=learning_rate,
         buffer_size=buffer_size,
         learning_starts=1000,
-        batch_size=256,
+        batch_size=batch_size,
         tau=0.005,
-        gamma=0.99,
+        gamma=gamma,
         train_freq=1,
         gradient_steps=1,
         action_noise=None,
@@ -1372,7 +1378,7 @@ def train_sac(env, args, callbacks=None):
         replay_buffer_kwargs=None,
         optimize_memory_usage=False,
         ent_coef="auto",
-        target_update_interval=1,
+        target_update_interval=target_update_interval,
         target_entropy="auto",
         verbose=1,
         tensorboard_log="./logs/sac/"
@@ -1424,6 +1430,8 @@ def main():
     # Data parameters
     parser.add_argument("--data_path", type=str, default="data/crypto_data.csv",
                         help="Path to the data file (default: data/crypto_data.csv)")
+    parser.add_argument("--data_key", type=str, default=None,
+                        help="Specific key/group to use when HDF5 file contains multiple datasets")
     parser.add_argument("--symbol", type=str, default="BTC/USDT",
                         help="Trading symbol (default: BTC/USDT)")
     
@@ -1434,6 +1442,42 @@ def main():
                         help="Trading commission (default: 0.001 or 0.1%)")
     parser.add_argument("--max_steps", type=int, default=20000,
                         help="Maximum steps per episode (default: 20000)")
+    
+    # Additional training parameters
+    parser.add_argument("--learning_rate", type=float, default=0.0003, 
+                        help="Learning rate")
+    parser.add_argument("--batch_size", type=int, default=64, 
+                        help="Batch size for training")
+    parser.add_argument("--gamma", type=float, default=0.99, 
+                        help="Discount factor")
+    parser.add_argument("--seed", type=int, default=None, 
+                        help="Random seed")
+    
+    # PPO/A2C-specific parameters
+    parser.add_argument("--n_steps", type=int, default=2048, 
+                        help="Number of steps per update for PPO/A2C")
+    parser.add_argument("--ent_coef", type=float, default=0.01, 
+                        help="Entropy coefficient for PPO/A2C")
+    parser.add_argument("--n_epochs", type=int, default=10, 
+                        help="Number of epochs per update for PPO")
+    parser.add_argument("--clip_range", type=float, default=0.2, 
+                        help="PPO clip range")
+    
+    # DQN/SAC-specific parameters
+    parser.add_argument("--buffer_size", type=int, default=100000, 
+                        help="Replay buffer size for DQN/SAC")
+    parser.add_argument("--exploration_fraction", type=float, default=0.1, 
+                        help="Fraction of training time for exploration in DQN")
+    parser.add_argument("--exploration_initial_eps", type=float, default=1.0, 
+                        help="Initial exploration rate for DQN")
+    parser.add_argument("--exploration_final_eps", type=float, default=0.05, 
+                        help="Final exploration rate for DQN")
+    parser.add_argument("--target_update_interval", type=int, default=10000, 
+                        help="Update frequency for target network in DQN/SAC")
+    
+    # Trading safeguards
+    parser.add_argument("--trade_cooldown", type=int, default=TRADE_COOLDOWN_PERIOD, 
+                        help=f"Minimum steps between trades (default: {TRADE_COOLDOWN_PERIOD})")
     
     # Parse arguments
     args = parser.parse_args()
@@ -1447,12 +1491,32 @@ def main():
     logger.info(f"Training for {args.timesteps} timesteps")
     
     # Set seeds for reproducibility
-    set_seeds(42)
+    if args.seed is not None:
+        set_seeds(args.seed)
+    else:
+        set_seeds(42)
     
     # Load data
     try:
         logger.info(f"Loading data from {args.data_path}")
-        data = pd.read_csv(args.data_path)
+        
+        # Check file extension to determine loading method
+        file_ext = os.path.splitext(args.data_path)[1].lower()
+        
+        if file_ext == '.h5' or file_ext == '.hdf5':
+            # Load HDF5 file
+            if args.data_key:
+                logger.info(f"Loading HDF5 with key: {args.data_key}")
+                data = pd.read_hdf(args.data_path, key=args.data_key)
+            else:
+                logger.info("Loading HDF5 without specified key")
+                data = pd.read_hdf(args.data_path)
+        elif file_ext == '.csv':
+            # Load CSV file
+            data = pd.read_csv(args.data_path)
+        else:
+            raise ValueError(f"Unsupported file extension: {file_ext}. Use .csv, .h5, or .hdf5")
+            
         logger.info(f"Data loaded successfully: {len(data)} rows")
     except Exception as e:
         logger.error(f"Error loading data: {e}")
@@ -1476,7 +1540,7 @@ def main():
     logger.info("Applying SafeTradingEnvWrapper")
     safe_env = SafeTradingEnvWrapper(
         env=base_env,
-        trade_cooldown=TRADE_COOLDOWN_PERIOD,  # Value from constants
+        trade_cooldown=args.trade_cooldown,  # Use value from args
         max_history_size=100
     )
     
@@ -1501,7 +1565,7 @@ def main():
     # Define function to create a wrapped environment
     def make_env():
         base_env = CryptocurrencyTradingEnv(**env_kwargs)
-        safe_env = SafeTradingEnvWrapper(base_env, trade_cooldown=TRADE_COOLDOWN_PERIOD)
+        safe_env = SafeTradingEnvWrapper(base_env, trade_cooldown=args.trade_cooldown)  # Use value from args
         time_limit_env = TimeLimit(safe_env, max_episode_steps=args.max_steps)
         return Monitor(time_limit_env, "logs/monitor/")
     
