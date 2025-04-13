@@ -174,7 +174,7 @@ class AntiHoldPolicy(DQNPolicy):  # Change from stable_baselines3.dqn.policies.D
     reducing its Q-value during action selection.
     """
     
-    def __init__(self, *args, hold_action_bias=-3.0, **kwargs):
+    def __init__(self, *args, hold_action_bias=-1.0, **kwargs):
         """Initialize the anti-hold policy with a bias against the hold action"""
         super().__init__(*args, **kwargs)
         self.hold_action_bias = hold_action_bias
@@ -188,7 +188,7 @@ class AntiHoldPolicy(DQNPolicy):  # Change from stable_baselines3.dqn.policies.D
         q_values = self.q_net(obs)
         
         # Apply a negative bias to the hold action's Q-value
-        # Use a stronger bias (-3.0 instead of -1.0) to more strongly discourage holding
+        # Use a milder bias (-1.0 instead of -3.0) to discourage holding without causing oscillation
         q_values[:, self.hold_action] += self.hold_action_bias
         
         # Get the actions using the modified Q-values
@@ -207,13 +207,13 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         """Initialize the wrapper with safeguards against harmful trading patterns"""
         super().__init__(env)
         
-        # Trading safeguards - reduce cooldown significantly to allow more trading
-        self.trade_cooldown = 1  # Set to minimum value to encourage more trading
+        # Trading safeguards - set a more balanced cooldown to prevent oscillation
+        self.trade_cooldown = 3  # Increased from 1 to 3 to prevent rapid oscillation
         if trade_cooldown <= 0:
-            logger.warning(f"Specified trade_cooldown was {trade_cooldown}, setting to minimum of 1 to prevent division by zero")
+            logger.warning(f"Specified trade_cooldown was {trade_cooldown}, setting to minimum of 3 to prevent division by zero")
         
-        # Reduce cooldown as training progresses
-        self.min_cooldown = 1  # Minimum cooldown period reduced from 3 to 1
+        # Increase minimum cooldown to prevent rapid trades
+        self.min_cooldown = 3  # Increased from 1 to 3
         
         # Initialize step counter and cooldown tracking
         self.current_step = 0
@@ -262,7 +262,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Stronger oscillation detection and prevention
         self.oscillation_window = 8  # Look at 8 actions for oscillation patterns
         self.progressive_cooldown = True  # Increase cooldown after oscillations
-        self.max_oscillation_cooldown = trade_cooldown * 2  # Reduced from 3x to 2x
+        self.max_oscillation_cooldown = 10  # Set to a fixed value to prevent extreme cooldown changes
         self.oscillation_patterns = {
             'buy_sell_alternation': 0,  # Count of buy-sell alternations
             'rapid_reversals': 0,       # Count of position reversals
@@ -287,7 +287,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         self.portfolio_growth_rate = 0.0
         
-        self.current_cooldown = max(1, trade_cooldown)  # Ensure cooldown is at least 1
+        self.current_cooldown = max(3, trade_cooldown)  # Ensure cooldown is at least 3
         
         # Track metrics for analyzing agent behavior
         self.hold_duration = 0
@@ -516,27 +516,37 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         oscillation_score = 0
         
         # Heavily weight buy-sell alternations
-        oscillation_score += self.oscillation_patterns['buy_sell_alternation'] * 1.5
+        oscillation_score += self.oscillation_patterns['buy_sell_alternation'] * 1.0
         
         # Add rapid reversals with less weight
-        oscillation_score += self.oscillation_patterns['rapid_reversals'] * 1.0
+        oscillation_score += self.oscillation_patterns['rapid_reversals'] * 0.7
         
-        # Adapt cooldown based on oscillation score
+        # More gradual cooldown adjustment based on oscillation score
         if oscillation_score > 5:
             # Severe oscillation, use maximum cooldown
             new_cooldown = self.max_oscillation_cooldown
         elif oscillation_score > 2:
             # Some oscillation, scale cooldown linearly
-            new_cooldown = self.trade_cooldown + (oscillation_score - 2) * (self.max_oscillation_cooldown - self.trade_cooldown) / 3
+            # More gradual scaling to prevent large jumps
+            new_cooldown = self.min_cooldown + (oscillation_score - 2) * (self.max_oscillation_cooldown - self.min_cooldown) / 5
         else:
-            # Minimal oscillation, use base cooldown
-            new_cooldown = self.trade_cooldown
+            # Minimal oscillation, use minimum cooldown (not base cooldown)
+            new_cooldown = self.min_cooldown
         
-        # Ensure new_cooldown is at least 1 to prevent division by zero
-        new_cooldown = max(1, new_cooldown)
+        # Ensure new_cooldown is at least min_cooldown to prevent division by zero
+        new_cooldown = max(self.min_cooldown, new_cooldown)
         
-        # Update if significant change
-        if abs(new_cooldown - self.current_cooldown) > 10:
+        # Limit cooldown changes to be more gradual
+        if self.current_cooldown > 0:
+            # Limit the amount of change in either direction
+            max_change = 2  # Maximum change per update
+            if new_cooldown > self.current_cooldown:
+                new_cooldown = min(new_cooldown, self.current_cooldown + max_change)
+            else:
+                new_cooldown = max(new_cooldown, self.current_cooldown - max_change)
+        
+        # Update if enough change
+        if abs(new_cooldown - self.current_cooldown) >= 1:
             self.current_cooldown = int(new_cooldown)
             logger.info(f"Adjusted cooldown period to {self.current_cooldown} steps (oscillation score: {oscillation_score:.1f})")
     
@@ -552,11 +562,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Initialize adjusted reward
         risk_adjusted_reward = reward
         
-        # Track peak portfolio value for drawdown calculation
+        # Update peak portfolio value for drawdown calculation
         if portfolio_value > self.peak_value:
             self.peak_value = portfolio_value
         
-        # Track highest portfolio value across episodes
+        # Update highest portfolio value for growth calculation
         if portfolio_value > self.highest_portfolio:
             prev_highest = self.highest_portfolio
             self.highest_portfolio = portfolio_value
@@ -576,105 +586,110 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 # Track if this was a successful trade
                 if trade_return > 0:
                     self.successful_trades += 1
+                    self.successful_trade_streak += 1
+                else:
+                    self.successful_trade_streak = 0
                     
-                    # Calculate Sharpe ratio
-                    if len(self.trade_returns) > 5:
+                # Update Sharpe ratio (risk-adjusted return)
+                if len(self.trade_returns) >= 5:  # Need at least a few trades
+                    try:
                         returns_array = np.array(self.trade_returns[-20:])
                         mean_return = np.mean(returns_array)
                         std_return = np.std(returns_array) + 1e-6  # Add small constant to avoid division by zero
                         self.sharpe_ratio = mean_return / std_return
+                    except Exception as e:
+                        logger.warning(f"Error calculating Sharpe ratio: {e}")
         
         # Apply risk-aware reward adjustments
-        risk_adjusted_reward = reward
         
-        # Add portfolio growth reward (significant boost but less than before)
+        # Add portfolio growth reward (more balanced approach)
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
             # Log detailed growth information for debugging at less frequent intervals
             if current_step % 10000 == 0 or (trade_occurred and current_step % 10000 == 0):
                 logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
-            growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0 to reward growth more
+            
+            # More gradual growth reward that scales with growth percentage
+            growth_reward = min(growth_pct * 1.5, 2.0)  # Reduced from 3.0 to 1.5 for more stable rewards
             risk_adjusted_reward += growth_reward
             
-            # Extra reward for achieving new highs
+            # Extra reward for achieving new highs (more moderate)
             if self.portfolio_growth_rate > 0:
-                new_high_reward = min(self.portfolio_growth_rate * 5.0, 1.0)  # Increased from 3.0 to 5.0 and max from 0.5 to 1.0
+                new_high_reward = min(self.portfolio_growth_rate * 2.0, 0.5)  # Reduced from 5.0 to 2.0 and max from 1.0 to 0.5
                 risk_adjusted_reward += new_high_reward
         
-        # Add drawdown penalty - but make it much less severe
-        if self.max_drawdown > 0.50:  # Only penalize significant drawdowns (increased from 0.25 to 0.50)
-            drawdown_penalty = self.max_drawdown * 0.5  # Less severe penalty (reduced from 1.0 to 0.5)
+        # Add drawdown penalty - more balanced
+        if self.max_drawdown > 0.50:  # Only penalize significant drawdowns
+            drawdown_penalty = self.max_drawdown * 0.3  # Reduced from 0.5 to 0.3
             risk_adjusted_reward -= drawdown_penalty
         
-        # Add portfolio balance rewards/penalties
-        # Encourage a balanced portfolio allocation
-        if cash_ratio < 0.2:  # Too much in assets
-            # Apply stronger penalties for very low cash positions
-            balance_penalty = min((0.2 - cash_ratio) * 3.0, 1.0)
+        # Add portfolio balance rewards/penalties (more moderate)
+        if cash_ratio < 0.1 and current_step > 1000:  # Very low cash, but only after initial training
+            # Gentle nudge to avoid being fully invested
+            balance_penalty = min((0.1 - cash_ratio) * 2.0, 0.5)  # Reduced from 3.0 to 2.0 and max from 1.0 to 0.5
             risk_adjusted_reward -= balance_penalty
             logger.debug(f"Low cash ratio penalty: -{balance_penalty:.4f} (cash ratio: {cash_ratio:.2f})")
         elif cash_ratio > 0.9 and current_step > 2000:  # Too much in cash, but only after initial training
             # Gentle nudge to deploy capital after initial training period
-            opportunity_cost = min((cash_ratio - 0.9) * 0.5, 0.5)
+            opportunity_cost = min((cash_ratio - 0.9) * 0.3, 0.3)  # Reduced from 0.5 to 0.3
             risk_adjusted_reward -= opportunity_cost
             logger.debug(f"High cash ratio penalty: -{opportunity_cost:.4f} (cash ratio: {cash_ratio:.2f})")
         elif cash_ratio >= 0.3 and cash_ratio <= 0.7:
             # Reward for maintaining a balanced portfolio
-            balance_bonus = 0.1  # Small bonus for good balance
+            balance_bonus = 0.05  # Reduced from 0.1 to 0.05
             risk_adjusted_reward += balance_bonus
             logger.debug(f"Balanced portfolio bonus: +{balance_bonus:.4f} (cash ratio: {cash_ratio:.2f})")
         
-        # Give bonus for trades, especially selling
+        # Give bonus for trades, especially selling (more moderate)
         if trade_occurred:
-            # Base trade bonus - increased to strongly encourage any trade
-            trade_bonus = 0.5  # Increased from 0.25 to 0.5
+            # Base trade bonus
+            trade_bonus = 0.2  # Reduced from 0.5 to 0.2
             risk_adjusted_reward += trade_bonus
             logger.debug(f"Applied trade bonus: +{trade_bonus:.2f} at step {current_step}")
             
             # Extra bonus for selling (to encourage profit taking)
             if self.action_history and self.action_history[-1] == 0:  # sell action
-                sell_bonus = 0.75  # Increased from 0.5 to 0.75
+                sell_bonus = 0.3  # Reduced from 0.75 to 0.3
                 risk_adjusted_reward += sell_bonus
                 logger.debug(f"Applied sell bonus: +{sell_bonus:.2f} at step {current_step}")
                 
             # Add bonus for buying (to encourage more trading activity)
             elif self.action_history and self.action_history[-1] == 2:  # buy action
-                buy_bonus = 0.5  # New bonus for buy actions
+                buy_bonus = 0.2  # Reduced from 0.5 to 0.2
                 risk_adjusted_reward += buy_bonus
                 logger.debug(f"Applied buy bonus: +{buy_bonus:.2f} at step {current_step}")
         
-        # Add hold penalty to discourage excessive holding
+        # Add hold penalty to discourage excessive holding (much more balanced)
         if self.action_history and self.action_history[-1] == 1:  # hold action
             self.consecutive_holds += 1
-            self.hold_duration += 1
             
-            # Apply larger constant hold penalty
-            hold_penalty = 0.8  # Increased from 0.5 to 0.8 - even higher penalty for any hold
+            # Apply more moderate constant hold penalty
+            hold_penalty = 0.3  # Reduced from 0.8 to 0.3
             risk_adjusted_reward -= hold_penalty
             
-            # Add penalty for excessive holding after early training - lower threshold and higher penalty
-            if self.consecutive_holds > 3:  # Reduced from 5 to 3
-                # Gradually increasing penalty for excessive holding (more aggressive)
-                hold_penalty = min((self.consecutive_holds - 3) * 0.1, 10.0)  # Much more aggressive penalty 
-                risk_adjusted_reward -= hold_penalty
-                if self.consecutive_holds % 5 == 0:  # Reduced from 10 to 5
-                    logger.warning(f"Excessive holding penalty: -{hold_penalty:.4f} after {self.consecutive_holds} consecutive holds")
+            # Add penalty for excessive holding - more moderate approach
+            if self.consecutive_holds > 5:  # Increased from 3 to 5
+                # More gradual increasing penalty for excessive holding
+                add_penalty = min((self.consecutive_holds - 5) * 0.05, 1.0)  # Reduced from 0.1 to 0.05 and max from 10.0 to 1.0
+                risk_adjusted_reward -= add_penalty
+                if self.consecutive_holds % 10 == 0:  # Log less frequently
+                    logger.warning(f"Excessive holding penalty: -{add_penalty:.4f} after {self.consecutive_holds} consecutive holds")
         else:
             self.consecutive_holds = 0
         
         # Reward for taking actions (not just holding)
         if self.action_history and self.action_history[-1] != 1:  # not a hold action
-            # Give reward for exploring buying and selling
+            # Give reward for exploring buying and selling (more balanced)
             if current_step < 30000:  # Throughout a longer early training period
-                action_bonus = 0.5  # Increased from 0.2 to 0.5
+                action_bonus = 0.1  # Reduced from 0.5 to 0.1
                 risk_adjusted_reward += action_bonus
                 if current_step % 5000 == 0:
                     logger.info(f"Applying action exploration bonus: +{action_bonus:.2f} at step {current_step}")
         
-        # Add profit streak bonus - more generous to encourage successful trading patterns
+        # Add profit streak bonus - more balanced
         if trade_occurred and 'trade_profit' in info and info['trade_profit'] > 0:
             self.successful_trade_streak += 1
-            streak_bonus = min(self.successful_trade_streak * 0.1, 2.0)  # Increased from 0.05 to 0.1 and from 1.0 to 2.0
+            streak_bonus = min(self.successful_trade_streak * 0.05, 0.5)  # Reduced from 0.1 to 0.05 and max from 2.0 to 0.5
             risk_adjusted_reward += streak_bonus
             self.max_successful_streak = max(self.max_successful_streak, self.successful_trade_streak)
             logger.debug(f"Trade streak bonus: +{streak_bonus:.4f} (streak: {self.successful_trade_streak})")
@@ -749,12 +764,36 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         steps_since_last_trade = self.current_step - self.last_trade_step
         self.in_cooldown = steps_since_last_trade < self.current_cooldown
         
-        # Detect action oscillation patterns and update cooldown if necessary
-        self._detect_oscillation_patterns()
-        self._update_cooldown_period()
+        # Check for explicit oscillation patterns in recent action history
+        force_hold = False
+        if len(self.action_history) >= 4:
+            recent_actions = self.action_history[-4:]
+            
+            # Check for buy-sell-buy or sell-buy-sell patterns
+            if ((recent_actions == [2, 0, 2, 0] or recent_actions == [0, 2, 0, 2]) and
+                ((action == 2 and recent_actions[-1] == 0) or (action == 0 and recent_actions[-1] == 2))):
+                logger.warning(f"Detected action oscillation pattern at step {self.current_step}: {recent_actions} + [{action}]")
+                force_hold = True
+                self.oscillation_count += 1
         
-        # Use hold action during cooldown (prevents rapid buying/selling)
-        allowed_action = HOLD_ACTION if self.in_cooldown else action
+        # Detect oscillation patterns and update cooldown
+        if self.current_step > 10:  # Skip early steps
+            oscillation_detected = self._detect_oscillation_patterns()
+            if oscillation_detected:
+                self._update_cooldown_period()
+        
+        # Determine the action to take
+        if force_hold:
+            # Force a hold to break oscillation cycles
+            allowed_action = HOLD_ACTION
+            logger.warning(f"Breaking oscillation cycle by forcing hold at step {self.current_step}")
+            self.forced_actions += 1
+        elif self.in_cooldown:
+            # Use hold during cooldown period
+            allowed_action = HOLD_ACTION
+        else:
+            # Otherwise use the original action
+            allowed_action = action
                 
         # If we have active positions, check for take-profit and stop-loss conditions
         if self.has_active_positions:
@@ -1478,7 +1517,7 @@ def train_dqn(env, args, callbacks=None):
         exploration_fraction=exploration_fraction,
         exploration_initial_eps=exploration_initial_eps,
         exploration_final_eps=exploration_final_eps,
-        policy_kwargs={"net_arch": [256, 256], "hold_action_bias": -4.0},  # Increase penalty from -2.0 to -4.0
+        policy_kwargs={"net_arch": [256, 256], "hold_action_bias": -1.0},  # Decrease penalty from -4.0 to -1.0 to reduce oscillation
         verbose=1,
         tensorboard_log="./logs/dqn/"
     )

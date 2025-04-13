@@ -717,12 +717,19 @@ class CryptocurrencyTradingEnv(gym.Env):
             if total_value > self.initial_amount * 5.0:
                 logger.warning(f"Post-trade check: Portfolio value {total_value:.2f} > 5.0x initial")
             
-            # Only apply reduction for truly extreme values
-            if total_value > self.initial_amount * 10.0:
-                reduction_factor = (self.initial_amount * 10.0) / total_value
+            # Only apply reduction for truly extreme values - use more gradual scaling
+            if total_value > self.initial_amount * 20.0:  # Increased from 10.0 to 20.0
+                # Use square root scaling for smoother reduction - less abrupt resets
+                scale_factor = np.sqrt(self.initial_amount * 20.0 / total_value)
+                # Apply a more gradual reduction, at most 15% at a time
+                reduction_factor = max(0.85, scale_factor)
+                
+                old_total = total_value
                 self.portfolio_value *= reduction_factor
                 self.assets_owned[asset_index] *= reduction_factor
-                logger.warning(f"Extreme portfolio value detected, scaling down: {total_value:.2f} -> {self.portfolio_value + (self.assets_owned[asset_index] * price):.2f}")
+                new_total = self.portfolio_value + (self.assets_owned[asset_index] * price)
+                
+                logger.warning(f"Extreme portfolio value detected, gradually scaling down: {old_total:.2f} -> {new_total:.2f} (factor: {reduction_factor:.2f})")
     
     def _calculate_portfolio_value(self):
         """
@@ -775,15 +782,19 @@ class CryptocurrencyTradingEnv(gym.Env):
         total_value = cash_value + asset_value
         
         # Apply reasonable maximum - but don't artificially manipulate values
-        absolute_max = self.initial_amount * 25  # Reduced from 50 to 25
+        absolute_max = self.initial_amount * 50  # Increased from 25 to 50 for more headroom
         if total_value > absolute_max:
-            logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
+            logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, gradually reducing")
+            
+            # More gradual scaling to avoid abrupt changes
+            # Apply at most a 20% reduction per check to avoid disrupting training
+            reduction_factor = max(0.8, absolute_max / total_value)
             
             # Proportionally reduce cash and assets 
             if asset_value > 0:
                 ratio = asset_value / total_value
-                new_asset_value = absolute_max * ratio
-                new_cash_value = absolute_max - new_asset_value
+                new_asset_value = total_value * reduction_factor * ratio
+                new_cash_value = total_value * reduction_factor - new_asset_value
                 
                 # Recalculate assets owned 
                 if price > 0:
@@ -792,12 +803,14 @@ class CryptocurrencyTradingEnv(gym.Env):
                 # Update balance (portfolio value is cash when no assets owned)
                 self.portfolio_value = new_cash_value
                 
-                # Final portfolio value is our max
-                total_value = absolute_max
+                # Final portfolio value reflects the gradual reduction
+                total_value = total_value * reduction_factor
+                logger.warning(f"Applied gradual reduction factor of {reduction_factor:.3f}")
             else:
-                # If no assets, just clip cash
-                self.portfolio_value = absolute_max
-                total_value = absolute_max
+                # If no assets, just clip cash with the same gradual approach
+                self.portfolio_value = self.portfolio_value * reduction_factor
+                total_value = total_value * reduction_factor
+                logger.warning(f"Applied gradual cash reduction factor of {reduction_factor:.3f}")
         
         # Final sanity check for numerical stability
         if not np.isfinite(total_value) or total_value <= 0:
