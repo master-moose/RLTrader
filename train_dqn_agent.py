@@ -306,8 +306,12 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 self.oscillation_counter += 1
                 # If we see multiple oscillations, extend the frozen period
                 self.post_trade_frozen = True
-                # Extend frozen period to 10000 steps on oscillation
-                self.frozen_until_step = self.current_step + 10000
+                # Extend frozen period to 20000 steps on oscillation - even more severe
+                self.frozen_until_step = self.current_step + 20000
+                
+                # Apply immediate severe penalty to reward
+                # (will be stored in info_buffer and added to reward during reward calculation)
+                self.info_buffer['oscillation_penalty'] = -20.0
         
         # Check for forced holding during initialization period
         in_initial_period = self.current_step < self.initial_forced_hold_period
@@ -557,6 +561,27 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             
             if self.debug_mode or self.consecutive_attempts > 5:
                 logger.warning(f"Applied severe rapid trade penalty: {penalty:.6f}")
+        
+        # Add oscillation penalty based on recent action history
+        if len(self.action_history) >= 4:
+            last_four = self.action_history[-4:]
+            
+            # Check for oscillation patterns (buy-sell-buy-sell or sell-buy-sell-buy)
+            if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
+                # Apply extremely severe oscillation penalty (even more than rapid trading)
+                oscillation_penalty = -15.0 * end_total_asset * self.reward_scaling
+                base_reward += oscillation_penalty
+                logger.warning(f"Applied oscillation penalty at step {self.current_step}: {oscillation_penalty:.6f}")
+                
+            # Detect less obvious oscillation (alternating positions with some holds in between)
+            elif len(set(last_four)) > 1 and 0 in last_four and 2 in last_four:
+                # Count non-hold actions
+                non_hold_count = sum(1 for a in last_four if a != 1)
+                if non_hold_count >= 2:
+                    # Apply moderate oscillation penalty
+                    oscillation_penalty = -5.0 * end_total_asset * self.reward_scaling
+                    base_reward += oscillation_penalty
+                    logger.info(f"Applied moderate oscillation penalty: {oscillation_penalty:.6f}")
         
         return base_reward
         
@@ -1862,7 +1887,7 @@ def train_with_finrl(
     vec_env = create_parallel_finrl_envs(df, args, num_workers=num_envs)
     
     try:
-        # Test the vectorized environment
+        # Test the environment to get the actual observation dimension
         test_obs = vec_env.reset()
         actual_obs_dim = test_obs.shape[1]
         logger.info(f"Vectorized environment observation shape: {test_obs.shape}")
@@ -1873,120 +1898,123 @@ def train_with_finrl(
             # Update state_dim to actual observation dimension
             state_dim = actual_obs_dim
     except Exception as e:
-        logger.error(f"Error testing vectorized environment: {e}")
+        logger.error(f"Error testing environment: {e}")
+        traceback.print_exc()
     
-    # Set up network architecture
-    net_arch = {
-        'pi': [128, 128],  # Actor network - smaller than default
-        'qf': [128, 128]   # Critic network - smaller than default
+    # Set up policy parameters
+    policy_kwargs = None
+    net_arch = getattr(args, 'net_arch', None)
+    
+    if net_arch is None:
+        # Define a more sophisticated network architecture with larger layers
+        # for better temporal pattern recognition
+        if model_name.lower() in ['a2c', 'ppo']:
+            # For policy gradient methods, use a shared network with larger layers
+            net_arch = [
+                dict(
+                    pi=[256, 256, 128],  # Policy network - deeper for better decision making
+                    vf=[256, 256, 128]   # Value function network
+                )
+            ]
+        else:
+            # For Q-learning based methods like SAC
+            net_arch = [512, 256, 256, 128]  # Deeper network architecture
+    
+    logger.info(f"Using network architecture: {net_arch}")
+    
+    # Enhanced policy kwargs with specialized activation functions
+    policy_kwargs = {
+        'net_arch': net_arch,
+        'features_extractor_kwargs': {
+            'features_dim': 256  # Increase feature dimension for better representation
+        }
     }
     
-    # Improved PPO parameters for better exploration and learning
-    ppo_params = {
-        'learning_rate': 3e-4,  # Increased from default
-        'n_steps': 2048,
-        'batch_size': 64,
-        'n_epochs': 10,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'clip_range_vf': None,  # Don't clip value function
-        'normalize_advantage': True,
-        'ent_coef': 0.01,  # Increase entropy coefficient for more exploration
-        'vf_coef': 0.5,  # Increase value function coefficient
-        'max_grad_norm': 0.5,
-        'use_sde': False,
-        'sde_sample_freq': -1,
-        'target_kl': 0.01,  # Early stopping based on KL divergence
-        'policy_kwargs': {
+    # Add model-specific kwargs
+    if model_name.lower() == 'ppo':
+        policy_kwargs = {
             'activation_fn': nn.ReLU,
             'net_arch': net_arch,
-            'log_std_init': -2.0  # Set initial log standard deviation for more controlled exploration
+            # Use lower standard deviation to reduce extreme actions that lead to oscillation
+            'log_std_init': -3.0  # Lower initial log standard deviation for more controlled exploration
         }
+    
+    # Add entropy coefficient to encourage exploration rather than oscillation
+    entropy_coef = getattr(args, 'entropy_coef', 0.01)
+    
+    # Create model based on name
+    agent = CustomDRLAgent(env=vec_env, verbose=1)
+    
+    model_kwargs = {
+        'policy': 'MlpPolicy',
+        'verbose': 1,
+        'policy_kwargs': policy_kwargs,
+        'tensorboard_log': tensorboard_log,
+        'device': device
     }
     
-    # DDPG parameters
-    ddpg_params = {
-        'learning_rate': 3e-4,
-        'buffer_size': 1000000,
-        'learning_starts': 100,
-        'batch_size': 256,
-        'tau': 0.005,
-        'gamma': 0.99,
-        'train_freq': (1, 'episode'),
-        'gradient_steps': -1,
-        'policy_kwargs': {
-            'activation_fn': nn.ReLU,
-            'net_arch': [256, 256]
-        }
-    }
-    
-    # TD3 parameters
-    td3_params = {
-        'learning_rate': 3e-4,
-        'buffer_size': 1000000,
-        'learning_starts': 100,
-        'batch_size': 256,
-        'tau': 0.005,
-        'gamma': 0.99,
-        'policy_delay': 2,
-        'train_freq': (1, 'episode'),
-        'gradient_steps': -1,
-        'policy_kwargs': {
-            'activation_fn': nn.ReLU,
-            'net_arch': [400, 300]
-        }
-    }
-    
-    # SAC parameters
-    sac_params = {
-        'learning_rate': 3e-4,
-        'buffer_size': 1000000,
-        'learning_starts': 100,
-        'batch_size': 256,
-        'tau': 0.005,
-        'gamma': 0.99,
-        'train_freq': 1,
-        'gradient_steps': 1,
-        'ent_coef': 'auto',
-        'policy_kwargs': {
-            'activation_fn': nn.ReLU,
-            'net_arch': [256, 256]
-        }
-    }
-    
-    # Select parameters based on model
-    if finrl_model == 'ppo':
-        model_params = ppo_params
-        model_class = PPO
-    elif finrl_model == 'ddpg':
-        model_params = ddpg_params
-        model_class = DDPG
-    elif finrl_model == 'td3':
-        model_params = td3_params
-        model_class = TD3
-    else:  # Default to SAC
-        model_params = sac_params
-        model_class = SAC
+    # Add model-specific kwargs
+    if model_name.lower() == 'ppo':
+        model_kwargs.update({
+            # Increase n_steps to allow the model to learn temporal patterns
+            'n_steps': 2048,  
+            # Lower learning rate for more stable learning
+            'learning_rate': 2.5e-4,  
+            # Increase entropy coefficient to encourage exploration over exploitation
+            'ent_coef': entropy_coef,
+            # More epochs for better learning
+            'n_epochs': 10,  
+            # Smaller batch size for better generalization
+            'batch_size': 64,
+            # Multiple updates to improve policy over time
+            'gae_lambda': 0.95
+        })
+    elif model_name.lower() in ['sac', 'td3', 'ddpg']:
+        model_kwargs.update({
+            'learning_rate': 3e-4,
+            'buffer_size': 100000,
+            'learning_starts': 10000,
+            'batch_size': 256,
+            'train_freq': 1,
+            'gradient_steps': 1,
+            'action_noise': None,
+            'replay_buffer_class': None,
+            'replay_buffer_kwargs': None,
+            'optimize_memory_usage': False,
+            'tau': 0.005,
+            'gamma': 0.99,
+            'use_sde': False
+        })
         
-    # Define callback to log metrics to tensorboard
+        if model_name.lower() == 'sac':
+            model_kwargs.update({
+                'ent_coef': 'auto',  # Automatic entropy coefficient adjustment
+                'target_entropy': 'auto'
+            })
+    
+    # Add custom callbacks for monitoring
     class TensorboardCallback(BaseCallback):
         def __init__(self, verbose=0):
             super(TensorboardCallback, self).__init__(verbose)
-            # Track episode rewards and metadata
-            self.episode_rewards = []
+            self.debug_steps = 0
+            self.debug_frequency = 1000  # Debug every 1000 steps
+            self.last_debug_output = 0
+            
+            # Portfolio tracking
             self.portfolio_values = []
+            
+            # Trade tracking
+            self.trade_count = 0
+            self.successful_trades = 0
             self.total_profit = 0
             self.total_loss = 0
-            self.successful_trades = 0
-            self.failed_trades = 0
-            self.trade_count = 0
-            self.current_position = 0
-            self.position_start_time = 0
-            self.entry_price = 0
-            self.action_counts = {"buy": 0, "sell": 0, "hold": 0}
             
-            # New tracking metrics for rapid trades
+            # Tracking data for debugging
+            self.action_counts = {'buy': 0, 'hold': 0, 'sell': 0}
+            self.episode_rewards = []
+            self.step_rewards = []
+            
+            # Trade analysis
             self.trade_returns = []
             self.trade_durations = []
             self.recent_trades = []  # List to track recent trades for trend analysis
@@ -2001,14 +2029,17 @@ def train_with_finrl(
             
             # Position tracking
             self.current_position = 0
+            self.position_start_time = 0
+            self.entry_price = 0
             
-            # For debugging
-            self.debug_steps = 0
-            self.last_debug_output = 0
-            self.debug_frequency = 500  # Output debug info every 500 steps
+            # Add oscillation tracking
+            self.oscillation_count = 0
+            self.action_history = []
+            
+            # Set up more frequent log flushing
             self.log_flush_frequency = 5000  # Flush logs more frequently
             
-            logger.info("Enhanced TensorboardCallback initialized with stricter rapid trade detection")
+            logger.info("Enhanced TensorboardCallback initialized with oscillation detection")
         
         def _on_step(self):
             # Increment step counter for debugging
@@ -2033,6 +2064,8 @@ def train_with_finrl(
                     if self.rapid_trades_detected > 0 or self.rapid_trade_attempts > 0:
                         print(f"WARNING: {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} attempts! {self.same_price_trades} at same price!")
                         print(f"Frozen periods enforced: {self.frozen_period_enforced}")
+                    # Add oscillation info
+                    print(f"Oscillation count: {self.oscillation_count}")
                 
                 if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
                     # Log a sample of the info dictionary to understand what's available
@@ -2044,9 +2077,9 @@ def train_with_finrl(
                 self.logger.dump_tabular()
             
             # Track step reward
-            # Collect information from each environment
-            if hasattr(self, 'locals') and 'dones' in self.locals:
-                for i, done in enumerate(self.locals['dones']):
+            if self.locals is not None and 'rewards' in self.locals:
+                for i, reward in enumerate(self.locals['rewards']):
+                    self.step_rewards.append(reward)
                     
                     # Log environment info if available
                     if 'infos' in self.locals and i < len(self.locals['infos']):
@@ -2056,7 +2089,7 @@ def train_with_finrl(
                         exit_price = 0
                         pnl = 0
                         trade_duration = 0
-                        
+
                         # Track portfolio value
                         if 'portfolio_value' in info:
                             self.portfolio_values.append(info['portfolio_value'])
@@ -2085,6 +2118,13 @@ def train_with_finrl(
                             self.frozen_period_enforced += 1
                             self.logger.record('environment/frozen_period', 1)
                         
+                        # Track oscillation count from environment
+                        if 'oscillation_counter' in info:
+                            osc_count = info['oscillation_counter']
+                            if osc_count > self.oscillation_count:
+                                self.oscillation_count = osc_count
+                                self.logger.record('environment/oscillation_count', osc_count)
+                        
                         # Track position
                         if 'position' in info:
                             position = info['position']
@@ -2106,7 +2146,7 @@ def train_with_finrl(
                                     exit_price = 0
                                     pnl = 0
                                     
-                                    # Calculate trade results
+                                    # Calculate trade profit/loss if price info available
                                     if 'close' in info:
                                         exit_price = info['close']
                                         
@@ -2120,149 +2160,98 @@ def train_with_finrl(
                                         self.trade_returns.append(pnl)
                                         
                                         # Track trade result
+                                        self.trade_count += 1
                                         if pnl > 0:
                                             self.successful_trades += 1
                                             self.total_profit += pnl
-                                            if self.debug_steps % self.debug_frequency == 0:
-                                                logger.info(f"Successful trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}, duration={trade_duration}")
                                         else:
-                                            self.failed_trades += 1
                                             self.total_loss += abs(pnl)
-                                            if self.debug_steps % self.debug_frequency == 0:
-                                                logger.info(f"Failed trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}, duration={trade_duration}")
-                                    
-                                    # Add to recent trades for trend analysis
-                                    self.recent_trades.append({
-                                        'entry_price': self.entry_price,
-                                        'exit_price': exit_price if 'close' in info else 0,
-                                        'position': self.current_position,
-                                        'duration': trade_duration,
-                                        'pnl': pnl if 'close' in info else 0
-                                    })
-                                    
-                                    # Keep only the most recent trades
-                                    if len(self.recent_trades) > self.max_recent_trades:
-                                        self.recent_trades.pop(0)
-                            
-                                # If new position is non-zero, this is a trade entry
+                                        
+                                        # Log trade details
+                                        logger.info(f"Trade exit: position={position}, price={exit_price:.4f}, pnl={pnl:.2f}, duration={trade_duration}")
+                                        
+                                        # Record trade metrics
+                                        self.logger.record('trades/count', self.trade_count)
+                                        self.logger.record('trades/win_rate', self.successful_trades / max(1, self.trade_count))
+                                        self.logger.record('trades/profit_factor', self.total_profit / max(1e-6, self.total_loss))
+                                        self.logger.record('trades/duration', trade_duration)
+                                        self.logger.record('trades/pnl', pnl)
+                                
+                                # This is a new trade entry
                                 if position != 0:
-                                    self.trade_count += 1
+                                    self.current_position = position
+                                    self.position_start_time = self.debug_steps
                                     self.last_trade_step = self.debug_steps
+                                    
                                     if 'close' in info:
                                         self.entry_price = info['close']
                                         logger.info(f"Trade entry: position={position}, price={self.entry_price:.4f}")
-                                    self.position_start_time = self.debug_steps
-                                
-                                self.current_position = position
-                        
-                        # Track action type
+                                else:
+                                    # Exit to flat position
+                                    self.current_position = 0
+                            
+                        # Track actions based on info
                         if 'action_type' in info:
                             action_type = info['action_type']
                             if action_type in self.action_counts:
                                 self.action_counts[action_type] += 1
-                            self.logger.record(f'actions/{action_type}', self.action_counts.get(action_type, 0))
+                            self.logger.record(f'actions/{action_type}', 1)
                             
-                            # Log action distribution periodically
-                            if self.debug_steps % (self.debug_frequency * 10) == 0:
-                                total_actions = sum(self.action_counts.values())
-                                if total_actions > 0:
-                                    buy_pct = self.action_counts.get('buy', 0) / total_actions * 100
-                                    sell_pct = self.action_counts.get('sell', 0) / total_actions * 100
-                                    hold_pct = self.action_counts.get('hold', 0) / total_actions * 100
-                                    logger.info(f"Action distribution: Buy: {buy_pct:.1f}%, Sell: {sell_pct:.1f}%, Hold: {hold_pct:.1f}%")
-                        
-                        # Track trade metrics
-                        if 'trade_count' in info:
-                            self.logger.record('trades/count', info['trade_count'])
-                        if 'profit_loss' in info:
-                            self.logger.record('trades/profit_loss', info['profit_loss'])
-                        
-                        # Track individual reward components if available
-                        if 'reward_components' in info:
-                            components = info['reward_components']
-                            for comp_name, comp_value in components.items():
-                                self.logger.record(f'reward_components/{comp_name}', comp_value)
-                    
-                    # Check if episode is done
-                    dones = self.locals.get('dones', [False])
-                    if done and i < len(dones) and dones[i]:
-                        if 'episode' in self.locals and i < len(self.locals['episode'].rewards):
-                            ep_rew = self.locals['episode'].rewards[i]
-                            self.episode_rewards.append(ep_rew)
-                            self.logger.record('episode/reward', ep_rew)
-                            
-                            # Record trade metrics at episode end
-                            if self.rapid_trades_detected > 0:
-                                logger.warning(f"Episode ended with {self.rapid_trades_detected} rapid trades detected, {self.rapid_trade_attempts} attempts")
-                                self.logger.record('trades/rapid_trades', self.rapid_trades_detected)
-                                self.logger.record('trades/same_price_trades', self.same_price_trades)
-                                self.logger.record('trades/frozen_periods', self.frozen_period_enforced)
-                            
-                            # Record trade win rate
-                            if self.trade_count > 0:
-                                win_rate = self.successful_trades / max(1, self.trade_count) * 100
-                                self.logger.record('trades/win_rate', win_rate)
-                                if self.total_loss > 0:
-                                    self.logger.record('trades/profit_factor', self.total_profit / max(1e-6, self.total_loss))
-                        
-            return True  # Continue training
+                            # Store action history for oscillation detection
+                            if action_type == 'buy':
+                                self.action_history.append(2)
+                            elif action_type == 'sell':
+                                self.action_history.append(0)
+                            else:  # hold
+                                self.action_history.append(1)
+                                
+                            # Keep history to a reasonable size
+                            if len(self.action_history) > 20:
+                                self.action_history = self.action_history[-20:]
+                                
+                            # Check for oscillation patterns
+                            if len(self.action_history) >= 4:
+                                last_four = self.action_history[-4:]
+                                if (last_four == [2, 0, 2, 0] or last_four == [0, 2, 0, 2]):
+                                    logger.warning(f"Oscillation pattern detected in callback: {last_four}")
+                                    self.oscillation_count += 1
+                                    self.logger.record('environment/oscillation_detected', 1)
+            
+            return True
     
-    # Create the TensorboardCallback
-    tensorboard_callback = TensorboardCallback()
+    # Use the enhanced callback
+    callback = TensorboardCallback()
     
-    # Try to create and train the model
+    logger.info(f"Creating {model_name} model with kwargs: {model_kwargs}")
+    
+    # Create the model
+    model = agent.get_model(model_name, model_kwargs)
+    
+    # Train the model
+    logger.info(f"Training model for {timesteps} steps")
+    start_time = time.time()
+    
     try:
-        logger.info(f"Creating {finrl_model} model with parameters: {model_params}")
-        
-        # Additional parameters to pass to the model
-        if device is not None:
-            model_params['device'] = device
-        
-        # Instantiate the model
-        model = model_class(
-            policy="MlpPolicy",
-            env=vec_env,
-            verbose=1,
-            tensorboard_log=tensorboard_log,
-            **model_params
-        )
-        
-        # Log the model parameters
-        logger.info(f"Model created with parameters: {model.get_parameters()}")
-        
-        # Set the random seed if provided
-        if hasattr(args, 'seed') and args.seed is not None:
-            logger.info(f"Setting random seed: {args.seed}")
-            model.set_random_seed(args.seed)
-        
-        # Train the model
-        logger.info(f"Starting training for {timesteps} timesteps")
         model.learn(
-            total_timesteps=timesteps,
-            callback=tensorboard_callback,
-            tb_log_name=f"{finrl_model}_logs",
-            progress_bar=True,
-            reset_num_timesteps=True
+            total_timesteps=int(timesteps),
+            callback=callback
         )
         
-        # Save the model
-        if hasattr(args, 'model_save_path') and args.model_save_path is not None:
-            save_path = args.model_save_path
-        else:
-            save_path = f"./models/{finrl_model}_{int(time.time())}"
-        
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        
-        logger.info(f"Saving model to {save_path}")
+        # Save the trained model
+        os.makedirs("./trained_models", exist_ok=True)
+        save_path = f"./trained_models/{model_name}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
         model.save(save_path)
-        
-        return model
+        logger.info(f"Model saved to {save_path}")
         
     except Exception as e:
-        logger.error(f"Error during model training: {e}")
+        logger.error(f"Error during training: {e}")
         traceback.print_exc()
-        return None
+    
+    # Log training time
+    training_time = time.time() - start_time
+    logger.info(f"Training completed in {training_time:.2f} seconds")
+    
+    return model
 
 def setup_logging():
     """Configure logging."""
