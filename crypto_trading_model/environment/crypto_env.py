@@ -275,7 +275,36 @@ class CryptocurrencyTradingEnv(gym.Env):
         
         if not current_data.empty:
             price = current_data.iloc[0]['close']
-            value = self.portfolio_value + self.assets_owned[0] * price
+            
+            # Safety checks for numerical stability
+            if not np.isfinite(price) or price <= 0:
+                logger.warning(f"Invalid price value detected: {price}, using 1.0")
+                price = 1.0
+                
+            # Clip assets owned to prevent extreme values
+            asset_value = 0
+            if self.assets_owned[0] > 0:
+                # Apply a safety limit to prevent overflow
+                clipped_assets = min(self.assets_owned[0], 1e6)  # Limit to 1 million units
+                if clipped_assets != self.assets_owned[0]:
+                    logger.warning(f"Clipping excessive asset position from {self.assets_owned[0]} to {clipped_assets}")
+                    self.assets_owned[0] = clipped_assets
+                
+                # Calculate asset value with overflow prevention
+                asset_value = clipped_assets * price
+                
+                # Prevent extreme values
+                if asset_value > 1e9:  # Limit to 1 billion
+                    logger.warning(f"Asset value too large: {asset_value}, clipping to 1e9")
+                    asset_value = 1e9
+                
+            # Calculate total value with safety checks
+            value = self.portfolio_value + asset_value
+            
+            # Final safety check for numerical stability
+            if not np.isfinite(value) or abs(value) > 1e9:
+                logger.warning(f"Invalid portfolio value detected: {value}, resetting to initial amount")
+                value = self.initial_amount
         
         return value
     

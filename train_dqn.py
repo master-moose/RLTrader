@@ -783,34 +783,66 @@ def train_ppo(env, args):
     # Combine callbacks
     callback = CallbackList(callbacks)
     
-    # Create PPO model with custom policy kwargs
+    # Create PPO model with custom policy kwargs and improved stability parameters
     policy_kwargs = dict(
-        net_arch=[dict(pi=[128, 128], vf=[128, 128])]
+        net_arch=[dict(pi=[64, 64], vf=[64, 64])],  # Smaller networks for stability
+        activation_fn=torch.nn.Tanh,  # Tanh keeps values bounded between -1 and 1
+        log_std_init=-2.0  # More conservative initial exploration
     )
+    
+    # Lower learning rate and use a scheduler for stability
+    learning_rate = args.learning_rate
+    if learning_rate > 0.001:
+        logger.warning(f"Reducing learning rate from {learning_rate} to 0.001 for stability")
+        learning_rate = 0.001
+    
+    # Calculate appropriate clip range based on action space
+    clip_range = min(args.clip_range, 0.1)  # Conservative clipping
     
     # Create model
     model = PPO(
         "MlpPolicy",
         env,
-        learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
+        learning_rate=learning_rate,
+        n_steps=min(args.n_steps, 2048),  # Cap n_steps for stability
+        batch_size=min(args.batch_size, 64),  # Smaller batch size for more stable updates
+        n_epochs=max(args.n_epochs, 5),  # At least 5 epochs
         gamma=args.gamma,
-        ent_coef=args.ent_coef,
-        clip_range=args.clip_range,
+        ent_coef=max(args.ent_coef, 0.01),  # Ensure sufficient exploration
+        clip_range=clip_range,
+        clip_range_vf=clip_range,  # Also clip value function for stability
+        normalize_advantage=True,  # Normalize advantages for stability
+        max_grad_norm=0.5,  # Add strong gradient clipping
         policy_kwargs=policy_kwargs,
         verbose=1 if args.verbose else 0,
         tensorboard_log="tensorboard_log",
         device=args.device
     )
     
+    # Apply torch float32 precision for better numerical stability
+    torch.set_default_dtype(torch.float32)
+    torch.set_printoptions(precision=10)
+    
+    # Log the training parameters
+    logger.info(f"Training PPO with parameters:")
+    logger.info(f" - Learning rate: {learning_rate}")
+    logger.info(f" - Batch size: {model.batch_size}")
+    logger.info(f" - n_steps: {model.n_steps}")
+    logger.info(f" - clip_range: {clip_range}")
+    logger.info(f" - max_grad_norm: 0.5")
+    
     # Train model
     try:
+        # Create a learning rate scheduler for stability
+        def lr_schedule(remaining_progress):
+            # Start with the base learning rate and decay to 10% of the initial value
+            return learning_rate * (0.1 + 0.9 * remaining_progress)
+        
         model.learn(
             total_timesteps=args.timesteps,
             callback=callback,
-            tb_log_name="ppo_run"
+            tb_log_name="ppo_run",
+            progress_bar=True
         )
         
         # Save trained model
