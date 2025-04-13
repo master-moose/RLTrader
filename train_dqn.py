@@ -1092,7 +1092,7 @@ def load_lstm_model(model_path):
                 
             # Add a utility method for feature extraction if needed
             if not hasattr(model, 'forward_features'):
-                def forward_features(x):
+                def forward_features(self, x):
                     """Extract features without classification head"""
                     with torch.no_grad():
                         # Process through encoders and get encoded timeframes
@@ -1597,7 +1597,17 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
                                 lstm_features = None
                     elif hasattr(self.lstm_model, 'forward_features'):
                         # Use dedicated feature extraction method if available
-                        lstm_features = self.lstm_model.forward_features(observations.float())
+                        try:
+                            lstm_features = self.lstm_model.forward_features(observations.float())
+                        except Exception as fwd_error:
+                            # If this fails, try a different approach
+                            logger.warning(f"Error using forward_features: {fwd_error}")
+                            try:
+                                # Try a direct forward call as fallback
+                                lstm_features = self.lstm_model(observations.float())
+                            except Exception as fallback_error:
+                                logger.warning(f"Failed with direct call: {fallback_error}")
+                                lstm_features = None
                     else:
                         # Fall back to regular forward if forward_features is not available
                         # and the model accepts tensor input directly
@@ -1605,7 +1615,11 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
                             lstm_features, _ = self.lstm_model(observations.float())
                         except Exception:
                             # Some models may not return a tuple
-                            lstm_features = self.lstm_model(observations.float())
+                            try:
+                                lstm_features = self.lstm_model(observations.float())
+                            except Exception as direct_error:
+                                logger.warning(f"Direct model call failed: {direct_error}")
+                                lstm_features = None
                 
                 # Combine the features if LSTM processing was successful
                 if lstm_features is not None and lstm_features.size(0) == features.size(0):
