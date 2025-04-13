@@ -417,7 +417,7 @@ def parse_args():
                         help="Path to pre-trained LSTM model for state representation")
     
     # Environment parameters
-    parser.add_argument("--data_path", type=str, default="data/processed/market_data.h5", 
+    parser.add_argument("--data_path", type=str, default="data/synthetic/synthetic_dataset.h5", 
                        help="Path to market data (HDF5 format)")
     parser.add_argument("--state_space", type=int, default=16, help="State space dimensionality")
     parser.add_argument("--initial_balance", type=float, default=10000.0, help="Initial portfolio balance")
