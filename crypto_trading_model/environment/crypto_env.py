@@ -126,40 +126,73 @@ class CryptocurrencyTradingEnv(gym.Env):
     
     def reset(self, seed=None, options=None):
         """
-        Reset the environment to its initial state.
-        
-        Returns:
-            Tuple of (observation, info)
+        Reset the environment state at the start of a new episode.
         """
+        # Reset internal state
         if seed is not None:
             np.random.seed(seed)
         
-        # Randomize start day if enabled
+        self.terminal = False
+        self.day = 0
+        self.assets_owned = np.zeros(self.stock_dim)
+        self.costs = []
+        self.trades = 0
+        self.total_trades = 0
+        self.holding_counter = 0
+        self.forced_sells = 0  # Reset forced sells counter
+        
+        # Randomize start day if configured
         if self.randomize_start and self.max_start_day > 0:
             self.start_day = np.random.randint(0, self.max_start_day)
             logger.info(f"Starting new episode from day {self.start_day} (out of {self.total_days})")
         else:
             self.start_day = 0
-            
+        
         self.day = self.start_day
+        
+        # Get the first day of data
+        if self.day >= len(self.df.index.unique()):
+            self.day = 0  # Reset if we're past the end of data
+        
+        # Reset portfolio value to initial amount
         self.portfolio_value = self.initial_amount
-        self.assets_owned = [0] * self.stock_dim
         self.cost = 0
-        self.trades = 0
-        self.episode_reward = 0
         
-        # Reset holding counter
-        self.holding_counter = 0
-        self.forced_sells = 0
+        # Validate portfolio integrity
+        self._validate_portfolio_integrity()
         
-        # Reset memory
-        self.asset_memory = [self.initial_amount]
-        self.rewards_memory = []
+        observation = self._get_observation()
+        info = self._get_info()
         
-        # Create observation
-        self.state = self._get_observation()
+        return observation, info
+    
+    def _validate_portfolio_integrity(self):
+        """
+        Validate that portfolio values are reasonable and consistent.
+        This helps prevent artificial manipulation of values.
+        """
+        # Ensure portfolio value is positive and not too high
+        if not np.isfinite(self.portfolio_value) or self.portfolio_value <= 0:
+            logger.warning("Reset detected invalid portfolio value, resetting to initial amount")
+            self.portfolio_value = self.initial_amount
         
-        return self.state, {}
+        # Ensure assets owned is reasonable
+        for i, asset in enumerate(self.assets_owned):
+            if not np.isfinite(asset) or asset < 0:
+                logger.warning(f"Reset detected invalid assets owned [{i}]: {asset}, resetting to 0")
+                self.assets_owned[i] = 0.0
+            
+        # Ensure we're not starting with an unreasonable portfolio value
+        if self.portfolio_value > self.initial_amount * 3:
+            logger.warning(f"Reset detected unusually high portfolio value: {self.portfolio_value}, capping at 3x initial")
+            self.portfolio_value = self.initial_amount * 3
+        
+        # Validate that portfolio calculation is consistent
+        calculated_value = self._calculate_portfolio_value()
+        difference = abs(calculated_value - self.portfolio_value)
+        if difference > self.initial_amount * 0.01:  # More than 1% difference
+            logger.warning(f"Portfolio value inconsistency detected: {self.portfolio_value} vs {calculated_value}, correcting")
+            self.portfolio_value = calculated_value
     
     def step(self, action):
         """
@@ -553,14 +586,14 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Get current price with robust error handling
         price = self._get_current_price()
         if price is None or not np.isfinite(price) or price <= 0:
-            logger.warning(f"Invalid price in _calculate_portfolio_value: using default of 1.0")
+            logger.warning("Invalid price in _calculate_portfolio_value: using default of 1.0")
             price = 1.0
         
         # Original portfolio value for reference
         original_value = self.portfolio_value
         
-        # Start with cash (with safety bound) - increasing the maximum proportion
-        cash_value = min(max(0, self.portfolio_value), self.max_portfolio_value * 0.9)  # Increased from 0.8 to 0.9
+        # Start with cash (with safety bound)
+        cash_value = min(max(0, self.portfolio_value), self.max_portfolio_value * 0.9)
         if cash_value != self.portfolio_value and abs(cash_value - self.portfolio_value) > 100:
             logger.warning(f"Clipping cash value from {self.portfolio_value} to {cash_value}")
             self.portfolio_value = cash_value
@@ -568,10 +601,10 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Calculate asset value with multiple safety measures
         asset_value = 0
         if self.assets_owned[0] > 0:
-            # Use a more generous asset limit (1000 units max - increased from 500)
-            max_asset_units = 1e3  # Increased from 5e2 to 1e3
+            # Use a reasonable asset limit to prevent overflow
+            max_asset_units = 1e3
             
-            # Apply a stricter safety limit to prevent overflow
+            # Apply safety limit to prevent overflow
             original_assets = self.assets_owned[0]
             clipped_assets = min(original_assets, max_asset_units)
             
@@ -583,35 +616,19 @@ class CryptocurrencyTradingEnv(gym.Env):
             # Calculate asset value with overflow prevention
             asset_value = clipped_assets * price
             
-            # Detect if asset value is unreasonably large compared to initial amount
-            asset_value_ratio = asset_value / self.initial_amount
-            if asset_value_ratio > 15:  # Increased from 10 to 15
-                logger.warning(f"Asset value extremely high: {asset_value_ratio:.2f}x initial amount")
-                # Now actually clip it
-                max_reasonable_value = self.initial_amount * 15  # Increased from 10 to 15
-                if asset_value > max_reasonable_value:
-                    asset_value = max_reasonable_value
-                    # Update assets owned to match the clipped value
-                    self.assets_owned[0] = asset_value / price
-                
-            # More generous value limit (35% of max instead of 25%)
-            max_asset_value = self.max_portfolio_value * 0.35  # Increased from 0.25 to 0.35
-            if asset_value > max_asset_value:
-                logger.warning(f"Asset value too large: {asset_value:.2f}, clipping to {max_asset_value:.2f}")
-                
-                # Recalculate assets owned based on the max allowed value
-                self.assets_owned[0] = max_asset_value / price
-                asset_value = max_asset_value
+            # Apply reasonable limits to asset value
+            if asset_value > self.initial_amount * 15:
+                logger.warning(f"Asset value extremely high: {asset_value:.2f}, clipping to {self.initial_amount * 15:.2f}")
+                asset_value = self.initial_amount * 15
+                self.assets_owned[0] = asset_value / price
         
-        # Calculate total value with stronger safety checks
+        # Calculate total value
         total_value = cash_value + asset_value
         
-        # Apply less strict maximum - allow up to 50x initial amount
-        absolute_max = self.initial_amount * 50  # Increased from 30 to 50
+        # Apply reasonable maximum - but don't artificially manipulate values
+        absolute_max = self.initial_amount * 25  # Reduced from 50 to 25
         if total_value > absolute_max:
-            # Only log warning if significantly exceeding the limit
-            if total_value > self.initial_amount * 30:
-                logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
+            logger.warning(f"Portfolio value exceeded absolute maximum: {total_value:.2f}, clipping to {absolute_max:.2f}")
             
             # Proportionally reduce cash and assets 
             if asset_value > 0:
@@ -633,34 +650,6 @@ class CryptocurrencyTradingEnv(gym.Env):
                 self.portfolio_value = absolute_max
                 total_value = absolute_max
         
-        # Add more variation to prevent exactly doubling the initial amount
-        # Introduce a small random factor (between 0.98 and 1.02) to any growth limits
-        if total_value > self.initial_amount * 1.8:
-            # Add small random variation factor to avoid exact doubling
-            variation_factor = 1.0 + (np.random.random() * 0.04 - 0.02)  # Range from 0.98 to 1.02
-            
-            if total_value > self.initial_amount * 2.0:
-                original_value = total_value
-                # Apply variation to prevent exact threshold values
-                total_value = min(total_value, self.initial_amount * 2.0 * variation_factor)
-                if total_value != original_value:
-                    logger.info(f"Applied variation factor to portfolio value: {original_value:.2f} -> {total_value:.2f}")
-                    
-                    # Adjust both cash and assets proportionally
-                    if asset_value > 0:
-                        ratio = asset_value / original_value
-                        new_asset_value = total_value * ratio
-                        new_cash_value = total_value - new_asset_value
-                        
-                        self.assets_owned[0] = new_asset_value / price
-                        self.portfolio_value = new_cash_value
-        
-        # OPTIONAL: Add small random noise to final value to avoid exact thresholds
-        if abs(total_value - self.initial_amount * 2.0) < 0.01:
-            noise = (np.random.random() * 0.02 - 0.01) * self.initial_amount  # Small noise
-            total_value += noise
-            self.portfolio_value += noise
-        
         # Final sanity check for numerical stability
         if not np.isfinite(total_value) or total_value <= 0:
             logger.warning(f"Invalid portfolio value detected: {total_value:.2f}, resetting to initial amount")
@@ -670,9 +659,9 @@ class CryptocurrencyTradingEnv(gym.Env):
             self.portfolio_value = self.initial_amount
             self.assets_owned[0] = 0
         
-        # Track if we made a significant change to the value
-        if abs(total_value - original_value) / max(1, original_value) > 1.0 and original_value > 0:  # Increased from 0.8 to 1.0
-            logger.warning(f"Portfolio value changed dramatically: {original_value:.2f} -> {total_value:.2f}")
+        # Track significant changes to portfolio value
+        if abs(total_value - original_value) / max(1, original_value) > 0.3 and original_value > 0:
+            logger.warning(f"Portfolio value changed significantly: {original_value:.2f} -> {total_value:.2f}")
         
         return float(total_value)
     

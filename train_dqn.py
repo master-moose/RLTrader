@@ -200,6 +200,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.risk_adjusted_position_sizing = True  # Use risk-adjusted position sizing
         self.cumulative_risk = 0.0  # Track cumulative risk across open positions
         self.max_cumulative_risk = 0.15  # Increased from 0.06 to 0.15 - allow more risk
+        self.risk_per_position = {}  # Track risk per position
         
         # Trading history tracking
         self.last_trade_step = -self.trade_cooldown  # Start with cooldown already passed
@@ -350,6 +351,9 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Add action history to observation
         observation = self._augment_observation(observation)
+        
+        self.cumulative_risk = 0.0  # Reset cumulative risk on environment reset
+        self.risk_per_position = {}  # Reset risk per position tracking
         
         return observation, info
     
@@ -852,16 +856,37 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             # If this is an actual trade, update risk management metrics
             # For simplicity, assume each trade uses max_risk_per_trade amount of risk
             portfolio_value = getattr(self.env, 'portfolio_value', None)
+            position_id = str(current_step)  # Use step as position identifier
+            
             if action == 0:  # Sell (close position)
-                self.cumulative_risk = max(0, self.cumulative_risk - self.max_risk_per_trade)
+                # Reduce risk by removing all risk associated with closed positions
+                # Instead of blindly subtracting max_risk_per_trade
+                for pos_id in list(self.risk_per_position.keys()):
+                    # For simplicity, close all positions on a sell
+                    self.cumulative_risk -= self.risk_per_position[pos_id]
+                    del self.risk_per_position[pos_id]
+                
+                # Ensure we don't go below zero
+                self.cumulative_risk = max(0.0, self.cumulative_risk)
+                
             elif action == 2:  # Buy (open position)
-                self.cumulative_risk += self.max_risk_per_trade
+                # Add risk for this new position, but respect the maximum
+                new_risk = min(self.max_risk_per_trade, 
+                              self.max_cumulative_risk - self.cumulative_risk)
+                
+                if new_risk > 0:
+                    self.risk_per_position[position_id] = new_risk
+                    self.cumulative_risk += new_risk
+                else:
+                    # Log that we're at maximum risk
+                    logger.warning(f"At maximum risk {self.cumulative_risk:.1%}, cannot take more risk")
                 
             # Only log risk management metrics when there's a trade or periodically
-            if trade_occurred and (current_step % 100000 == 0 or abs(self.cumulative_risk % 0.02) < 0.001):
+            if (current_step % 100000 == 0 or abs(self.cumulative_risk % 0.02) < 0.001):
+                position_count = len(self.risk_per_position)
                 portfolio_value_str = f"{portfolio_value:.2f}" if portfolio_value is not None else "unknown"
                 logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
-                           f"Portfolio value: {portfolio_value_str}")
+                           f"Portfolio value: {portfolio_value_str}, Positions: {position_count}")
         
         # Log action distribution less frequently
         if current_step % 100000 == 0:
@@ -998,6 +1023,7 @@ class TensorboardCallback(BaseCallback):
         self.total_profit = 0.0
         self.total_loss = 0.0
         self.action_counts = {0: 0, 1: 0, 2: 0}  # Sell, Hold, Buy
+        self.episode_action_counts = {0: 0, 1: 0, 2: 0}  # Track actions per episode
         
         # Safety metrics
         self.cooldown_violations = 0
@@ -1108,6 +1134,7 @@ class TensorboardCallback(BaseCallback):
                         action = info['action']
                         if action in self.action_counts:
                             self.action_counts[action] += 1
+                            self.episode_action_counts[action] += 1
                     if 'trade' in info:
                         trade_count = info.get('trade', False)
                         
@@ -1158,6 +1185,11 @@ class TensorboardCallback(BaseCallback):
                 action_table += "-" * 40 + "\n"
                 action_table += "| Action | Count | Percentage |\n"
                 action_table += "-" * 40 + "\n"
+                
+                if total_actions == 0:
+                    # Try to extract actions directly from environments if we're not getting them in info
+                    self._extract_actions_from_envs()
+                    total_actions = sum(self.action_counts.values())
                 
                 for action_name, action_id in {"Sell": 0, "Hold": 1, "Buy": 2}.items():
                     count = self.action_counts.get(action_id, 0)
@@ -1262,6 +1294,7 @@ class TensorboardCallback(BaseCallback):
                             action = info['action']
                             if action in self.action_counts:
                                 self.action_counts[action] += 1
+                                self.episode_action_counts[action] += 1
                                 
                                 # Calculate action distribution
                                 total_actions = sum(self.action_counts.values())
@@ -1324,6 +1357,52 @@ class TensorboardCallback(BaseCallback):
                         logger.info(f"Episode complete, reward: {reward:.2f}, portfolio: {portfolio_value:.2f}")
         
         return True
+    
+    def _extract_actions_from_envs(self):
+        """Extract action counts directly from environments"""
+        try:
+            if hasattr(self.training_env, 'envs'):
+                for env in self.training_env.envs:
+                    # If we have a SafeTradingEnvWrapper, get action history from it
+                    if hasattr(env, 'action_history') and env.action_history:
+                        for action in env.action_history:
+                            if action is not None and action in self.action_counts:
+                                self.action_counts[action] += 1
+                    
+                    # Try to access the unwrapped env if it's a wrapper
+                    if hasattr(env, 'env'):
+                        unwrapped = env.env
+                        if hasattr(unwrapped, 'action_history') and unwrapped.action_history:
+                            for action in unwrapped.action_history:
+                                if action is not None and action in self.action_counts:
+                                    self.action_counts[action] += 1
+            
+            logger.info(f"Extracted action counts directly from environments: {self.action_counts}")
+        except Exception as e:
+            logger.error(f"Error extracting actions from environments: {e}")
+    
+    def on_episode_end(self, episode_rewards, episode_lengths, episode_info=None):
+        """Called at the end of an episode"""
+        # Log episode action distribution
+        total_actions = sum(self.episode_action_counts.values())
+        if total_actions > 0:
+            episode_action_table = "Episode Action Distribution:\n"
+            episode_action_table += "-" * 40 + "\n"
+            episode_action_table += "| Action | Count | Percentage |\n"
+            episode_action_table += "-" * 40 + "\n"
+            
+            for action_name, action_id in {"Sell": 0, "Hold": 1, "Buy": 2}.items():
+                count = self.episode_action_counts.get(action_id, 0)
+                percentage = (count / max(1, total_actions)) * 100
+                episode_action_table += f"| {action_name} | {count} | {percentage:.1f}% |\n"
+            
+            episode_action_table += "-" * 40
+            logger.info(episode_action_table)
+            
+            # Reset episode action counts
+            self.episode_action_counts = {0: 0, 1: 0, 2: 0}
+        
+        return super().on_episode_end(episode_rewards, episode_lengths, episode_info)
 
 
 class ResourceCheckCallback(BaseCallback):
