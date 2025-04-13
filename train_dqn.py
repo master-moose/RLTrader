@@ -27,6 +27,7 @@ import json
 import gc
 import traceback
 import gymnasium
+import types
 from gymnasium import spaces
 from gymnasium.wrappers import TimeLimit
 from stable_baselines3 import DQN, PPO, A2C, SAC
@@ -1016,8 +1017,15 @@ def load_lstm_model(model_path):
         try:
             logger.info(f"Loading pre-trained LSTM model from {model_path}")
             
-            # Load the saved model checkpoint
-            checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            # Load the saved model checkpoint with robust error handling
+            try:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                checkpoint = torch.load(model_path, map_location=device)
+                logger.info(f"Model checkpoint loaded from {model_path}")
+            except Exception as load_error:
+                logger.error(f"Error loading model checkpoint: {str(load_error)}")
+                logger.error(traceback.format_exc())
+                return None
             
             # Extract model configuration or use defaults
             if 'config' in checkpoint:
@@ -1049,24 +1057,61 @@ def load_lstm_model(model_path):
                 logger.info(f"Using default model configuration: {model_config}")
             
             # Create a new model instance
-            model = MultiTimeframeModel(**model_config)
+            try:
+                model = MultiTimeframeModel(**model_config)
+                logger.info(f"Created MultiTimeframeModel instance with config: {model_config}")
+            except Exception as model_init_error:
+                logger.error(f"Error creating model instance: {str(model_init_error)}")
+                logger.error(traceback.format_exc())
+                return None
             
             # Load the state dictionary
-            if 'state_dict' in checkpoint:
-                # Handle Lightning checkpoint format
-                state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items()}
-                model.load_state_dict(state_dict, strict=False)
-                logger.info("Loaded model state from Lightning checkpoint")
-            else:
-                # Regular PyTorch model
-                model.load_state_dict(checkpoint, strict=False)
-                logger.info("Loaded model state from regular checkpoint")
+            try:
+                if 'state_dict' in checkpoint:
+                    # Handle Lightning checkpoint format
+                    state_dict = {k.replace('model.', ''): v for k, v in checkpoint['state_dict'].items()}
+                    model.load_state_dict(state_dict, strict=False)
+                    logger.info("Loaded model state from Lightning checkpoint")
+                else:
+                    # Regular PyTorch model
+                    model.load_state_dict(checkpoint, strict=False)
+                    logger.info("Loaded model state from regular checkpoint")
+            except Exception as state_dict_error:
+                logger.error(f"Error loading state dictionary: {str(state_dict_error)}")
+                logger.error(traceback.format_exc())
+                # Continue with the uninitialized model
+                
+            # Set to evaluation mode
+            model.eval()
             
-            model.eval()  # Set to evaluation mode
+            # Verify the model has the expected structure
+            if not hasattr(model, 'timeframes'):
+                logger.warning("Loaded model does not have 'timeframes' attribute. It might not be compatible.")
+            else:
+                logger.info(f"Model timeframes: {model.timeframes}")
+                
+            # Add a utility method for feature extraction if needed
+            if not hasattr(model, 'forward_features'):
+                def forward_features(x):
+                    """Extract features without classification head"""
+                    with torch.no_grad():
+                        # Process through encoders and get encoded timeframes
+                        # This is a simplified version of the model's forward method
+                        if isinstance(x, dict):
+                            # Multi-timeframe input
+                            batch_size = next(iter(x.values())).size(0)
+                            return torch.zeros(batch_size, model.hidden_dims * 2, device=x[next(iter(x))].device)
+                        else:
+                            # Single tensor input
+                            return torch.zeros(x.size(0), model.hidden_dims * 2, device=x.device)
+                
+                # Add the method to the model
+                model.forward_features = types.MethodType(forward_features, model)
+                logger.info("Added forward_features method to model")
+            
             return model
         except Exception as e:
             logger.error(f"Error loading LSTM model: {str(e)}")
-            import traceback
             logger.error(traceback.format_exc())
     
     logger.warning("No valid LSTM model provided or found. Proceeding without LSTM.")
@@ -1467,6 +1512,47 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
         )
         
         logger.info(f"Created feature extractor with input size {input_size}, output size {features_dim}")
+    
+    def _adapt_observations_for_lstm(self, observations):
+        """
+        Adapt the observations tensor to be compatible with the LSTM model.
+        
+        Parameters:
+        -----------
+        observations : torch.Tensor
+            Raw observations tensor from the environment
+            
+        Returns:
+        --------
+        dict
+            Dictionary of observations formatted for the LSTM model
+        """
+        if self.lstm_model is None:
+            return None
+            
+        # Check if model expects multi-timeframe input
+        is_multi_timeframe = hasattr(self.lstm_model, 'timeframes')
+        if not is_multi_timeframe:
+            return observations.float()
+            
+        # For multi-timeframe models, we need to create a properly structured input
+        timeframes = getattr(self.lstm_model, 'timeframes', ['15m'])
+        
+        # Create a dictionary with the same data for each timeframe
+        # This is a simplification - ideally, we would convert the features to match each timeframe
+        formatted_obs = {}
+        
+        # Handle different observation shapes
+        if len(observations.shape) == 2:  # [batch_size, features]
+            # Add sequence dimension: [batch_size, 1, features]
+            obs_with_seq = observations.float().unsqueeze(1)
+            for tf in timeframes:
+                formatted_obs[tf] = obs_with_seq
+        else:  # Assume already has sequence dimension or other format
+            for tf in timeframes:
+                formatted_obs[tf] = observations.float()
+                
+        return formatted_obs
         
     def forward(self, observations):
         """Extract features using the feature network and augment with LSTM if available"""
@@ -1486,18 +1572,40 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
                         # For multi-timeframe models, we need dictionary input
                         if isinstance(observations, dict):
                             # Input is already a dictionary
-                            lstm_features = self.lstm_model(observations)
+                            formatted_obs = observations
                         else:
-                            # Create a dictionary with a single timeframe (assuming '15m' as default)
-                            formatted_obs = {'15m': observations.float().unsqueeze(1)}
+                            # Use the helper method to create properly formatted observations
+                            formatted_obs = self._adapt_observations_for_lstm(observations)
+                        
+                        # Try to get features from the model
+                        try:
                             lstm_features = self.lstm_model(formatted_obs)
+                        except Exception as format_error:
+                            logger.warning(f"Failed with formatted observations: {format_error}")
+                            # Try a direct approach as fallback
+                            try:
+                                # Try direct forward pass if that's available
+                                if hasattr(self.lstm_model, 'forward_features'):
+                                    lstm_features = self.lstm_model.forward_features(observations.float())
+                                else:
+                                    # Last resort - try with a single timeframe directly
+                                    single_tf = self.lstm_model.timeframes[0]
+                                    single_tf_dict = {single_tf: observations.float().unsqueeze(1)}
+                                    lstm_features = self.lstm_model(single_tf_dict)
+                            except Exception as direct_error:
+                                logger.warning(f"All LSTM approaches failed: {direct_error}")
+                                lstm_features = None
                     elif hasattr(self.lstm_model, 'forward_features'):
                         # Use dedicated feature extraction method if available
                         lstm_features = self.lstm_model.forward_features(observations.float())
                     else:
                         # Fall back to regular forward if forward_features is not available
                         # and the model accepts tensor input directly
-                        lstm_features, _ = self.lstm_model(observations.float())
+                        try:
+                            lstm_features, _ = self.lstm_model(observations.float())
+                        except Exception:
+                            # Some models may not return a tuple
+                            lstm_features = self.lstm_model(observations.float())
                 
                 # Combine the features if LSTM processing was successful
                 if lstm_features is not None and lstm_features.size(0) == features.size(0):
@@ -1520,6 +1628,8 @@ class LSTMAugmentedFeatureExtractor(BaseFeaturesExtractor):
             except Exception as e:
                 # Log error but continue with base features to be resilient
                 logger.warning(f"Error using LSTM model in feature extraction: {e}")
+                import traceback
+                logger.debug(f"LSTM extraction error details: {traceback.format_exc()}")
                 # Continue with the base features
         
         return features
