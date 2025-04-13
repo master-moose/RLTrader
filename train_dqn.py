@@ -1538,9 +1538,17 @@ def train_a2c(env, args, callbacks=None):
     # Set batch_size to 2048 as requested
     batch_size = 2048
     
+    # Get number of environments
+    num_envs = env.num_envs if hasattr(env, 'num_envs') else 1
+    
     # Log the updated parameters
     logger.info(f"Using n_steps={n_steps} (1 year of 15-min candles: 96 candles/day * 365 days)")
     logger.info(f"Using batch size: {batch_size} for A2C training")
+    logger.info(f"Training with {num_envs} parallel environments")
+    
+    # Calculate effective batch size considering the number of environments
+    effective_batch_size = batch_size * num_envs
+    logger.info(f"Effective batch size (batch_size × num_envs): {effective_batch_size}")
     
     # Increase entropy coefficient significantly to encourage exploration
     ent_coef = max(ent_coef, 0.20)  # Increased from 0.05 to 0.20 for much more exploration
@@ -1819,6 +1827,10 @@ def main():
     parser.add_argument("--clip_range", type=float, default=0.2, 
                         help="PPO clip range")
     
+    # Parallelization parameters
+    parser.add_argument("--num_envs", type=int, default=1,
+                        help="Number of parallel environments for training (default: 1)")
+    
     # DQN/SAC-specific parameters
     parser.add_argument("--buffer_size", type=int, default=100000, 
                         help="Replay buffer size for DQN/SAC")
@@ -2000,8 +2012,24 @@ def main():
         time_limit_env = TimeLimit(safe_env, max_episode_steps=args.max_steps)
         return Monitor(time_limit_env, "logs/monitor/")
     
-    # Create vectorized environment
-    vec_env = DummyVecEnv([make_env])
+    # Create vectorized environment with the specified number of environments
+    num_envs = args.num_envs
+    logger.info(f"Creating vectorized environment with {num_envs} parallel environments")
+    
+    # Create a list of environment creation functions
+    env_fns = [make_env for _ in range(num_envs)]
+    
+    # Use SubprocVecEnv for true parallelism when num_envs > 1
+    if num_envs > 1:
+        try:
+            vec_env = SubprocVecEnv(env_fns)
+            logger.info(f"Using SubprocVecEnv with {num_envs} workers for parallel processing")
+        except Exception as e:
+            logger.warning(f"Error creating SubprocVecEnv: {e}. Falling back to DummyVecEnv.")
+            vec_env = DummyVecEnv(env_fns)
+    else:
+        vec_env = DummyVecEnv(env_fns)
+        logger.info("Using DummyVecEnv with a single environment")
     
     # Normalize observations and rewards
     logger.info("Applying VecNormalize")
