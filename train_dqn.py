@@ -78,6 +78,7 @@ TRADE_COOLDOWN_PERIOD = 1  # Minimum value of 1 to prevent division by zero, all
 OSCILLATION_PENALTY = 2.0  # Further reduced from 5.0 to 2.0 - much less penalty for oscillation
 SAME_PRICE_TRADE_PENALTY = 5.0  # Further reduced from 10.0 to 5.0
 MAX_TRADE_FREQUENCY = 0.95  # Increased from 0.80 to 0.95 - allow up to 95% of steps to be trades
+HOLD_ACTION = 1  # The action index for hold (0=sell, 1=hold, 2=buy)
 
 # Class for LSTM feature extraction
 class LSTMFeatureExtractor(BaseFeaturesExtractor):
@@ -213,6 +214,12 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Reduce cooldown as training progresses
         self.min_cooldown = 1  # Minimum cooldown period reduced from 3 to 1
+        
+        # Initialize step counter and cooldown tracking
+        self.current_step = 0
+        self.in_cooldown = False
+        self.cooldown_steps = 0
+        self.has_active_positions = False
         
         # Risk management parameters - relax constraints to allow more trading
         self.max_risk_per_trade = max_risk_per_trade * 1.5  # Increase maximum risk per trade
@@ -729,64 +736,47 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
 
     def step(self, action):
         """
-        Override step method to add trading safeguards and risk management
+        Take a step in the environment after applying our safety checks.
+        
+        Args:
+            action: Action to take
+            
+        Returns:
+            Tuple of (observation, reward, terminated, truncated, info)
         """
-        # Get current step and price information
-        current_step = getattr(self.env, 'current_step', 0)
-        current_price = None
+        # Update counters - do this first so cooldown is tracked correctly
+        self.current_step += 1
         
-        if hasattr(self.env, '_get_current_price'):
-            current_price = self.env._get_current_price()
+        # Calculate allowed actions based on cooldown
+        if self.in_cooldown:
+            self.cooldown_steps += 1
+            if self.cooldown_steps >= self.trade_cooldown:
+                self.in_cooldown = False
+                self.cooldown_steps = 0
+                
+                # Log cooldown end
+                logger.info(f"Cooldown ended at step {self.current_step}")
+                
+        # Only allow trades if we're not in cooldown
+        allowed_action = HOLD_ACTION if self.in_cooldown else action
+                
+        # If we have active positions, check for take-profit and stop-loss conditions
+        if self.has_active_positions:
+            self._check_stop_loss_and_take_profit(action)
             
-        # Calculate potential stop loss and target prices based on current market conditions
-        # Simple example: 2% stop loss, 4% target (2:1 reward-risk ratio)
-        stop_loss_price = current_price * 0.98 if current_price is not None else None
-        target_price = current_price * 1.04 if current_price is not None else None
+        # Take a step in the underlying environment, using allowed_action
+        observation, reward, terminated, truncated, info = self.env.step(allowed_action)
         
-        # Check risk-reward ratio before allowing a trade - significantly relax this constraint
-        # Only perform this check early in training
-        if current_step < 5000 and action != 1 and current_price is not None:  # Not a hold action in early training
-            # Calculate risk-reward ratio for this potential trade
-            risk_reward = self._calculate_risk_reward_ratio(
-                current_price, 
-                current_price, 
-                target_price, 
-                stop_loss_price
-            )
-            
-            # Only block trades with extremely unfavorable risk-reward ratio
-            if risk_reward < self.target_risk_reward_ratio * 0.05:  # Further reduced threshold
-                logger.debug(f"Risk-reward ratio {risk_reward:.2f} far below target {self.target_risk_reward_ratio:.2f}, forcing hold")
-                action = 1  # Force hold if risk-reward is extremely unfavorable
-                
-        # Completely disable cooldown after initial training
-        if current_step > 30:  # Very early training
-            self.current_cooldown = 0  # Remove cooldown completely to encourage trading
+        # Ensure observation has the correct dimension - this is critical for LSTM models
+        if hasattr(self, '_target_dim') and isinstance(observation, np.ndarray):
+            if len(observation.shape) == 1 and observation.shape[0] != self._target_dim:
+                padded_obs = np.zeros(self._target_dim, dtype=observation.dtype)
+                padded_obs[:min(observation.shape[0], self._target_dim)] = observation[:min(observation.shape[0], self._target_dim)]
+                observation = padded_obs
         
-        # Store previous position for change detection
-        self.previous_position = self.current_position
-        
-        # Disable oscillation checks after early training to allow more action freedom
-        if current_step > 10000 and len(self.action_history) > 4:
-            # Only apply oscillation controls in the most extreme cases
-            last_four = self.action_history[-4:]
-            
-            # Apply progressive penalty for oscillatory behavior - but only for very clear oscillation
-            # that repeats multiple times
-            if (last_four == [2, 0, 2, 0] and self.action_history[-8:-4] == [2, 0, 2, 0]) or \
-               (last_four == [0, 2, 0, 2] and self.action_history[-8:-4] == [0, 2, 0, 2]):
-                
-                # Force hold action only for severe repeated oscillation
-                action = 1
-                
-                # Count the oscillation
-                self.oscillation_count += 1
-                
-                # Log the oscillation
-                logger.warning(f"Forced hold due to severe repeated oscillation at step {current_step}")
-        
-        # Take the step in the environment
-        observation, reward, terminated, truncated, info = self.env.step(action)
+        # Augment the observation with additional features
+        if hasattr(self, '_augment_observation'):
+            observation = self._augment_observation(observation)
         
         # Get current price and position after the step
         current_price = None
@@ -804,7 +794,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             if 'take_profit_sells' in info and hasattr(self, 'last_take_profit_sells'):
                 if info['take_profit_sells'] > self.last_take_profit_sells:
                     take_profit_triggered = True
-                    logger.info(f"SafeTradingEnvWrapper detected take profit sell at step {current_step}")
+                    logger.info(f"SafeTradingEnvWrapper detected take profit sell at step {self.current_step}")
                 self.last_take_profit_sells = info['take_profit_sells']
             else:
                 self.last_take_profit_sells = info.get('take_profit_sells', 0)
@@ -837,16 +827,16 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 portfolio_value = info['portfolio_value']
                 
             if portfolio_value is not None:
-                logger.debug(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+                logger.debug(f"TRADE DETECTED at step {self.current_step}: Position changed from {self.previous_position} to {self.current_position}")
                 logger.debug(f"Portfolio value: {portfolio_value:.2f}, Price: {current_price if current_price is not None else 'unknown'}")
             else:
-                logger.debug(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+                logger.debug(f"TRADE DETECTED at step {self.current_step}: Position changed from {self.previous_position} to {self.current_position}")
                 logger.debug(f"Price: {current_price if current_price is not None else 'unknown'}")
                 
             # If this is an actual trade, update risk management metrics
             # For simplicity, assume each trade uses max_risk_per_trade amount of risk
             portfolio_value = getattr(self.env, 'portfolio_value', None)
-            position_id = str(current_step)  # Use step as position identifier
+            position_id = str(self.current_step)  # Use step as position identifier
             
             if action == 0:  # Sell (close position)
                 # Reduce risk by removing all risk associated with closed positions
@@ -872,7 +862,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     logger.warning(f"At maximum risk {self.cumulative_risk:.1%}, cannot take more risk")
                 
             # Only log risk management metrics when there's a trade or periodically
-            if (current_step % 100000 == 0 or abs(self.cumulative_risk % 0.02) < 0.001):
+            if (self.current_step % 100000 == 0 or abs(self.cumulative_risk % 0.02) < 0.001):
                 position_count = len(self.risk_per_position)
                 portfolio_value_str = f"{portfolio_value:.2f}" if portfolio_value is not None else "unknown"
                 logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
@@ -906,9 +896,33 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 logger.warning(f"PERSISTENT HOLD PATTERN DETECTED: {window_counts.get(1, 0)}/{len(self.action_window)} actions are hold")
                 
         # Calculate risk-adjusted rewards after action is taken
-        risk_adjusted_reward = self._calculate_risk_rewards(reward, info, trade_occurred, current_step)
+        risk_adjusted_reward = self._calculate_risk_rewards(reward, info, trade_occurred, self.current_step)
         
         return observation, risk_adjusted_reward, terminated, truncated, info
+        
+    def set_target_dimension(self, target_dim):
+        """
+        Set the target dimension for observations.
+        This is needed for LSTM feature extraction.
+        
+        Args:
+            target_dim: The target dimension for observations
+        """
+        self._target_dim = target_dim
+        logger.info(f"Set target observation dimension to {target_dim} in SafeTradingEnvWrapper")
+        return self
+        
+    def _check_stop_loss_and_take_profit(self, action):
+        """
+        Check if stop loss or take profit conditions are met.
+        This is a placeholder for now - would be implemented in a real system.
+        
+        Args:
+            action: The action that would be taken
+        """
+        # This method would implement stop loss and take profit checks
+        # For now, it's a placeholder since the underlying env handles this
+        pass
 
 
 class TensorboardCallback(BaseCallback):
@@ -2584,6 +2598,67 @@ def patch_subproc_vec_env(env, target_dim, logger):
         patch_subproc_vec_env(env.env, target_dim, logger)
 
 
+def patch_observation_space(env, target_dim, logger):
+    """
+    Patch observation space dimensions in a given environment.
+    
+    This function updates the observation space of the environment to match
+    the target dimension and returns the patched environment.
+    
+    Args:
+        env: The environment to patch
+        target_dim: Target observation space dimension
+        logger: Logger for debug information
+        
+    Returns:
+        The patched environment with updated observation space
+    """
+    if env is None:
+        return env
+        
+    logger.info(f"Patching observation space for environment to target dim {target_dim}")
+    
+    # Update this environment's observation space if it exists
+    if hasattr(env, 'observation_space'):
+        current_shape = env.observation_space.shape
+        if len(current_shape) == 1 and current_shape[0] != target_dim:
+            logger.info(f"Updating observation space from {current_shape} to {(target_dim,)}")
+            env.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, 
+                shape=(target_dim,), 
+                dtype=np.float32
+            )
+    
+    # If this is a SafeTradingEnvWrapper, also patch its step method
+    if hasattr(env, '_augment_observation'):
+        original_augment = env._augment_observation
+        
+        def patched_augment_observation(observation):
+            # First apply the original augmentation
+            augmented = original_augment(observation)
+            
+            # Then ensure it has the right dimensions
+            if isinstance(augmented, np.ndarray) and len(augmented.shape) == 1:
+                if augmented.shape[0] != target_dim:
+                    logger.debug(f"Fixing augmented observation from shape {augmented.shape} to {target_dim}")
+                    padded = np.zeros(target_dim, dtype=augmented.dtype)
+                    padded[:min(augmented.shape[0], target_dim)] = augmented[:min(augmented.shape[0], target_dim)]
+                    return padded
+            return augmented
+            
+        # Replace the method
+        env._augment_observation = patched_augment_observation
+        logger.info("Patched _augment_observation method to ensure correct dimensions")
+    
+    # Recursively check child environments
+    if hasattr(env, 'venv'):
+        patch_observation_space(env.venv, target_dim, logger)
+    elif hasattr(env, 'env'):
+        patch_observation_space(env.env, target_dim, logger)
+        
+    return env
+
+
 def comprehensive_environment_patch(env, target_dim, logger):
     """
     Apply a comprehensive patch to all layers of the environment to handle dimension mismatches.
@@ -2615,7 +2690,27 @@ def comprehensive_environment_patch(env, target_dim, logger):
         logger.info("Patching VecNormalize")
         env = patch_vec_normalize(env, target_dim, logger)
     
-    # 4. Finally, patch the top-level environment
+    # 4. Check for SafeTradingEnvWrapper and set target dimension
+    def set_dimension_in_wrappers(e):
+        if e is None:
+            return
+        
+        # If this is a SafeTradingEnvWrapper, set the target dimension
+        if isinstance(e, SafeTradingEnvWrapper) or (hasattr(e, '__class__') and 
+                                                   e.__class__.__name__ == 'SafeTradingEnvWrapper'):
+            logger.info(f"Setting target dimension {target_dim} in SafeTradingEnvWrapper")
+            e.set_target_dimension(target_dim)
+        
+        # Recursively check child environments
+        if hasattr(e, 'venv'):
+            set_dimension_in_wrappers(e.venv)
+        elif hasattr(e, 'env'):
+            set_dimension_in_wrappers(e.env)
+    
+    # Apply the dimension setting recursively
+    set_dimension_in_wrappers(env)
+    
+    # 5. Finally, patch the top-level environment
     logger.info("Patching observation augmentation at top level")
     env = patch_observation_augmentation(env, target_dim, logger)
     
