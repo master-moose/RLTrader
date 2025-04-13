@@ -25,7 +25,7 @@ class CryptocurrencyTradingEnv(gym.Env):
     def __init__(
         self,
         df: pd.DataFrame,
-        initial_amount: float = 10000.0,
+        initial_amount: float = 100000.0,
         buy_cost_pct: float = 0.001,
         sell_cost_pct: float = 0.001,
         state_space: int = 16,
@@ -34,6 +34,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         action_space: int = 3,
         reward_scaling: float = 1e-4,
         print_verbosity: int = 0,
+        max_holding_steps: int = 50,  # New parameter for maximum holding period
         **kwargs
     ):
         """
@@ -50,6 +51,7 @@ class CryptocurrencyTradingEnv(gym.Env):
             action_space: Size of the action space
             reward_scaling: Scaling factor for rewards
             print_verbosity: Frequency of printing info during execution
+            max_holding_steps: Maximum number of steps to hold a position before forced selling
         """
         self.df = df
         self.day = 0
@@ -86,6 +88,11 @@ class CryptocurrencyTradingEnv(gym.Env):
         self.trades = 0
         self.episode_reward = 0
         
+        # Position holding tracking
+        self.holding_counter = 0
+        self.max_holding_steps = max_holding_steps
+        self.forced_sells = 0  # Track forced sells for analytics
+        
         # Store info for rendering
         self.asset_memory = [self.initial_amount]
         self.rewards_memory = []
@@ -111,6 +118,10 @@ class CryptocurrencyTradingEnv(gym.Env):
         self.cost = 0
         self.trades = 0
         self.episode_reward = 0
+        
+        # Reset holding counter
+        self.holding_counter = 0
+        self.forced_sells = 0
         
         # Reset memory
         self.asset_memory = [self.initial_amount]
@@ -152,8 +163,32 @@ class CryptocurrencyTradingEnv(gym.Env):
             # If action space is different, interpret based on number of actions
             action_type = action % 3  # Simplified to 3 basic actions
         
+        # Force a sell action if we've been holding for too long and have assets
+        original_action_type = action_type
+        prev_assets = self.assets_owned[0]
+        
+        # Only force a sell if we have assets and have been holding them for too long
+        if self.assets_owned[0] > 0:
+            self.holding_counter += 1
+            # Force a sell if holding counter exceeds threshold
+            if self.holding_counter >= self.max_holding_steps:
+                action_type = 0  # Force sell
+                self.forced_sells += 1
+                logger.info(f"Forcing sell at step {self.day} after holding for {self.holding_counter} steps")
+        else:
+            # Reset counter if we don't have assets
+            self.holding_counter = 0
+        
         # Execute the trade
         self._trade(action_type)
+        
+        # Reset counter if position has changed (we sold or bought)
+        if action_type == 0 and self.assets_owned[0] < prev_assets:
+            # Reset counter after selling
+            self.holding_counter = 0
+        elif action_type == 2 and self.assets_owned[0] > prev_assets:
+            # Start counter after buying
+            self.holding_counter = 1
         
         # Calculate reward as change in portfolio value
         self.portfolio_value = self._calculate_portfolio_value()
@@ -176,7 +211,13 @@ class CryptocurrencyTradingEnv(gym.Env):
         self.state = self._get_observation()
         terminated = self.day >= len(self.df.index.unique()) - 1
         truncated = False
+        
+        # Add info about holding counter and forced sells
         info = self._get_info()
+        info['holding_counter'] = self.holding_counter
+        info['forced_sells'] = self.forced_sells
+        info['original_action'] = original_action_type
+        info['executed_action'] = action_type
         
         return self.state, reward, terminated, truncated, info
     
@@ -588,7 +629,9 @@ class CryptocurrencyTradingEnv(gym.Env):
             'cost': self.cost,
             'trades': self.trades,
             'day': self.day,
-            'close_price': current_price
+            'close_price': current_price,
+            'holding_counter': self.holding_counter,
+            'forced_sells': self.forced_sells
         }
     
     def render(self, mode='human'):
