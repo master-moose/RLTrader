@@ -2105,6 +2105,10 @@ def train_with_finrl(
                                     trade_duration = self.debug_steps - self.position_start_time
                                     self.trade_durations.append(trade_duration)
                                     
+                                    # Initialize variables that might be used later
+                                    exit_price = 0
+                                    pnl = 0
+                                    
                                     # Check if we have a price to calculate P&L
                                     if 'close' in info:
                                         exit_price = info['close']
@@ -2125,12 +2129,11 @@ def train_with_finrl(
                                     
                                     # Add to recent trades for trend analysis
                                     self.recent_trades.append({
-                                        'pnl': pnl,
-                                        'duration': trade_duration,
-                                        'position': self.current_position,
                                         'entry_price': self.entry_price,
-                                        'exit_price': exit_price,
-                                        'timestamp': self.debug_steps
+                                        'exit_price': exit_price if 'close' in info else 0,
+                                        'position': self.current_position,
+                                        'duration': trade_duration,
+                                        'pnl': pnl if 'close' in info else 0
                                     })
                                     
                                     # Keep only the most recent trades
@@ -3061,6 +3064,10 @@ def main():
                                             if self.current_position != 0:
                                                 trade_duration = self.debug_steps - self.position_start_time
                                                 self.trade_durations.append(trade_duration)
+                                                
+                                                # Initialize variables that might be used later
+                                                exit_price = 0
+                                                pnl = 0
                                                 
                                                 # Check if we have a price to calculate P&L
                                                 if 'close' in info:
@@ -4017,6 +4024,10 @@ def main():
                                             if self.current_position != 0:
                                                 trade_duration = self.debug_steps - self.position_start_time
                                                 self.trade_durations.append(trade_duration)
+                                                
+                                                # Initialize variables that might be used later
+                                                exit_price = 0
+                                                pnl = 0
                                                 
                                                 # Check if we have a price to calculate P&L
                                                 if 'close' in info:
