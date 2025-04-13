@@ -258,9 +258,20 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         
         # Add tracking for last several positions to detect oscillation
         self.last_positions = []
-        self.max_last_positions = 10
+        self.max_last_positions = 10  # Keep track of last 10 position changes
+        
+        # Add counters for oscillation detection
         self.oscillation_counter = 0
         
+        # Add last position/action to detect position changes
+        self.last_position = None
+        self.last_action = None
+        
+        # Additional protection for trades at the same price
+        self.last_trade_prices = {}
+        self.last_position_values = {}
+        
+        # Call parent constructor with remaining kwargs
         super().__init__(*args, **kwargs)
         
         # Log creation of environment
@@ -268,12 +279,15 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         
     def step(self, actions):
         """
-        Override step method to track trades and provide enhanced logging
+        Step the environment with enhanced protection against rapid trading.
         """
-        # Save original actions for logging
+        # Store current step for logging
+        current_step = self.current_step
+        
+        # Store original actions for logging
         original_actions = actions
         
-        # Track beginning total asset value for reward calculation
+        # Record beginning total asset for reward calculation
         begin_total_asset = self.get_total_asset_value()
         
         # Detect if this step includes a trade - store current holdings
@@ -282,16 +296,19 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         # Check for forced holding during initialization period
         in_initial_period = self.current_step < self.initial_forced_hold_period
         
-        # Store action in history for oscillation detection
-        # Only record real agent actions when not in forced hold period
+        # Record action in action history (for oscillation detection)
+        # But only if not in initial forced hold period
         if not in_initial_period:
-            if isinstance(actions, (int, float, np.int64, np.float64)):
+            if isinstance(actions, np.ndarray) and len(actions) > 0:
+                # For multi-dimensional actions, record first action for simplicity
+                self.action_history.append(int(actions[0]))
+            elif isinstance(actions, (int, float, np.int64, np.float64)):
+                # For scalar actions
                 self.action_history.append(int(actions))
             else:
-                # For array actions, store the first element
-                if isinstance(actions, np.ndarray) and len(actions) > 0:
-                    self.action_history.append(int(actions[0]))
-                else:
+                # Default if action type is unexpected
+                if self.debug_mode:
+                    logger.warning(f"Unknown action type: {type(actions)}")
                     self.action_history.append(1)  # Default to hold
         else:
             # During forced hold period, don't record actions for oscillation detection
@@ -313,7 +330,10 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                     actions = np.ones_like(actions)  # Force hold (1)
                 else:
                     actions = 1  # Hold action
+                
+                # Track oscillation count
                 self.oscillation_counter += 1
+                
                 # If we see multiple oscillations, extend the frozen period
                 self.post_trade_frozen = True
                 # Extend frozen period to 20000 steps on oscillation - even more severe
@@ -410,15 +430,61 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         end_total_asset = self.get_total_asset_value()
         reward = self._calculate_reward(begin_total_asset, end_total_asset, attempted_trade_during_cooldown)
         
+        # Strict detection of trade occurrence by comparing holdings and checking asset values
+        trade_occurred = False
+        
         # Check if trade occurred by comparing holdings before and after
         if self.stock_dim > 0:
-            new_holdings = self.state[1:self.stock_dim+1]
-            trade_occurred = not np.array_equal(current_holdings, new_holdings)
+            new_holdings = self.state[1:self.stock_dim+1].copy()
             
-            # Store position history for oscillation detection
+            # Compare holdings
+            holdings_changed = not np.array_equal(current_holdings, new_holdings)
+            
+            # Check if there are position changes that indicate a trade
             current_position = 0
             if len(new_holdings) > 0:
                 current_position = int(new_holdings[0])
+            
+            # Always log current position for debugging
+            if self.current_step % 10000 == 0:
+                logger.debug(f"Current position at step {self.current_step}: {current_position}")
+                
+            # Detect a trade if:
+            # 1. Holdings changed OR
+            # 2. Position changed since last step
+            if holdings_changed:
+                trade_occurred = True
+                logger.info(f"Trade detected by holdings change at step {self.current_step}")
+            elif hasattr(self, 'last_position') and self.last_position is not None and current_position != self.last_position:
+                trade_occurred = True
+                logger.info(f"Trade detected by position change at step {self.current_step}: {self.last_position} -> {current_position}")
+            
+            # Check price and holdings for suspicious trades
+            if holdings_changed:
+                for i in range(self.stock_dim):
+                    if i < len(current_holdings) and i < len(new_holdings) and current_holdings[i] != new_holdings[i]:
+                        # Get current price for this asset
+                        current_price = self.state[self.stock_dim + 1 + i * self.feature_dimension]
+                        # Get the last price for this asset
+                        last_price = self.last_trade_prices.get(i, None)
+                        
+                        if last_price is not None and abs(current_price - last_price) < 0.0001:
+                            logger.warning(f"SUSPICIOUS: Same price trade detected at step {self.current_step}: asset {i} at price {current_price:.4f}")
+                            # Force additional cooldown for same price trades
+                            self.post_trade_frozen = True
+                            self.frozen_until_step = self.current_step + 10000
+                            # Additional penalty
+                            reward -= 100.0 * end_total_asset * self.reward_scaling
+                        
+                        # Update last trade price for this asset
+                        self.last_trade_prices[i] = current_price
+            
+            # Store position for next step comparison
+            self.last_position = current_position
+            # Store action for next step comparison
+            self.last_action = actions
+            
+            # Track position history for deeper oscillation detection
             self.position_history.append(current_position)
             if len(self.position_history) > self.max_position_history:
                 self.position_history = self.position_history[-self.max_position_history:]
@@ -431,7 +497,7 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
                 
                 # Check for position oscillation
                 if len(self.last_positions) >= 4:
-                    # Check for alternating positive and negative
+                    # Check if the positions are alternating (e.g., 1, -1, 1, -1)
                     alternating = True
                     for i in range(1, len(self.last_positions)):
                         if (self.last_positions[i] > 0 and self.last_positions[i-1] > 0) or (self.last_positions[i] < 0 and self.last_positions[i-1] < 0):
@@ -470,22 +536,23 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
             # Update last trade prices and log trade details
             if self.stock_dim > 0:
                 for i in range(self.stock_dim):
-                    if current_holdings[i] != new_holdings[i]:
-                        # Trade occurred for this asset
-                        old_price = self._last_trade_price.get(i, None)
-                        new_price = self.state[self.stock_dim + 1 + i * self.feature_dimension]
-                        self._last_trade_price[i] = new_price
-                        
-                        # Check for same-price trades (could indicate a problem)
-                        if old_price is not None and abs(old_price - new_price) < 0.0001:
-                            logger.warning(f"Same price trade detected at step {self.current_step}: asset {i} at price {new_price:.4f}")
-                            # Extra penalty for same-price trades
-                            reward -= 50.0 * end_total_asset * self.reward_scaling
-                        
-                        # Always log trades for debugging
-                        change = new_holdings[i] - current_holdings[i]
-                        action_type = "BUY" if change > 0 else "SELL"
-                        logger.info(f"Trade detected at step {self.current_step}: {action_type} asset {i} at price {self._last_trade_price[i]:.4f}")
+                    if i < len(current_holdings) and i < len(new_holdings):
+                        if current_holdings[i] != new_holdings[i]:
+                            # Trade occurred for this asset
+                            old_price = self._last_trade_price.get(i, None)
+                            new_price = self.state[self.stock_dim + 1 + i * self.feature_dimension]
+                            self._last_trade_price[i] = new_price
+                            
+                            # Check for same-price trades (could indicate a problem)
+                            if old_price is not None and abs(old_price - new_price) < 0.0001:
+                                logger.warning(f"Same price trade detected at step {self.current_step}: asset {i} at price {new_price:.4f}")
+                                # Extra penalty for same-price trades
+                                reward -= 50.0 * end_total_asset * self.reward_scaling
+                            
+                            # Always log trades for debugging
+                            change = new_holdings[i] - current_holdings[i]
+                            action_type = "BUY" if change > 0 else "SELL"
+                            logger.info(f"Trade detected at step {self.current_step}: {action_type} asset {i} at price {self._last_trade_price[i]:.4f}")
         
         # Add information about cooldown to info dictionary
         info['cooldown_remaining'] = max(0, self.trade_cooldown - steps_since_last_trade)
@@ -533,6 +600,17 @@ class PatchedStockTradingEnv(BaseStockTradingEnv):
         self.position_history = []
         self.last_positions = []
         self.oscillation_counter = 0
+        
+        # Reset new tracking variables
+        self.last_position = None
+        self.last_action = None
+        self.last_trade_prices = {}
+        self.last_position_values = {}
+        
+        # Ensure clean state
+        logger.info("Resetting PatchedStockTradingEnv - all trading variables initialized")
+        
+        # Call parent reset
         return super().reset()
     
     def _calculate_reward(self, begin_total_asset, end_total_asset, attempted_trade_during_cooldown=False):
@@ -787,6 +865,15 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
     def reset(self, **kwargs):
         """Reset the environment, with compatibility for both gym and gymnasium APIs."""
         try:
+            # Reset wrapper-level tracking variables
+            self._last_trade_step = None
+            self._last_wrapper_trade_step = None
+            self._wrapper_position_history = []
+            self._wrapper_last_position = 0
+            self._wrapper_trade_cooldown = 50  # Reset to default value
+            self._last_price = None
+            self.step_counter = 0
+            
             # Try gymnasium API first (for newer environments)
             reset_return = self.env.reset(**kwargs)
             
@@ -883,6 +970,22 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             # If we encounter any error in the additional protection, log but continue
             logger.error(f"Error in additional cooldown protection: {e}")
         
+        # Additional double-check cooldown protection at wrapper level
+        if not hasattr(self, '_last_wrapper_trade_step'):
+            self._last_wrapper_trade_step = None
+            self._wrapper_trade_cooldown = 50  # Much smaller cooldown at wrapper level as additional protection
+            self._wrapper_position_history = []
+        
+        # Check wrapper-level cooldown
+        steps_since_last_wrapper_trade = float('inf')
+        if self._last_wrapper_trade_step is not None:
+            steps_since_last_wrapper_trade = getattr(self, 'step_counter', 0) - self._last_wrapper_trade_step
+            
+            # If in cooldown period and attempting to trade, force hold
+            if steps_since_last_wrapper_trade < self._wrapper_trade_cooldown and action != 1:
+                logger.warning(f"Wrapper emergency cooldown enforcement: Forcing hold ({steps_since_last_wrapper_trade}/{self._wrapper_trade_cooldown})")
+                action = 1
+        
         try:
             # Try gymnasium API first
             result = self.env.step(action)
@@ -941,9 +1044,66 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
                     steps_since = self.step_counter - self._last_trade_step
                     if steps_since < 10:  # Rapid trade detection at wrapper level
                         logger.warning(f"Wrapper detected rapid trade: {steps_since} steps since last trade")
-                        # Apply additional penalty
-                        reward -= 10.0
+                        # Apply additional severe penalty
+                        reward -= 30.0
+                        # Force extra cooldown by updating wrapper-level trade step
+                        self._last_wrapper_trade_step = self.step_counter
+                
                 self._last_trade_step = self.step_counter
+                # Also update wrapper-level trade tracking
+                self._last_wrapper_trade_step = self.step_counter
+            
+            # Additional position tracking to detect rapid position changes
+            current_position = info.get('position', 0)
+            if not hasattr(self, '_wrapper_position_history'):
+                self._wrapper_position_history = []
+                self._wrapper_last_position = 0
+            
+            if hasattr(self, '_wrapper_last_position') and trade_occurred:
+                if self._wrapper_last_position != current_position:
+                    # Position changed - record it
+                    self._wrapper_position_history.append(current_position)
+                    # Only keep last 5 positions
+                    if len(self._wrapper_position_history) > 5:
+                        self._wrapper_position_history = self._wrapper_position_history[-5:]
+                    
+                    # Check for position flip-flopping (e.g., 1, -1, 1, -1)
+                    if len(self._wrapper_position_history) >= 4:
+                        # Check for alternating patterns
+                        alternating = True
+                        for i in range(1, len(self._wrapper_position_history[-4:])):
+                            p1 = self._wrapper_position_history[-i-1]
+                            p2 = self._wrapper_position_history[-i]
+                            if (p1 > 0 and p2 > 0) or (p1 < 0 and p2 < 0):
+                                alternating = False
+                                break
+                        
+                        if alternating and len(set(self._wrapper_position_history[-4:])) > 1:
+                            logger.warning(f"CRITICAL: Wrapper detected position oscillation pattern: {self._wrapper_position_history[-4:]}")
+                            # Apply severe penalty
+                            reward -= 100.0
+                            # Force cooldown for much longer period
+                            self._last_wrapper_trade_step = self.step_counter
+                            # Increase wrapper cooldown for next trades
+                            self._wrapper_trade_cooldown = min(500, self._wrapper_trade_cooldown * 2)
+                    
+                    # Check for same trade price
+                    if hasattr(self, '_last_price') and trade_occurred:
+                        current_price = info.get('close', None)
+                        if current_price is not None and self._last_price is not None:
+                            if abs(current_price - self._last_price) < 0.001:
+                                logger.warning(f"CRITICAL: Wrapper detected same price trade: {current_price:.4f}")
+                                # Apply extreme penalty
+                                reward -= 200.0
+                                # Force extended cooldown
+                                self._last_wrapper_trade_step = self.step_counter
+                                self._wrapper_trade_cooldown = min(1000, self._wrapper_trade_cooldown * 3)
+                        
+                        # Update last price
+                        self._last_price = current_price
+            
+            # Store current position for next comparison
+            self._wrapper_last_position = current_position
             
             # Add position if available from env or track it ourselves
             if 'position' not in info:
