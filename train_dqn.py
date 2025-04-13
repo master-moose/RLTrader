@@ -99,7 +99,8 @@ class LSTMFeatureExtractor(BaseFeaturesExtractor):
         
         # Initialize the LSTM model
         self.lstm_model = None
-        self.features_dim = features_dim
+        # Don't set features_dim directly as it's already set by the parent class
+        # self.features_dim = features_dim  # This line is causing the error
         
         if lstm_state_dict is not None:
             # Create LSTM model architecture - this should match the saved model
