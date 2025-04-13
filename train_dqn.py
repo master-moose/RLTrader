@@ -735,29 +735,25 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         return reward / risk
 
     def step(self, action):
-        """
-        Take a step in the environment after applying our safety checks.
+        """Take a step in the environment with safeguards against harmful trading patterns"""
+        # Get current prices for position sizing and risk calculation
+        current_price = self.env.current_price if hasattr(self.env, 'current_price') else None
         
-        Args:
-            action: Action to take
-            
-        Returns:
-            Tuple of (observation, reward, terminated, truncated, info)
-        """
-        # Update counters - do this first so cooldown is tracked correctly
-        self.current_step += 1
+        # Update current step
+        self.current_step = getattr(self.env, 'current_step', self.current_step + 1)
         
-        # Calculate allowed actions based on cooldown
-        if self.in_cooldown:
-            self.cooldown_steps += 1
-            if self.cooldown_steps >= self.trade_cooldown:
-                self.in_cooldown = False
-                self.cooldown_steps = 0
-                
-                # Log cooldown end
-                logger.info(f"Cooldown ended at step {self.current_step}")
-                
-        # Only allow trades if we're not in cooldown
+        # Update counters
+        self.total_actions += 1
+        
+        # Check if we are in cooldown period
+        steps_since_last_trade = self.current_step - self.last_trade_step
+        self.in_cooldown = steps_since_last_trade < self.current_cooldown
+        
+        # Detect action oscillation patterns and update cooldown if necessary
+        self._detect_oscillation_patterns()
+        self._update_cooldown_period()
+        
+        # Use hold action during cooldown (prevents rapid buying/selling)
         allowed_action = HOLD_ACTION if self.in_cooldown else action
                 
         # If we have active positions, check for take-profit and stop-loss conditions
@@ -769,22 +765,42 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Ensure observation has the correct dimension - this is critical for LSTM models
         if hasattr(self, '_target_dim') and isinstance(observation, np.ndarray):
-            if len(observation.shape) == 1 and observation.shape[0] != self._target_dim:
-                padded_obs = np.zeros(self._target_dim, dtype=observation.dtype)
-                padded_obs[:min(observation.shape[0], self._target_dim)] = observation[:min(observation.shape[0], self._target_dim)]
-                observation = padded_obs
+            target_dim = self._target_dim
+            # For batch observations
+            if len(observation.shape) > 1 and observation.shape[1] != target_dim:
+                batch_size = observation.shape[0]
+                fixed_obs = np.zeros((batch_size, target_dim), dtype=observation.dtype)
+                # Copy data while respecting dimensions
+                min_dim = min(observation.shape[1], target_dim)
+                fixed_obs[:, :min_dim] = observation[:, :min_dim]
+                observation = fixed_obs
+            # For single observations
+            elif len(observation.shape) == 1 and observation.shape[0] != target_dim:
+                fixed_obs = np.zeros(target_dim, dtype=observation.dtype)
+                min_dim = min(observation.shape[0], target_dim)
+                fixed_obs[:min_dim] = observation[:min_dim]
+                observation = fixed_obs
         
         # Augment the observation with additional features
-        if hasattr(self, '_augment_observation'):
-            observation = self._augment_observation(observation)
+        observation = self._augment_observation(observation)
         
-        # Get current price and position after the step
-        current_price = None
-        if 'close_price' in info:
-            current_price = info['close_price']
-        elif hasattr(self.env, '_get_current_price'):
-            current_price = self.env._get_current_price()
-        
+        # Update action tracking
+        self.action_history.append(action)
+        if len(self.action_history) > self.max_history_size:
+            self.action_history = self.action_history[-self.max_history_size:]
+            
+        # Update consecutive same action counter
+        if len(self.action_history) >= 2 and self.action_history[-1] == self.action_history[-2]:
+            self.consecutive_same_action += 1
+        else:
+            self.consecutive_same_action = 0
+            
+        # Update consecutive holds counter
+        if action == HOLD_ACTION:  # Hold action
+            self.consecutive_holds += 1
+        else:
+            self.consecutive_holds = 0
+            
         # Check if take profit was triggered in the environment
         take_profit_triggered = False
         if 'take_profit_price' in info and info['take_profit_price'] is not None:
@@ -799,17 +815,15 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             else:
                 self.last_take_profit_sells = info.get('take_profit_sells', 0)
         
-        # Get new position
-        if 'assets_owned' in info and len(info['assets_owned']) > 0:
-            self.current_position = info['assets_owned'][0]
+        # Track position changes and trades
+        self.previous_position = self.current_position
         
-        # Update action history
-        self.action_history.append(action)
-        if len(self.action_history) > self.max_history_size:
-            self.action_history = self.action_history[-self.max_history_size:]
+        # Get current position from environment if available
+        if hasattr(self.env, 'position'):
+            self.current_position = self.env.position
+        elif 'position' in info:
+            self.current_position = info['position']
         
-        # Update position history
-        current_position = self.current_position
         self.position_history.append(current_position)
         if len(self.position_history) > self.max_history_size:
             self.position_history = self.position_history[-self.max_history_size:]
@@ -817,13 +831,15 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Detect if a trade occurred by checking position change
         trade_occurred = self.previous_position != self.current_position
         
-        # Log when trades occur
+        # Update trading metrics
         if trade_occurred:
-            # Get portfolio value from environment or info
-            portfolio_value = None
-            if hasattr(self.env, 'portfolio_value'):
-                portfolio_value = self.env.portfolio_value
-            elif 'portfolio_value' in info:
+            self.last_trade_step = self.current_step
+            self.last_trade_price = current_price
+            self.trade_count += 1
+            
+            # Get portfolio value for logging
+            portfolio_value = getattr(self.env, 'portfolio_value', None)
+            if portfolio_value is None and 'portfolio_value' in info:
                 portfolio_value = info['portfolio_value']
                 
             if portfolio_value is not None:
@@ -843,11 +859,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 # Instead of blindly subtracting max_risk_per_trade
                 for pos_id in list(self.risk_per_position.keys()):
                     # For simplicity, close all positions on a sell
-                    self.cumulative_risk -= self.risk_per_position[pos_id]
                     del self.risk_per_position[pos_id]
                 
-                # Ensure we don't go below zero
-                self.cumulative_risk = max(0.0, self.cumulative_risk)
+                # Update cumulative risk
+                self.cumulative_risk = sum(self.risk_per_position.values())
                 
             elif action == 2:  # Buy (open position)
                 # Add risk for this new position, but respect the maximum
@@ -870,9 +885,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Record the action that was actually taken
         self.action_counts[action] = self.action_counts.get(action, 0) + 1
-        self.total_actions += 1
         
-        # Track action in sliding window
+        # Update action window (for tracking action distribution)
         self.action_window.append(action)
         if len(self.action_window) > self.window_size:
             old_action = self.action_window.pop(0)
@@ -882,7 +896,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
             window_counts = {}
             for a in self.action_window:
                 window_counts[a] = window_counts.get(a, 0) + 1
-                
+            
+            # Calculate percentage distribution
+            window_counts = {k: v / len(self.action_window) for k, v in window_counts.items()}
+            
             # Calculate portfolio growth if available
             portfolio_growth = 0
             if hasattr(self.env, 'portfolio_value') and self.starting_portfolio > 0:
@@ -2482,10 +2499,35 @@ def patch_vec_normalize_reset(env, target_dim, logger):
             """Patched reset to handle observation dimension mismatches"""
             try:
                 # Call original reset to get observation and info
-                obs, info = original_reset(**kwargs)
+                result = original_reset(**kwargs)
                 
-                # Return the result, normalization will be handled by our patched normalize_obs
-                return obs, info
+                # Handle both new and old gym interfaces
+                # New Gymnasium returns (obs, info)
+                if isinstance(result, tuple) and len(result) == 2:
+                    obs, info = result
+                else:
+                    # Old gym just returns obs
+                    obs = result
+                    info = {}
+                
+                # Fix the observation dimensions if needed before normalizing
+                if isinstance(obs, np.ndarray):
+                    if len(obs.shape) > 1 and obs.shape[1] != target_dim:
+                        batch_size = obs.shape[0]
+                        fixed_obs = np.zeros((batch_size, target_dim), dtype=obs.dtype)
+                        min_dim = min(obs.shape[1], target_dim)
+                        fixed_obs[:, :min_dim] = obs[:, :min_dim]
+                        # For SB3, we only need to return the normalized observation, not the info
+                        return fixed_obs
+                    elif len(obs.shape) == 1 and obs.shape[0] != target_dim:
+                        fixed_obs = np.zeros(target_dim, dtype=obs.dtype)
+                        min_dim = min(obs.shape[0], target_dim)
+                        fixed_obs[:min_dim] = obs[:min_dim]
+                        # For SB3, we only need to return the normalized observation, not the info
+                        return fixed_obs
+                
+                # For SB3, return only the observation
+                return obs
             
             except Exception as e:
                 logger.error(f"Error in patched VecNormalize reset: {e}")
@@ -2493,9 +2535,15 @@ def patch_vec_normalize_reset(env, target_dim, logger):
                 try:
                     # Reset the underlying environments directly
                     if hasattr(env, 'venv'):
-                        raw_obs, info = env.venv.reset(**kwargs)
+                        result = env.venv.reset(**kwargs)
+                        # Handle both new and old gym interfaces for venv
+                        if isinstance(result, tuple) and len(result) == 2:
+                            raw_obs, info = result
+                        else:
+                            raw_obs = result
+                            info = {}
                     else:
-                        # Create a dummy observation and info if we can't get it
+                        # Create a dummy observation if we can't get it
                         raw_obs = np.zeros((1, target_dim), dtype=np.float32)
                         info = {}
                     
@@ -2507,9 +2555,11 @@ def patch_vec_normalize_reset(env, target_dim, logger):
                             fixed_obs = np.zeros((batch_size, target_dim), dtype=np.float64)
                             min_dim = min(raw_obs.shape[1], target_dim)
                             fixed_obs[:, :min_dim] = raw_obs[:, :min_dim]
-                            return fixed_obs, info
+                            # For SB3, we only need to return the observation
+                            return fixed_obs
                     
-                    return raw_obs, info
+                    # For SB3, return only the observation
+                    return raw_obs
                 except Exception as e2:
                     logger.error(f"Critical error in reset fallback: {e2}")
                     # Last resort: return a dummy observation with the right shape
