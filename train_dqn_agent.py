@@ -1147,19 +1147,23 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     Create multiple FinRL environments for parallel training.
     
     Args:
-        df: DataFrame with market data
-        args: Command line arguments
-        num_workers: Number of parallel workers to use
+        df: DataFrame with market data in FinRL format
+        args: Training arguments
+        num_workers: Number of workers to use
         
     Returns:
-        Vectorized environment
+        Vectorized environment containing multiple FinRL environments
     """
-    logger.info(f"Creating parallel environments with {num_workers} workers")
+    logger.info(f"Creating parallel FinRL environment with {num_workers} workers")
     
-    # Environment parameters
-    num_envs_per_worker = getattr(args, 'num_envs_per_worker', 4)
-    use_subproc = getattr(args, 'use_subproc_vecenv', False)
+    # Determine if we should use subprocess vectorization
+    use_subproc = getattr(args, 'use_subproc', False)
+    num_envs_per_worker = getattr(args, 'num_envs_per_worker', 1)
     
+    # Initialize list of environment functions
+    env_list = []
+    
+    # Set device based on args
     device = None
     if hasattr(args, 'device'):
         import torch
@@ -1174,7 +1178,7 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     
     # Define potential technical indicators
     potential_indicators = [
-        'macd', 'rsi_14', 'rsi', 
+        'macd', 'rsi_14', 
         'stoch_k', 'stoch_d',
         'cci_30', 'dx_30',
         'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_60_sma', 'close_120_sma',
@@ -1182,33 +1186,30 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         'volatility_30', 'volume_change', 'volume_norm'
     ]
     
-    # Check which indicators are available in the dataframe
+    # Find which indicators are present in the dataframe
     tech_indicator_list = []
-    for indicator in potential_indicators:
-        if indicator in df.columns:
-            tech_indicator_list.append(indicator)
     
-    logger.info(f"Using technical indicators found in dataframe: {tech_indicator_list}")
-    
-    # If no indicators were found, add basic ones
-    if not tech_indicator_list:
+    logger.info("Checking for existing technical indicators in the dataframe")
+    existing_indicators = [ind for ind in potential_indicators if ind in df.columns]
+    if existing_indicators:
+        tech_indicator_list = existing_indicators
+        logger.info(f"Found {len(existing_indicators)} technical indicators already in dataframe: {existing_indicators}")
+    else:
         logger.warning("No valid technical indicators found in dataframe. Adding basic indicators.")
         df = ensure_technical_indicators(df, potential_indicators)
         # Check again after ensuring indicators
-        for indicator in potential_indicators:
-            if indicator in df.columns:
-                tech_indicator_list.append(indicator)
+        tech_indicator_list = [ind for ind in potential_indicators if ind in df.columns]
+        logger.info(f"Added technical indicators: {tech_indicator_list}")
                 
     # Calculate environment dimensions
     state_space = getattr(args, 'state_dim', 16)  # Default state space size if not specified
     stock_dim = 1  # Assuming single-asset trading for simplicity
     num_stocks = len(df['tic'].unique()) if 'tic' in df.columns else 1
     
-    # Action space is either:
-    # 1. Discrete(3) for sell/hold/buy
-    # 2. Discrete(2*stock_dim+1) for more complex actions
-    if hasattr(args, 'action_space') and args.action_space is not None:
-        action_space = args.action_space
+    # Calculate action space size
+    include_cash = getattr(args, 'include_cash', False)
+    if include_cash:
+        action_space = num_stocks + 1  # +1 for cash position
     else:
         action_space = 3  # Sell, hold, buy
     
@@ -1221,7 +1222,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     transaction_cost_pct = 0.00075  # 0.075% as a decimal
     logger.info("Using hardcoded crypto exchange maker/taker fees: 0.075%")
     reward_scaling = getattr(args, 'reward_scaling', 1e-4)
-    # Set hmax (max shares per trade) based on average price
+    
+    # Calculate maximum number of shares to trade per step (hmax)
     if 'close' in df.columns:
         avg_price = df['close'].mean()
         hmax = max(int(initial_amount * 0.1 / avg_price), 10)  # Allow up to 10% of balance per trade
@@ -1234,8 +1236,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
     
     # Process the DataFrame to ensure it's correctly formatted for FinRL
     try:
-        logger.info("Validating DataFrame format for FinRL compatibility")
-        
+        # The DataFrame should be sorted by 'day' and 'tic'
+        if 'day' in df.columns and 'tic' in df.columns:
+            df = df.sort_values(['day', 'tic']).reset_index(drop=True)
+            
         # StockTradingEnv expects a DataFrame with a specific format:
         # 1. Each row represents a single day and stock
         # 2. The DataFrame should have columns like 'open', 'high', 'low', 'close', 'volume', etc.
@@ -1254,26 +1258,21 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                     df[col] = 10000.0  # Dummy price
                 elif col == 'volume':
                     logger.info(f"Creating dummy '{col}' column")
-                    df['volume'] = 1000000.0  # Dummy volume
+                    df[col] = 10000.0  # Dummy volume
                 elif col == 'tic':
-                    logger.info(f"Creating dummy '{col}' column")
-                    df['tic'] = 'BTC'  # Default ticker
+                    logger.info(f"Creating '{col}' column with default ticker")
+                    df[col] = 'BTC'  # Default ticker
                 elif col == 'day':
-                    logger.info(f"Creating '{col}' column as integer index")
-                    if 'date' in df.columns:
-                        # If we have a date column, convert it to day integers
-                        df['day'] = pd.factorize(df['date'])[0]
-                    else:
-                        # Otherwise just use row index
-                        df['day'] = np.arange(len(df))
+                    logger.info(f"Creating '{col}' column with sequential days")
+                    df[col] = np.arange(len(df))  # Sequential days
         
         # If 'day' column exists but is not numeric, convert it
         if pd.api.types.is_categorical_dtype(df['day']) or pd.api.types.is_object_dtype(df['day']):
             logger.info("Converting 'day' column to integer")
             df['day'] = df['day'].factorize()[0]
         
-        # Ensure all numeric columns have finite values
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        # Ensure numeric columns have finite values
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume'] + tech_indicator_list
         for col in numeric_cols:
             if np.any(~np.isfinite(df[col])):
                 logger.warning(f"Column '{col}' contains non-finite values. Replacing with zeros.")
@@ -1284,30 +1283,26 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
         
         # Select the first day's data for testing
         first_day = df['day'].min()
-        test_df = df[df['day'] == first_day].copy()
+        test_df = df[df['day'] == first_day].reset_index(drop=True)
         
-        # Parameters for the test environment
-        buy_cost_pct_list = [transaction_cost_pct] * stock_dim 
-        sell_cost_pct_list = [transaction_cost_pct] * stock_dim
-        
-        test_params = {
-            'df': test_df,
-            'stock_dim': stock_dim,
-            'hmax': hmax,
-            'num_stock_shares': [0] * stock_dim,
-            'action_space': action_space,  # Make sure this is included!
-            'tech_indicator_list': tech_indicator_list,
-            'initial_amount': initial_amount,
-            'buy_cost_pct': buy_cost_pct_list,
-            'sell_cost_pct': sell_cost_pct_list,
-            'reward_scaling': reward_scaling,
-            'state_space': state_space,
-            'print_verbosity': 0
-        }
-        
-        # Wrap the test in try-except to catch detailed error info
         try:
-            test_env = StockTradingEnvClass(**test_params)
+            # Create test environment
+            test_env = StockTradingEnvClass(
+                df=test_df,
+                stock_dim=stock_dim,
+                hmax=hmax,
+                initial_amount=initial_amount,
+                transaction_cost_pct=[transaction_cost_pct] * stock_dim,  # List of costs for each stock
+                buy_cost_pct=[transaction_cost_pct] * stock_dim,  # Buy costs
+                sell_cost_pct=[transaction_cost_pct] * stock_dim,  # Sell costs
+                reward_scaling=reward_scaling,
+                state_space=state_space,
+                action_space=action_space,
+                tech_indicator_list=tech_indicator_list,
+                print_verbosity=1,
+            )
+            
+            # Try to reset the environment to see if it works
             test_obs = test_env.reset()
             
             if isinstance(test_obs, np.ndarray):
@@ -1324,21 +1319,20 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                         state_space = len(test_obs)
         except Exception as e:
             logger.error(f"Error creating test environment: {e}")
-            logger.error(traceback.format_exc())
+            traceback.print_exc()
     except Exception as e:
-        logger.error(f"Error testing environment: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error processing DataFrame: {e}")
+        traceback.print_exc()
     
-    # Create a list of environment creation functions
-    env_list = []
+    # Create environment functions
     
     for i in range(num_workers * num_envs_per_worker):
         # Define a function that creates a new environment instance each time it's called
         def make_env(idx=i):
             try:
                 # Create basic environment parameters
-                env_params = {
-                    'df': df,
+                env_config = {
+                    'df': df.copy(),
                     'stock_dim': stock_dim,
                     'hmax': hmax,
                     'num_stock_shares': [0] * stock_dim,  # Start with no shares - REQUIRED parameter
@@ -1354,10 +1348,10 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 }
                 
                 # Create the environment
-                base_env = StockTradingEnvClass(**env_params)
+                base_env = StockTradingEnvClass(**env_config)
                 
-                # Set env_id attribute to identify each environment
-                base_env.env_id = idx
+                # Set environment ID for debugging
+                base_env.env_id = idx  # Add an env_id attribute for logging
                 
                 # Wrap the environment to ensure consistent observation shape
                 wrapped_env = StockTradingEnvWrapper(base_env, state_space=state_space)
@@ -1365,8 +1359,8 @@ def create_parallel_finrl_envs(df, args, num_workers=4):
                 # Wrap with monitoring wrapper for metrics
                 return wrap_env_with_monitor(wrapped_env)
             except Exception as e:
+                # Log the error but provide a fallback environment
                 logger.error(f"Error creating environment {idx}: {e}")
-                logger.error(traceback.format_exc())
                 
                 # Provide a fallback environment if creation fails
                 base_env = BaseStockTradingEnv(df, state_space=state_space, action_space=action_space)
@@ -1770,10 +1764,16 @@ def train_with_finrl(
         # Import stable-baselines3 and torch.nn
         from stable_baselines3 import PPO, DDPG, TD3, SAC
         import torch.nn as nn
+        import torch
         from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ProgressBarCallback
         import gymnasium
         import numpy as np
         import os
+        
+        # Set device for PyTorch
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+        print(f"Using device: {device}")
     except ImportError as e:
         logger.error(f"Error importing required packages: {e}")
         raise
@@ -2601,7 +2601,17 @@ def ensure_technical_indicators(df, indicators):
     Returns:
         DataFrame with all required indicators
     """
-    logger.info("Calculating technical indicators")
+    logger.info("Checking for required technical indicators")
+    
+    # Check if indicators already exist in the dataframe
+    existing_indicators = [ind for ind in indicators if ind in df.columns]
+    missing_indicators = [ind for ind in indicators if ind not in df.columns]
+    
+    if not missing_indicators:
+        logger.info("All required technical indicators already present in the dataframe")
+        return df
+    
+    logger.info(f"Calculating missing technical indicators: {missing_indicators}")
     
     # Create a copy of the dataframe
     df_result = df.copy()
@@ -2612,23 +2622,23 @@ def ensure_technical_indicators(df, indicators):
         temp_df = group.copy().sort_values('date')
         
         # Calculate basic price indicators
-        if 'close_5_sma' in indicators:
+        if 'close_5_sma' in missing_indicators:
             temp_df['close_5_sma'] = temp_df['close'].rolling(window=5).mean()
         
-        if 'close_10_sma' in indicators:
+        if 'close_10_sma' in missing_indicators:
             temp_df['close_10_sma'] = temp_df['close'].rolling(window=10).mean()
             
-        if 'close_20_sma' in indicators:
+        if 'close_20_sma' in missing_indicators:
             temp_df['close_20_sma'] = temp_df['close'].rolling(window=20).mean()
         
         # Calculate MACD
-        if 'macd' in indicators:
+        if 'macd' in missing_indicators:
             ema12 = temp_df['close'].ewm(span=12, adjust=False).mean()
             ema26 = temp_df['close'].ewm(span=26, adjust=False).mean()
             temp_df['macd'] = ema12 - ema26
         
         # Calculate RSI (14 periods)
-        if 'rsi_14' in indicators:
+        if 'rsi_14' in missing_indicators:
             delta = temp_df['close'].diff()
             up = delta.clip(lower=0)
             down = -1 * delta.clip(upper=0)
@@ -2638,14 +2648,14 @@ def ensure_technical_indicators(df, indicators):
             temp_df['rsi_14'] = 100 - (100 / (1 + rs))
         
         # Calculate CCI (30 periods)
-        if 'cci_30' in indicators:
+        if 'cci_30' in missing_indicators:
             tp = (temp_df['high'] + temp_df['low'] + temp_df['close']) / 3
             ma_tp = tp.rolling(window=30).mean()
             md_tp = tp.rolling(window=30).apply(lambda x: np.fabs(x - x.mean()).mean())
             temp_df['cci_30'] = (tp - ma_tp) / (0.015 * md_tp)
         
         # Calculate DX (30 periods)
-        if 'dx_30' in indicators:
+        if 'dx_30' in missing_indicators:
             # Calculate +DM and -DM
             high_diff = temp_df['high'].diff()
             low_diff = temp_df['low'].diff().abs() * -1
@@ -2673,21 +2683,22 @@ def ensure_technical_indicators(df, indicators):
             temp_df['dx_30'] = dx
         
         # Calculate volatility
-        if 'volatility_30' in indicators:
+        if 'volatility_30' in missing_indicators:
             temp_df['volatility_30'] = temp_df['close'].pct_change().rolling(window=30).std()
         
         # Calculate volume change
-        if 'volume_change' in indicators:
+        if 'volume_change' in missing_indicators:
             temp_df['volume_change'] = temp_df['volume'].pct_change()
         
         # Update the main dataframe
         df_result.loc[temp_df.index, temp_df.columns] = temp_df
     
-    # Forward fill any NaN values
-    for indicator in indicators:
+    # Forward fill any NaN values for the newly calculated indicators
+    for indicator in missing_indicators:
         if indicator in df_result.columns and df_result[indicator].isnull().any():
             df_result[indicator] = df_result[indicator].ffill().fillna(0)
     
+    logger.info(f"Added {len(missing_indicators)} missing technical indicators")
     return df_result
 
 def wrap_env_with_monitor(env):
