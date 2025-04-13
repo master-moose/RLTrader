@@ -503,7 +503,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         # Add portfolio growth reward (significant boost)
         if portfolio_value > self.starting_portfolio:
             growth_pct = (portfolio_value - self.starting_portfolio) / self.starting_portfolio
-            growth_reward = min(growth_pct * 2.0, 2.0)  # Cap at 2.0
+            # Log detailed growth information for debugging
+            if current_step % 1000 == 0:
+                logger.info(f"Portfolio growth: {growth_pct:.4f} (starting: {self.starting_portfolio:.2f}, current: {portfolio_value:.2f})")
+            growth_reward = min(growth_pct * 3.0, 3.0)  # Increased from 2.0 to 3.0
             risk_adjusted_reward += growth_reward
             
             # Extra reward for achieving new highs
@@ -562,8 +565,8 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         current_step = getattr(self.env, 'day', 0)
         
         # Add curriculum learning - but restrict for a shorter period
-        if self.training_progress < 0.02 and action != 1 and current_step % 5 != 0:  # Reduced from 0.05 to 0.02
-            # Force hold actions 80% of the time in first 2% of training (reduced from 5%)
+        if self.training_progress < 0.005 and action != 1 and current_step % 5 != 0:  # Reduced from 0.02 to 0.005
+            # Force hold actions 80% of the time in first 0.5% of training (reduced from 2%)
             action = 1
         
         # Store previous position for change detection
@@ -670,9 +673,9 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                     logger.warning(f"Extended cooldown by {extended_cooldown} steps due to severe oscillation (count: {self.oscillation_count})")
         
         # Early training stabilization - make this period much shorter
-        if current_step < 300 and action != 1 and current_step % 50 != 0:  # Reduced from 500 to 300
+        if current_step < 100 and action != 1 and current_step % 20 != 0:  # Reduced from 300 to 100 and from 50 to 20
             logger.debug(f"Early training stability: forcing hold at step {current_step}")
-            action = 1  # Force hold action during early training except every 50th step
+            action = 1  # Force hold action during early training except every 20th step
         
         # Take the step in the environment
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -701,6 +704,21 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Detect if a trade occurred by checking position change
         trade_occurred = self.previous_position != self.current_position
+        
+        # Log when trades occur
+        if trade_occurred:
+            logger.info(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+            logger.info(f"Portfolio value: {portfolio_value:.2f}, Price: {current_price if current_price is not None else 'unknown'}")
+        
+        # Every 1000 steps, log action distribution
+        if current_step % 1000 == 0:
+            action_counts = {}
+            for a in self.action_history[-1000:]:
+                if a is not None:
+                    if a not in action_counts:
+                        action_counts[a] = 0
+                    action_counts[a] += 1
+            logger.info(f"Action distribution (last 1000 steps): {action_counts}")
         
         # Calculate additional penalties - but make them less severe
         additional_penalty = 0.0
@@ -1361,6 +1379,10 @@ def train_a2c(env, args, callbacks=None):
     n_steps = args.n_steps
     ent_coef = args.ent_coef
     
+    # Increase entropy coefficient to encourage exploration
+    ent_coef = max(ent_coef, 0.05)  # Ensure minimum entropy for exploration
+    logger.info(f"Using entropy coefficient: {ent_coef} to encourage action exploration")
+    
     # Create tensorboard callback
     tb_callback = TensorboardCallback(verbose=1, model_name="A2C", debug_frequency=1000)
     
@@ -1719,6 +1741,13 @@ def main():
         symbol=args.symbol
     )
     
+    # Log initial portfolio value
+    logger.info(f"Environment initialized with initial balance: {args.initial_balance}")
+    if hasattr(base_env, 'portfolio_value'):
+        logger.info(f"Initial portfolio value in environment: {base_env.portfolio_value}")
+    else:
+        logger.warning("Environment does not have portfolio_value attribute")
+        
     # Wrap with safety features
     logger.info("Applying SafeTradingEnvWrapper")
     safe_env = SafeTradingEnvWrapper(
@@ -1748,6 +1777,8 @@ def main():
     # Define function to create a wrapped environment
     def make_env():
         base_env = CryptocurrencyTradingEnv(**env_kwargs)
+        # Verify initial balance
+        logger.info(f"Vector env initialized with balance: {base_env.portfolio_value if hasattr(base_env, 'portfolio_value') else 'unknown'}")
         safe_env = SafeTradingEnvWrapper(base_env, trade_cooldown=args.trade_cooldown)  # Use value from args
         time_limit_env = TimeLimit(safe_env, max_episode_steps=args.max_steps)
         return Monitor(time_limit_env, "logs/monitor/")
