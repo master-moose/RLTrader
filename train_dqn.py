@@ -181,14 +181,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
     """
     A wrapper for trading environments that adds safeguards against:
     1. Rapid trading (enforces a cooldown period)
-    2. Oscillatory trading behavior 
-    3. Trading at the same price repeatedly
-    4. Excessive trading frequency
-    
-    Also adds risk-aware rewards and curriculum learning capabilities.
+    2. Action oscillation (penalizes rapid changes between buy and sell)
+    3. Implements proper risk management strategies
     """
     
-    def __init__(self, env, trade_cooldown=TRADE_COOLDOWN_PERIOD, max_history_size=100):
+    def __init__(self, env, trade_cooldown=TRADE_COOLDOWN_PERIOD, max_history_size=100, max_risk_per_trade=0.02):
         """Initialize the wrapper with safeguards against harmful trading patterns"""
         super().__init__(env)
         
@@ -196,6 +193,13 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         self.trade_cooldown = trade_cooldown
         # Reduce cooldown as training progresses
         self.min_cooldown = max(3, trade_cooldown // 5)  # Minimum cooldown period reduced from 4 to 5 divisor
+        
+        # Risk management parameters
+        self.max_risk_per_trade = max_risk_per_trade  # Maximum risk per trade (% of portfolio)
+        self.target_risk_reward_ratio = 2.0  # Target risk-reward ratio (reward should be 2x the risk)
+        self.risk_adjusted_position_sizing = True  # Use risk-adjusted position sizing
+        self.cumulative_risk = 0.0  # Track cumulative risk across open positions
+        self.max_cumulative_risk = 0.06  # Maximum 6% portfolio risk across all positions
         
         # Trading history tracking
         self.last_trade_step = -self.trade_cooldown  # Start with cooldown already passed
@@ -550,25 +554,101 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         return risk_adjusted_reward
 
+    def _calculate_position_size(self, action, current_price, stop_loss_price):
+        """
+        Calculate appropriate position size based on risk parameters
+        """
+        if action == 1:  # Hold action
+            return 0.0
+            
+        # Get current portfolio value
+        portfolio_value = self.env.portfolio_value if hasattr(self.env, 'portfolio_value') else 10000.0
+        
+        # Calculate risk amount in currency units
+        risk_amount = portfolio_value * self.max_risk_per_trade
+        
+        # Calculate distance to stop loss
+        if stop_loss_price is None or current_price is None:
+            # Default to 2% stop loss if prices not available
+            price_distance = current_price * 0.02 if current_price is not None else 0.02
+        else:
+            price_distance = abs(current_price - stop_loss_price)
+        
+        # Avoid division by zero
+        if price_distance <= 0:
+            price_distance = current_price * 0.01 if current_price is not None else 0.01
+            
+        # Calculate position size based on risk
+        position_size = risk_amount / price_distance
+        
+        # Check if adding this position would exceed our cumulative risk tolerance
+        if self.risk_adjusted_position_sizing and (self.cumulative_risk + self.max_risk_per_trade) > self.max_cumulative_risk:
+            # Scale down position if it would exceed max cumulative risk
+            available_risk = max(0, self.max_cumulative_risk - self.cumulative_risk)
+            position_size = position_size * (available_risk / self.max_risk_per_trade)
+            
+        return position_size
+        
+    def _calculate_risk_reward_ratio(self, current_price, entry_price, target_price, stop_loss_price):
+        """
+        Calculate the risk-reward ratio for a potential trade
+        """
+        if None in (current_price, entry_price, target_price, stop_loss_price):
+            return 0.0
+            
+        risk = abs(entry_price - stop_loss_price)
+        reward = abs(target_price - entry_price)
+        
+        # Avoid division by zero
+        if risk <= 0:
+            return 0.0
+            
+        return reward / risk
+
     def step(self, action):
         """
-        Take a step in the environment with enhanced safeguards against harmful
-        trading patterns and additional reward-shaping for stable behavior.
-        
-        Args:
-            action: 0 (sell), 1 (hold), or 2 (buy)
-            
-        Returns:
-            Tuple of (observation, reward, terminated, truncated, info)
+        Override step method to add trading safeguards and risk management
         """
-        # Get current step in environment
-        current_step = getattr(self.env, 'day', 0)
+        # Get current step and price information
+        current_step = getattr(self.env, 'current_step', 0)
+        current_price = None
         
-        # Add curriculum learning - but restrict for a shorter period
-        if self.training_progress < 0.005 and action != 1 and current_step % 5 != 0:  # Reduced from 0.02 to 0.005
-            # Force hold actions 80% of the time in first 0.5% of training (reduced from 2%)
-            action = 1
+        if hasattr(self.env, '_get_current_price'):
+            current_price = self.env._get_current_price()
+            
+        # Calculate potential stop loss and target prices based on current market conditions
+        # Simple example: 2% stop loss, 4% target (2:1 reward-risk ratio)
+        stop_loss_price = current_price * 0.98 if current_price is not None else None
+        target_price = current_price * 1.04 if current_price is not None else None
         
+        # Check risk-reward ratio before allowing a trade
+        if action != 1 and current_price is not None:  # Not a hold action
+            # Calculate risk-reward ratio for this potential trade
+            risk_reward = self._calculate_risk_reward_ratio(
+                current_price, 
+                current_price, 
+                target_price, 
+                stop_loss_price
+            )
+            
+            # Only allow trades with favorable risk-reward ratio
+            if risk_reward < self.target_risk_reward_ratio:
+                logger.debug(f"Risk-reward ratio {risk_reward:.2f} below target {self.target_risk_reward_ratio:.2f}, forcing hold")
+                action = 1  # Force hold if risk-reward is unfavorable
+                
+        # Check if we're in a cooldown period
+        in_cooldown = (current_step - self.last_trade_step) < self.current_cooldown
+        attempted_trade_during_cooldown = False
+        
+        if in_cooldown and action != 1:  # Not a hold action during cooldown
+            attempted_trade_during_cooldown = True
+            action = 1  # Force hold action
+            self.forced_actions += 1
+            
+            if self.forced_actions % 10 == 0:  # Log periodically to avoid spamming
+                logger.warning(f"Forced hold action during cooldown at step {current_step}, " 
+                              f"{current_step - self.last_trade_step}/{self.min_cooldown} steps since last trade")
+    
         # Store previous position for change detection
         self.previous_position = self.current_position
         
@@ -715,11 +795,23 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
                 portfolio_value = info['portfolio_value']
                 
             if portfolio_value is not None:
-                logger.info(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
-                logger.info(f"Portfolio value: {portfolio_value:.2f}, Price: {current_price if current_price is not None else 'unknown'}")
+                logger.debug(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+                logger.debug(f"Portfolio value: {portfolio_value:.2f}, Price: {current_price if current_price is not None else 'unknown'}")
             else:
-                logger.info(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
-                logger.info(f"Price: {current_price if current_price is not None else 'unknown'}")
+                logger.debug(f"TRADE DETECTED at step {current_step}: Position changed from {self.previous_position} to {self.current_position}")
+                logger.debug(f"Price: {current_price if current_price is not None else 'unknown'}")
+                
+            # If this is an actual trade, update risk management metrics
+            # For simplicity, assume each trade uses max_risk_per_trade amount of risk
+            portfolio_value = getattr(self.env, 'portfolio_value', None)
+            if action == 0:  # Sell (close position)
+                self.cumulative_risk = max(0, self.cumulative_risk - self.max_risk_per_trade)
+            elif action == 2:  # Buy (open position)
+                self.cumulative_risk += self.max_risk_per_trade
+                
+            # Log risk management metrics
+            logger.info(f"Risk management: Cumulative risk now {self.cumulative_risk:.1%}, " +
+                        f"Portfolio value: {portfolio_value:.2f if portfolio_value else 'unknown'}")
         
         # Every 1000 steps, log action distribution
         if current_step % 1000 == 0:
