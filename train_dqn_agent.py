@@ -510,6 +510,12 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
     
     def step(self, action):
         """Step the environment, with compatibility for both gym and gymnasium APIs."""
+        # Add debug logging for actions every 10000 steps
+        if hasattr(self, 'step_counter'):
+            if self.step_counter % 10000 == 0 and getattr(self, 'env_id', 0) == 0:
+                action_type = "sell" if action == 0 else ("hold" if action == 1 else "buy")
+                logger.info(f"Step {self.step_counter}: Taking action {action} ({action_type})")
+        
         try:
             # Try gymnasium API first
             result = self.env.step(action)
@@ -546,6 +552,53 @@ class StockTradingEnvWrapper(gymnasium.Wrapper):
             done = True
             info = {"error": str(e)}
             terminated, truncated = done, False
+        
+        # Add trading metrics to info dictionary if not already present
+        if isinstance(info, dict):
+            # Ensure action_type is present
+            if 'action_type' not in info:
+                if action == 0:
+                    info['action_type'] = 'sell'
+                elif action == 1:
+                    info['action_type'] = 'hold'
+                elif action == 2:
+                    info['action_type'] = 'buy'
+            
+            # Add position if available from env or track it ourselves
+            if 'position' not in info:
+                # Try to get position from env
+                position = getattr(self.env, 'position', 0) if hasattr(self.env, 'position') else 0
+                
+                # If the env doesn't track position, we can estimate it based on action
+                if not hasattr(self, 'current_position'):
+                    self.current_position = 0
+                
+                # Update our position estimate based on action
+                if info.get('action_type') == 'buy':
+                    self.current_position = 1
+                elif info.get('action_type') == 'sell':
+                    self.current_position = -1
+                elif info.get('action_type') == 'hold':
+                    # Keep current position
+                    pass
+                
+                # Add position to info
+                info['position'] = getattr(self, 'current_position', 0)
+            
+            # Add price information if available
+            if 'close' not in info and hasattr(self.env, 'data') and hasattr(self.env.data, 'get'):
+                info['close'] = self.env.data.get('close', 0)
+            
+            # Add portfolio value if not present
+            if 'portfolio_value' not in info and hasattr(self.env, 'initial_amount'):
+                # Estimate portfolio value if we can
+                cash = getattr(self.env, 'initial_amount', 100000)
+                position = info.get('position', 0)
+                close_price = info.get('close', 0)
+                
+                # Simple estimate of portfolio value
+                portfolio_value = cash + (position * close_price)
+                info['portfolio_value'] = portfolio_value
         
         # Log step observation for debugging (only on some steps to avoid excessive logging)
         if isinstance(obs, np.ndarray) and hasattr(self, 'step_counter'):
@@ -1698,7 +1751,24 @@ def train_with_finrl(
             self.entry_price = 0
             self.position_start_time = 0
             
+            # Debug info
+            self.debug_steps = 0
+            self.last_debug_output = 0
+            self.debug_frequency = 10000  # Output debug info every 10000 steps
+            
+            logger.info("TensorboardCallback initialized - Will track trading metrics")
+        
         def _on_step(self):
+            # Increment step counter for debugging
+            self.debug_steps += 1
+            
+            # Debug output every N steps
+            if self.debug_steps % self.debug_frequency == 0 and self.debug_steps > self.last_debug_output:
+                logger.info(f"Callback debugging at step {self.debug_steps}")
+                if hasattr(self, 'locals') and 'infos' in self.locals and len(self.locals['infos']) > 0:
+                    logger.info(f"Sample info dict: {str(self.locals['infos'][0])}")
+                self.last_debug_output = self.debug_steps
+            
             # Track step reward
             if hasattr(self, 'locals') and 'rewards' in self.locals:
                 rewards = self.locals['rewards']
@@ -1708,7 +1778,7 @@ def train_with_finrl(
                     self.current_episode_length += 1
                     
                     # Log environment info if available
-                    if 'infos' in self.locals:
+                    if 'infos' in self.locals and i < len(self.locals['infos']):
                         info = self.locals['infos'][i]
                         
                         # Track portfolio value
@@ -1725,7 +1795,7 @@ def train_with_finrl(
                             if position != self.current_position:
                                 # If we had a previous position, this is a trade exit
                                 if self.current_position != 0:
-                                    trade_duration = self.locals.get('self').num_timesteps - self.position_start_time
+                                    trade_duration = self.debug_steps - self.position_start_time
                                     self.trade_durations.append(trade_duration)
                                     
                                     # Check if we have a price to calculate P&L
@@ -1738,30 +1808,36 @@ def train_with_finrl(
                                         if pnl > 0:
                                             self.successful_trades += 1
                                             self.total_profit += pnl
+                                            if self.debug_steps % self.debug_frequency == 0:
+                                                logger.info(f"Successful trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
                                         else:
                                             self.failed_trades += 1
                                             self.total_loss += abs(pnl)
-                                        
-                                        # Add to recent trades for trend analysis
-                                        self.recent_trades.append({
-                                            'pnl': pnl,
-                                            'duration': trade_duration,
-                                            'position': self.current_position,
-                                            'entry_price': self.entry_price,
-                                            'exit_price': exit_price,
-                                            'timestamp': self.locals.get('self').num_timesteps
-                                        })
-                                        
-                                        # Keep only the most recent trades
-                                        if len(self.recent_trades) > self.max_recent_trades:
-                                            self.recent_trades.pop(0)
+                                            if self.debug_steps % self.debug_frequency == 0:
+                                                logger.info(f"Failed trade: PnL={pnl:.4f}, entry={self.entry_price:.4f}, exit={exit_price:.4f}")
+                                    
+                                    # Add to recent trades for trend analysis
+                                    self.recent_trades.append({
+                                        'pnl': pnl,
+                                        'duration': trade_duration,
+                                        'position': self.current_position,
+                                        'entry_price': self.entry_price,
+                                        'exit_price': exit_price,
+                                        'timestamp': self.debug_steps
+                                    })
+                                    
+                                    # Keep only the most recent trades
+                                    if len(self.recent_trades) > self.max_recent_trades:
+                                        self.recent_trades.pop(0)
                             
                                 # If new position is non-zero, this is a trade entry
                                 if position != 0:
                                     self.trade_count += 1
                                     if 'close' in info:
                                         self.entry_price = info['close']
-                                    self.position_start_time = self.locals.get('self').num_timesteps
+                                        if self.debug_steps % self.debug_frequency == 0:
+                                            logger.info(f"Trade entry: position={position}, price={self.entry_price:.4f}")
+                                    self.position_start_time = self.debug_steps
                                 
                                 self.current_position = position
                         
@@ -1771,6 +1847,10 @@ def train_with_finrl(
                             if action_type in self.action_counts:
                                 self.action_counts[action_type] += 1
                             self.logger.record(f'actions/{action_type}', self.action_counts.get(action_type, 0))
+                            
+                            # Debug output
+                            if self.debug_steps % (self.debug_frequency * 10) == 0:
+                                logger.info(f"Action counts: {self.action_counts}")
                         
                         # Track trade metrics
                         if 'trade_count' in info:
@@ -1781,8 +1861,8 @@ def train_with_finrl(
                     # Check if episode is done
                     dones = self.locals.get('dones', [False])
                     
-                    for i, done in enumerate(dones):
-                        if done:
+                    for j, done in enumerate(dones):
+                        if done and j == i:  # Only process the done signal if it corresponds to the current reward
                             # Add the episode statistics
                             self.episode_rewards.append(self.current_episode_reward)
                             self.episode_lengths.append(self.current_episode_length)
@@ -1805,6 +1885,9 @@ def train_with_finrl(
                                 # Calculate win rate
                                 win_rate = self.successful_trades / max(1, self.trade_count)
                                 self.logger.record('trades/win_rate', win_rate)
+                                
+                                # Debug output
+                                logger.info(f"Episode complete - Trading stats: trades={self.trade_count}, win_rate={win_rate:.4f}")
                                 
                                 # Profit factor (total profit / total loss)
                                 profit_factor = self.total_profit / max(1e-6, self.total_loss)  # Avoid div by zero
@@ -1839,7 +1922,7 @@ def train_with_finrl(
                                 if total_actions > 0:
                                     for action, count in self.action_counts.items():
                                         self.logger.record(f'actions/{action}_pct', count / total_actions)
-                                
+                            
                                 # Log running totals
                                 self.logger.record('trades/total_count', self.trade_count)
                                 self.logger.record('trades/successful', self.successful_trades)
@@ -1857,8 +1940,8 @@ def train_with_finrl(
                             # Reset episode tracking
                             self.current_episode_reward = 0
                             self.current_episode_length = 0
-                    
-                return True
+                
+            return True
     
     # Create the model
     logger.info(f"Creating {finrl_model.upper()} model with policy_kwargs: {policy_kwargs}")
@@ -1880,9 +1963,12 @@ def train_with_finrl(
         # Create the callback
         tensorboard_callback = TensorboardCallback()
         
+        # Store the callback in a list to make it accessible later
+        callbacks = [tensorboard_callback]
+        
         model.learn(
             total_timesteps=total_timesteps,
-            callback=tensorboard_callback,
+            callback=callbacks,
             tb_log_name=finrl_model
         )
         
@@ -1893,26 +1979,29 @@ def train_with_finrl(
         
         # Print trading metrics summary if callback metrics are available
         try:
+            # Access the callback from the list
+            callback = callbacks[0]
+            
             # Calculate win rate and other metrics
-            win_rate = tensorboard_callback.successful_trades / max(1, tensorboard_callback.trade_count) * 100
-            profit_factor = tensorboard_callback.total_profit / max(1e-6, tensorboard_callback.total_loss)
+            win_rate = callback.successful_trades / max(1, callback.trade_count) * 100
+            profit_factor = callback.total_profit / max(1e-6, callback.total_loss)
             
             # Print summary
             print("\n" + "="*50)
             print("TRADING METRICS SUMMARY")
             print("="*50)
-            print(f"Total Trades: {tensorboard_callback.trade_count}")
-            print(f"Successful Trades: {tensorboard_callback.successful_trades} ({win_rate:.2f}%)")
-            print(f"Failed Trades: {tensorboard_callback.failed_trades} ({100-win_rate:.2f}%)")
-            print(f"Total Profit: {tensorboard_callback.total_profit:.2f}")
-            print(f"Total Loss: {tensorboard_callback.total_loss:.2f}")
+            print(f"Total Trades: {callback.trade_count}")
+            print(f"Successful Trades: {callback.successful_trades} ({win_rate:.2f}%)")
+            print(f"Failed Trades: {callback.failed_trades} ({100-win_rate:.2f}%)")
+            print(f"Total Profit: {callback.total_profit:.2f}")
+            print(f"Total Loss: {callback.total_loss:.2f}")
             print(f"Profit Factor: {profit_factor:.2f}")
             
             # Print average trade metrics if available
-            if len(tensorboard_callback.trade_returns) > 0:
-                avg_return = np.mean(tensorboard_callback.trade_returns)
-                winning_returns = [r for r in tensorboard_callback.trade_returns if r > 0]
-                losing_returns = [r for r in tensorboard_callback.trade_returns if r <= 0]
+            if len(callback.trade_returns) > 0:
+                avg_return = np.mean(callback.trade_returns)
+                winning_returns = [r for r in callback.trade_returns if r > 0]
+                losing_returns = [r for r in callback.trade_returns if r <= 0]
                 
                 print(f"Average Trade Return: {avg_return:.4f}")
                 if winning_returns:
@@ -1921,16 +2010,16 @@ def train_with_finrl(
                     print(f"Average Losing Trade: {np.mean(losing_returns):.4f}")
             
             # Print action distribution
-            if sum(tensorboard_callback.action_counts.values()) > 0:
+            if sum(callback.action_counts.values()) > 0:
                 print("\nAction Distribution:")
-                total_actions = sum(tensorboard_callback.action_counts.values())
-                for action, count in tensorboard_callback.action_counts.items():
+                total_actions = sum(callback.action_counts.values())
+                for action, count in callback.action_counts.items():
                     print(f"  {action}: {count} ({count/total_actions*100:.2f}%)")
             
             # Print portfolio metrics if available
-            if len(tensorboard_callback.portfolio_values) > 0:
-                initial_value = tensorboard_callback.portfolio_values[0] if tensorboard_callback.portfolio_values else initial_balance
-                final_value = tensorboard_callback.portfolio_values[-1] if tensorboard_callback.portfolio_values else 0
+            if len(callback.portfolio_values) > 0:
+                initial_value = callback.portfolio_values[0] if callback.portfolio_values else initial_balance
+                final_value = callback.portfolio_values[-1] if callback.portfolio_values else 0
                 roi = (final_value / initial_value - 1) * 100
                 print(f"\nInitial Portfolio Value: {initial_value:.2f}")
                 print(f"Final Portfolio Value: {final_value:.2f}")
@@ -1940,22 +2029,22 @@ def train_with_finrl(
             
             # Save the metrics to a JSON file for later analysis
             metrics_data = {
-                'total_trades': tensorboard_callback.trade_count,
-                'successful_trades': tensorboard_callback.successful_trades,
-                'failed_trades': tensorboard_callback.failed_trades,
+                'total_trades': callback.trade_count,
+                'successful_trades': callback.successful_trades,
+                'failed_trades': callback.failed_trades,
                 'win_rate': float(win_rate),
-                'total_profit': float(tensorboard_callback.total_profit),
-                'total_loss': float(tensorboard_callback.total_loss),
+                'total_profit': float(callback.total_profit),
+                'total_loss': float(callback.total_loss),
                 'profit_factor': float(profit_factor),
-                'action_distribution': tensorboard_callback.action_counts,
+                'action_distribution': callback.action_counts,
             }
             
-            if len(tensorboard_callback.portfolio_values) > 0:
+            if len(callback.portfolio_values) > 0:
                 metrics_data['initial_value'] = float(initial_value)
                 metrics_data['final_value'] = float(final_value)
                 metrics_data['roi'] = float(roi)
             
-            if len(tensorboard_callback.trade_returns) > 0:
+            if len(callback.trade_returns) > 0:
                 metrics_data['avg_return'] = float(avg_return)
                 if winning_returns:
                     metrics_data['avg_win'] = float(np.mean(winning_returns))
