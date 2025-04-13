@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 INDICATORS = ['macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume']
 
 # Constants for trading safeguards - ADJUSTING FOR MORE BALANCED TRADING
-TRADE_COOLDOWN_PERIOD = 0  # Further reduced from 1 to 0 to allow trading on consecutive steps
+TRADE_COOLDOWN_PERIOD = 1  # Minimum value of 1 to prevent division by zero, allows frequent trading
 OSCILLATION_PENALTY = 2.0  # Further reduced from 5.0 to 2.0 - much less penalty for oscillation
 SAME_PRICE_TRADE_PENALTY = 5.0  # Further reduced from 10.0 to 5.0
 MAX_TRADE_FREQUENCY = 0.95  # Increased from 0.80 to 0.95 - allow up to 95% of steps to be trades
@@ -190,7 +190,10 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         super().__init__(env)
         
         # Trading safeguards
-        self.trade_cooldown = trade_cooldown
+        self.trade_cooldown = max(1, trade_cooldown)  # Ensure trade_cooldown is at least 1
+        if trade_cooldown <= 0:
+            logger.warning(f"Specified trade_cooldown was {trade_cooldown}, setting to minimum of 1 to prevent division by zero")
+        
         # Reduce cooldown as training progresses
         self.min_cooldown = 1  # Minimum cooldown period reduced from 3 to 1
         
@@ -261,7 +264,7 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         self.portfolio_growth_rate = 0.0
         
-        self.current_cooldown = trade_cooldown  # Adjustable cooldown period
+        self.current_cooldown = max(1, trade_cooldown)  # Ensure cooldown is at least 1
         
         # Track metrics for analyzing agent behavior
         self.hold_duration = 0
@@ -390,6 +393,11 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         
         # Calculate current cooldown status
         current_step = getattr(self.env, 'day', 0)
+        # Add safety check to prevent division by zero
+        if self.current_cooldown <= 0:
+            self.current_cooldown = 1  # Ensure cooldown is at least 1 to prevent division by zero
+            logger.warning(f"Cooldown period was 0, setting to 1 to prevent division by zero")
+        
         cooldown_status = min(max(
             (current_step - self.last_trade_step) / self.current_cooldown, 0), 1)
         
@@ -478,6 +486,9 @@ class SafeTradingEnvWrapper(gymnasium.Wrapper):
         else:
             # Minimal oscillation, use base cooldown
             new_cooldown = self.trade_cooldown
+        
+        # Ensure new_cooldown is at least 1 to prevent division by zero
+        new_cooldown = max(1, new_cooldown)
         
         # Update if significant change
         if abs(new_cooldown - self.current_cooldown) > 10:
