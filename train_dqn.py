@@ -2429,6 +2429,55 @@ def patch_vec_normalize_reset(env, target_dim, logger):
     return env
 
 
+def patch_observation_space(env, target_dim, logger):
+    """
+    Updates observation spaces in an environment to match the target dimension.
+    
+    Args:
+        env: The environment to patch
+        target_dim: Target observation space dimension
+        logger: Logger instance for logging information
+        
+    Returns:
+        The patched environment
+    """
+    logger.info(f"Patching observation space to dimension {target_dim}")
+    # Use the existing recursive function
+    update_observation_spaces_recursively(env, target_dim, logger)
+    return env
+
+
+def patch_subproc_vec_env(vec_env, target_dim, logger):
+    """
+    Patches a SubprocVecEnv to handle observations with the target dimension.
+    
+    Args:
+        vec_env: The SubprocVecEnv to patch
+        target_dim: Target observation space dimension
+        logger: Logger instance for logging information
+        
+    Returns:
+        The patched environment
+    """
+    if vec_env is None:
+        return vec_env
+        
+    logger.info(f"Patching SubprocVecEnv for dimension {target_dim}")
+    
+    # Update the observation space in the SubprocVecEnv
+    if hasattr(vec_env, 'observation_space'):
+        current_shape = vec_env.observation_space.shape
+        if len(current_shape) == 1 and current_shape[0] != target_dim:
+            logger.info(f"Updating SubprocVecEnv observation space from {current_shape} to {(target_dim,)}")
+            vec_env.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, 
+                shape=(target_dim,), 
+                dtype=np.float64
+            )
+    
+    return vec_env
+
+
 def comprehensive_environment_patch(env, target_dim, logger):
     """
     Apply a comprehensive patch to all layers of the environment to handle dimension mismatches.
