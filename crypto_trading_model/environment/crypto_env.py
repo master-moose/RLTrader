@@ -34,7 +34,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         action_space: int = 3,
         reward_scaling: float = 1e-4,
         print_verbosity: int = 0,
-        max_holding_steps: int = 10,  # Reduced from 30 to 10 for much more frequent forced selling
+        max_holding_steps: int = 8,  # Reduced from 10 to 8 for even more frequent forced selling
         episode_length: int = None,  # New parameter for episode length (in days)
         randomize_start: bool = True,  # Whether to randomize episode start points
         **kwargs
@@ -228,7 +228,7 @@ class CryptocurrencyTradingEnv(gym.Env):
         if self.assets_owned[0] > 0:
             self.holding_counter += 1
             # Log holding counter more frequently to track progress toward forced sell
-            if self.holding_counter % 2 == 0 or self.holding_counter >= self.max_holding_steps - 2:
+            if self.holding_counter >= 4 or self.holding_counter % 2 == 0:  # Start logging from 4+ steps
                 logger.info(f"Holding assets for {self.holding_counter}/{self.max_holding_steps} steps (forced sell threshold)")
             
             # Force a sell if holding counter exceeds threshold
@@ -261,25 +261,32 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Give even higher reward for sells
         if action_type == 0 and self.assets_owned[0] >= 0:
             # Apply a multiplier to rewards from sell actions
-            sell_reward_multiplier = 3.0  # Increased from 2.0 to 3.0 for even stronger sell incentive
+            sell_reward_multiplier = 4.0  # Increased from 3.0 to 4.0 for even stronger sell incentive
             reward = reward * sell_reward_multiplier
             
             # Add a fixed bonus reward for selling regardless of profit/loss
             # This helps encourage the agent to take more sell actions
-            sell_bonus = 1.0  # Increased from 0.5 to 1.0 - double the fixed bonus for any sell action
+            sell_bonus = 2.0  # Increased from 1.0 to 2.0 - double the fixed bonus for any sell action
             reward += sell_bonus
             
+            # Provide HIGHER rewards for proactive selling (before being forced)
+            if original_action_type == action_type:  # This was a voluntary sell
+                proactive_bonus = 3.0  # Large bonus for proactive selling decisions
+                reward += proactive_bonus
+                logger.info(f"Applied proactive sell bonus: +{proactive_bonus:.2f} at step {self.day}")
             # Log when forced sells happen
-            if original_action_type != action_type:
+            else:
                 logger.warning(f"Forced sell at step {self.day} resulted in reward: {reward:.4f}")
         
         # Add a small penalty for long holds to discourage excessive holding
-        if action_type == 1 and self.holding_counter > 5:  # Reduced from 10 to 5 - penalize holds earlier
-            hold_penalty = min(0.1 * (self.holding_counter - 5), 1.0)  # Increased from 0.05 to 0.1 and max from 0.5 to 1.0
+        if action_type == 1 and self.holding_counter > 3:  # Reduced from 5 to 3 - penalize holds even earlier
+            # Exponential penalty growth to strongly discourage long holds
+            hold_steps_over_limit = self.holding_counter - 3
+            hold_penalty = min(0.2 * (hold_steps_over_limit ** 1.5), 2.0)  # Stronger exponential growth with higher cap
             reward -= hold_penalty
             
             # Log significant hold penalties
-            if hold_penalty > 0.1 or self.holding_counter > 7:  # Lower threshold to log more penalties
+            if hold_penalty > 0.1 or self.holding_counter > 5:  # Lower threshold to log more penalties
                 logger.warning(f"Applied hold penalty of {hold_penalty:.4f} after {self.holding_counter} steps of holding")
         
         # Clip reward to prevent extreme values, but with wider limits
@@ -328,14 +335,17 @@ class CryptocurrencyTradingEnv(gym.Env):
         # Add holding counter information to the observation - normalized between 0 and 1
         # This helps the agent learn about holding duration
         if self.stock_dim + 2 < self.state_space:
+            # Make holding counter more prominent in observation
             holding_counter_normalized = min(self.holding_counter / self.max_holding_steps, 1.0)
-            observation[self.stock_dim + 2] = holding_counter_normalized
+            observation[self.stock_dim + 2] = holding_counter_normalized * 2.0  # Multiply by 2 to make it more prominent
             
-            # Add a warning signal as holding approaches max limit
-            if self.holding_counter > 0.8 * self.max_holding_steps:
+            # Add a warning signal as holding approaches max limit - strengthen the signal
+            # Start warning signal earlier (at 50% of max instead of 80%)
+            if self.holding_counter > 0.5 * self.max_holding_steps:
                 # Create a stronger signal as we get closer to forced sell
-                sell_urgency = (self.holding_counter - 0.8 * self.max_holding_steps) / (0.2 * self.max_holding_steps)
-                observation[self.stock_dim + 3] = sell_urgency
+                sell_urgency = (self.holding_counter - 0.5 * self.max_holding_steps) / (0.5 * self.max_holding_steps)
+                # Amplify the urgency signal
+                observation[self.stock_dim + 3] = sell_urgency * 2.0  # Multiply by 2 for stronger signal
             else:
                 observation[self.stock_dim + 3] = 0.0
         
@@ -407,7 +417,8 @@ class CryptocurrencyTradingEnv(gym.Env):
                     max_sell_pct = 1.0  # Sell 100%
                 else:
                     # Normal sell - use the standard position sizing
-                    max_sell_pct = 0.9  # Increased from 0.5 to 0.9
+                    # Increase from 0.9 to make normal sells more impactful
+                    max_sell_pct = 1.0  # Always sell 100% to make sell actions more decisive
                     
                 sell_amount = min(
                     self.assets_owned[asset_index], 
