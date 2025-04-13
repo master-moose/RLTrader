@@ -9,7 +9,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import pandas as pd
-from typing import Dict, List, Tuple, Any, Optional
+from typing import List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -278,11 +278,18 @@ class CryptocurrencyTradingEnv(gym.Env):
             
             # Force a sell if holding counter exceeds threshold
             if self.holding_counter >= self.max_holding_steps:
+                # Force sell with explicit logging that we're overriding the action
+                logger.warning(
+                    f"FORCING SELL: Original action {original_action_type}, "
+                    f"but holding for {self.holding_counter} steps (max: {self.max_holding_steps})"
+                )
                 action_type = 0  # Force sell
                 self.forced_sells += 1
                 # Force a sell of ALL assets (not partial) when we hit the max holding period
-                max_sell_pct = 1.0  # Sell 100% of position when forced
-                logger.warning(f"Forcing FULL sell at step {self.day} after holding for {self.holding_counter} steps")
+                logger.warning(
+                    f"Forcing FULL sell at step {self.day} after "
+                    f"holding for {self.holding_counter} steps"
+                )
         else:
             # Reset counter if we don't have assets
             self.holding_counter = 0
@@ -294,13 +301,27 @@ class CryptocurrencyTradingEnv(gym.Env):
         if action_type == 0 and self.assets_owned[0] < prev_assets:
             # Reset counter after selling
             self.holding_counter = 0
+            logger.info(f"Sold assets at step {self.day}, resetting holding counter to 0")
         elif action_type == 2 and self.assets_owned[0] > prev_assets:
             # Start counter after buying
             self.holding_counter = 1
+            logger.info(f"Bought assets at step {self.day}, setting holding counter to 1")
         
         # Calculate reward as change in portfolio value
         self.portfolio_value = self._calculate_portfolio_value()
-        reward = (self.portfolio_value - previous_portfolio_value) * self.reward_scaling
+        
+        # For hold actions, we need to ensure no portfolio growth from price appreciation
+        # This is key to prevent the agent from getting rewarded for holding during price increases
+        if action_type == 1 and self.assets_owned[0] > 0:
+            # If holding assets, don't reward for price appreciation
+            # Calculate what the portfolio value would be if the price hadn't changed
+            # The agent should only be rewarded/penalized for explicit trades, not market movements during holds
+            hold_penalty = 0.2  # Small constant penalty for any hold action
+            reward = -hold_penalty  # Apply hold penalty directly instead of based on portfolio change
+            logger.debug(f"HOLD action: Not rewarding for price appreciation, applying hold penalty of {hold_penalty:.4f}")
+        else:
+            # For buys and sells, reward normally based on portfolio change
+            reward = (self.portfolio_value - previous_portfolio_value) * self.reward_scaling
         
         # Add extra reward for sells (action_type 0) to encourage selling
         # Give even higher reward for sells
