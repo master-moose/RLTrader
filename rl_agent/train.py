@@ -386,10 +386,9 @@ def create_env(
     # Note: Seeding is handled by make_vec_env wrapper now
 
     # Create environment instance
-    # Ensure TradingEnvironment accepts these args or adapt
+    # Start with core arguments
     env_kwargs = {
         "data": data,
-        # Arguments expected by TradingEnvironment.__init__:
         "features": config.get("features"),
         "sequence_length": config["sequence_length"],
         "initial_balance": config["initial_balance"],
@@ -400,26 +399,34 @@ def create_env(
         "max_position": config.get("max_position", 1.0),
         "max_steps": config.get("max_steps"),
         "random_start": config.get("random_start", True),
-        # Add reward component weights from config if they exist
-        "portfolio_change_weight": config.get("portfolio_change_weight", 1.0),
-        "drawdown_penalty_weight": config.get("drawdown_penalty_weight", 0.5),
-        "sharpe_reward_weight": config.get("sharpe_reward_weight", 0.1),
-        "fee_penalty_weight": config.get("fee_penalty_weight", 0.05),
-        "benchmark_reward_weight": config.get("benchmark_reward_weight", 0.2),
-        "consistency_penalty_weight": config.get("consistency_penalty_weight", 0.1),
-        "idle_penalty_weight": config.get("idle_penalty_weight", 0.05),
-        "profit_bonus_weight": config.get("profit_bonus_weight", 0.1),
-        "exploration_bonus_weight": config.get("exploration_bonus_weight", 0.01),
-        # Add reward calculation parameters from config if they exist
-        "sharpe_window": config.get("sharpe_window", 50),
-        "consistency_threshold": config.get("consistency_threshold", 3),
-        "idle_threshold": config.get("idle_threshold", 10),
-        "exploration_start": config.get("exploration_start", 0.1),
-        "exploration_end": config.get("exploration_end", 0.001),
-        "exploration_decay_steps": config.get("exploration_decay_steps")
     }
-    # Filter out None values to avoid passing them if not explicitly set
-    env_kwargs = {k: v for k, v in env_kwargs.items() if v is not None}
+
+    # --- Conditionally add new reward parameters --- 
+    # Define the keys for the new reward parameters
+    reward_param_keys = [
+        "portfolio_change_weight", "drawdown_penalty_weight",
+        "sharpe_reward_weight", "fee_penalty_weight",
+        "benchmark_reward_weight", "consistency_penalty_weight",
+        "idle_penalty_weight", "profit_bonus_weight",
+        "exploration_bonus_weight", "sharpe_window",
+        "consistency_threshold", "idle_threshold",
+        "exploration_start", "exploration_end",
+        "exploration_decay_steps"
+    ]
+    
+    # Add them to env_kwargs ONLY if they exist in the config dict
+    for key in reward_param_keys:
+        if key in config:
+            env_kwargs[key] = config[key]
+            logger.debug(f"Passing reward parameter '{key}' = {config[key]} to environment.")
+        # else: # Optional: Log if a parameter is *not* found in config
+        #     logger.debug(f"Reward parameter '{key}' not found in config, using env default.")
+    # ---------------------------------------------
+
+    # Filter out None values from core arguments if necessary
+    # (Though None is valid for max_steps, features, etc.)
+    # env_kwargs = {k: v for k, v in env_kwargs.items() if v is not None}
+    # Removing the above filter as None might be intended for some args.
 
     env = TradingEnvironment(**env_kwargs)
 
