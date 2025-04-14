@@ -36,55 +36,99 @@ def fetch_binance_historical_data(symbol, timeframe, output_file):
     
     # Initialize variables for pagination
     all_ohlcv_data = []
-    since = None  # Start from the most recent data and go backwards
     limit = 1000  # Number of candles per request (max for Binance is usually 1000)
     
-    # Keep track of the earliest timestamp fetched
-    earliest_timestamp = float('inf')
+    # Calculate timeframe in milliseconds for pagination
+    timeframe_ms = 0
+    if timeframe.endswith('m'):
+        timeframe_ms = int(timeframe[:-1]) * 60 * 1000
+    elif timeframe.endswith('h'):
+        timeframe_ms = int(timeframe[:-1]) * 60 * 60 * 1000
+    elif timeframe.endswith('d'):
+        timeframe_ms = int(timeframe[:-1]) * 24 * 60 * 60 * 1000
+    elif timeframe.endswith('w'):
+        timeframe_ms = int(timeframe[:-1]) * 7 * 24 * 60 * 60 * 1000
+    
+    # Start with current time and go backwards
+    end_time = exchange.milliseconds()  # Current timestamp in milliseconds
+    
+    # Track timestamps to avoid duplicate data
+    processed_timestamps = set()
+    
+    # Counter for retry attempts
+    retry_count = 0
+    max_retries = 5
     
     # Fetch data in batches
     try:
         while True:
             try:
-                # Fetch OHLCV data
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+                # Calculate start time for this batch
+                start_time = end_time - (limit * timeframe_ms)
                 
-                # If no data received, break the loop
+                # Fetch OHLCV data
+                print(f"Fetching data from {datetime.datetime.fromtimestamp(start_time/1000.0).strftime('%Y-%m-%d %H:%M:%S')} to {datetime.datetime.fromtimestamp(end_time/1000.0).strftime('%Y-%m-%d %H:%M:%S')}")
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=start_time, limit=limit, params={'endTime': end_time})
+                
+                # Reset retry counter on successful fetch
+                retry_count = 0
+                
+                # If no data received or all data points already processed, we're done
                 if not ohlcv or len(ohlcv) == 0:
                     print("No more data available.")
                     break
                 
-                # Append data to our list
-                all_ohlcv_data.extend(ohlcv)
+                # Filter out already processed timestamps to avoid duplicates
+                new_data = [candle for candle in ohlcv if candle[0] not in processed_timestamps]
                 
-                # Print progress
-                start_time = datetime.datetime.fromtimestamp(ohlcv[0][0] / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
-                end_time = datetime.datetime.fromtimestamp(ohlcv[-1][0] / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
-                print(f"Fetched {len(ohlcv)} candles from {start_time} to {end_time}")
-                
-                # Update the earliest timestamp
-                batch_earliest = ohlcv[0][0]
-                if batch_earliest >= earliest_timestamp:
-                    print("Reached overlapping data. Finishing...")
+                # If we didn't get any new data, we're likely at the limit of available data
+                if not new_data:
+                    print("No new data found. Reached the limit of available historical data.")
                     break
                 
-                earliest_timestamp = batch_earliest
+                # Add new timestamps to the processed set
+                for candle in new_data:
+                    processed_timestamps.add(candle[0])
                 
-                # Set 'since' parameter for the next iteration
-                # Subtract 1ms to avoid getting duplicate candles
-                since = ohlcv[0][0] - 1
+                # Append new data to our list
+                all_ohlcv_data.extend(new_data)
+                
+                # Print progress
+                start_time_str = datetime.datetime.fromtimestamp(min(candle[0] for candle in new_data) / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
+                end_time_str = datetime.datetime.fromtimestamp(max(candle[0] for candle in new_data) / 1000.0).strftime('%Y-%m-%d %H:%M:%S')
+                print(f"Fetched {len(new_data)} new candles from {start_time_str} to {end_time_str}")
+                print(f"Total candles so far: {len(all_ohlcv_data)}")
+                
+                # Update end_time to fetch the next batch (going backwards in time)
+                # Use the earliest timestamp from this batch minus 1ms
+                earliest_timestamp = min(candle[0] for candle in ohlcv)
+                end_time = earliest_timestamp - 1
                 
                 # Respect rate limits with an additional delay
                 time.sleep(exchange.rateLimit / 1000 * 1.1)  # Add 10% buffer
                 
             except ccxt.NetworkError as e:
-                print(f"Network error occurred: {e}. Retrying in 10 seconds...")
-                time.sleep(10)
+                retry_count += 1
+                if retry_count > max_retries:
+                    print(f"Maximum retry attempts ({max_retries}) reached. Exiting...")
+                    break
+                
+                wait_time = 10 * retry_count  # Increasing backoff
+                print(f"Network error occurred: {e}. Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
+                time.sleep(wait_time)
                 continue
+                
             except ccxt.ExchangeError as e:
-                print(f"Exchange error occurred: {e}. Retrying in 10 seconds...")
-                time.sleep(10)
+                retry_count += 1
+                if retry_count > max_retries:
+                    print(f"Maximum retry attempts ({max_retries}) reached. Exiting...")
+                    break
+                
+                wait_time = 10 * retry_count  # Increasing backoff
+                print(f"Exchange error occurred: {e}. Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
+                time.sleep(wait_time)
                 continue
+                
             except Exception as e:
                 print(f"Unexpected error occurred: {e}. Exiting...")
                 break
@@ -109,6 +153,7 @@ def fetch_binance_historical_data(symbol, timeframe, output_file):
             df.to_csv(output_file, index=False)
             print(f"Data successfully saved to {output_file}")
             print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+            print(f"Total unique candles saved: {len(df)}")
         else:
             print("No data was fetched. Please check your parameters.")
     
