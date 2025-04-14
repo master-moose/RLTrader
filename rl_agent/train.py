@@ -697,6 +697,10 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed # Pass the calculated seed
             env = create_env(config=env_config, is_eval=True)
+            # Add Monitor wrapper here for consistency and potential logging
+            # Use a dummy log path or None if logs aren't needed here
+            monitor_log_path_eval = os.path.join(log_path, f'monitor_eval_{rank}.csv')
+            env = Monitor(env, filename=monitor_log_path_eval)
             return env
         return _init
     
