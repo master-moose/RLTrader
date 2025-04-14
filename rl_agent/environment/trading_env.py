@@ -217,7 +217,7 @@ class TradingEnvironment(Env):
         
         # --- DEBUG LOGGING --- 
         if terminated or truncated:
-            logger.debug(
+            logger.info(
                 f"DEBUG STEP: current_step={self.current_step}, "
                 f"episode_step={self.episode_step}, max_steps={self.max_steps}, "
                 f"action={action}, terminated={terminated}, truncated={truncated}, "
