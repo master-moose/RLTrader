@@ -565,7 +565,7 @@ def evaluate_model(
     all_rewards = []
     
     # Reset environment
-    obs, _ = env.reset()  # Updated for gymnasium API
+    obs = env.reset() # Correct for VecEnv, returns only obs
     
     # Determine number of episodes to run per environment
     episodes_per_env = n_episodes // n_envs
