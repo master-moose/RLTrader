@@ -7,10 +7,13 @@ import json
 import logging
 import numpy as np
 import pandas as pd
-import tables
 from pathlib import Path
 import argparse
-from crypto_trading_model.data_processing.feature_engineering import calculate_multi_timeframe_signal
+from scipy import stats
+import random
+from crypto_trading_model.data_processing.feature_engineering import (
+    calculate_multi_timeframe_signal
+)
 
 # Configure logging
 logging.basicConfig(
@@ -53,6 +56,426 @@ def load_config(config_path):
         logger.error(f"Error loading config from {config_path}: {str(e)}")
         sys.exit(1)
 
+class MarketRegime:
+    """Represents different market regimes with specific characteristics."""
+    
+    UPTREND = 'uptrend'
+    DOWNTREND = 'downtrend'
+    RANGING = 'ranging'
+    VOLATILITY_EXPANSION = 'volatility_expansion'
+    VOLATILITY_CONTRACTION = 'volatility_contraction'
+    
+    @staticmethod
+    def get_regime_parameters(regime_type, base_volatility=0.002):
+        """Get drift and volatility parameters for a specific regime.
+        
+        Parameters:
+        -----------
+        regime_type : str
+            Type of market regime
+        base_volatility : float
+            Base volatility level to scale from
+            
+        Returns:
+        --------
+        dict
+            Dictionary with regime parameters
+        """
+        params = {
+            MarketRegime.UPTREND: {
+                'mu': 0.0005,  # Strong positive drift
+                'sigma': base_volatility * 1.0,  # Normal volatility
+                'mean_reversion_strength': 0.05,  # Low mean reversion (trending)
+                'volume_factor': 1.2,  # Higher than normal volume
+                'duration_range': (20, 100)  # Tends to last longer
+            },
+            MarketRegime.DOWNTREND: {
+                'mu': -0.0006,  # Strong negative drift (faster than uptrends)
+                'sigma': base_volatility * 1.3,  # Higher volatility
+                'mean_reversion_strength': 0.05,  # Low mean reversion (trending)
+                'volume_factor': 1.5,  # Even higher volume (panic selling)
+                'duration_range': (15, 80)  # Tends to be shorter than uptrends
+            },
+            MarketRegime.RANGING: {
+                'mu': 0.0000,  # No drift
+                'sigma': base_volatility * 0.8,  # Lower volatility
+                'mean_reversion_strength': 0.2,  # High mean reversion
+                'volume_factor': 0.8,  # Lower volume
+                'duration_range': (10, 50)  # Variable duration
+            },
+            MarketRegime.VOLATILITY_EXPANSION: {
+                'mu': 0.0000,  # No consistent direction
+                'sigma': base_volatility * 2.5,  # Much higher volatility
+                'mean_reversion_strength': 0.1,  # Moderate mean reversion
+                'volume_factor': 2.0,  # Much higher volume
+                'duration_range': (5, 20)  # Usually short-lived
+            },
+            MarketRegime.VOLATILITY_CONTRACTION: {
+                'mu': 0.0001,  # Slight upward bias
+                'sigma': base_volatility * 0.5,  # Very low volatility
+                'mean_reversion_strength': 0.15,  # Moderate mean reversion
+                'volume_factor': 0.6,  # Low volume
+                'duration_range': (5, 30)  # Usually precedes a volatility expansion
+            }
+        }
+        
+        # Fallback to ranging if regime type is not recognized
+        return params.get(regime_type, params[MarketRegime.RANGING])
+
+def generate_regime_sequence(num_samples, regime_distribution=None, seed=None):
+    """Generate a sequence of market regimes.
+    
+    Parameters:
+    -----------
+    num_samples : int
+        Number of samples to generate
+    regime_distribution : dict, optional
+        Probability distribution of different regimes
+    seed : int, optional
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    list
+        List of regime types for each time step
+    """
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+    
+    # Default regime distribution if not provided
+    if regime_distribution is None:
+        regime_distribution = {
+            MarketRegime.UPTREND: 0.35,
+            MarketRegime.DOWNTREND: 0.25,
+            MarketRegime.RANGING: 0.25,
+            MarketRegime.VOLATILITY_EXPANSION: 0.1,
+            MarketRegime.VOLATILITY_CONTRACTION: 0.05
+        }
+    
+    # Normalize distribution to ensure probabilities sum to 1
+    total_prob = sum(regime_distribution.values())
+    normalized_distribution = {k: v / total_prob for k, v in regime_distribution.items()}
+    
+    # Extract regime types and probabilities
+    regime_types = list(normalized_distribution.keys())
+    probabilities = list(normalized_distribution.values())
+    
+    # Initialize with a random regime
+    current_regime = np.random.choice(regime_types, p=probabilities)
+    regime_params = MarketRegime.get_regime_parameters(current_regime)
+    
+    # Generate regime sequence
+    regimes = []
+    remaining_duration = np.random.randint(*regime_params['duration_range'])
+    
+    # Markov transition matrix - probability of transitioning from one regime to another
+    # Higher values on the diagonal mean regimes tend to persist
+    transition_matrix = {
+        MarketRegime.UPTREND: {
+            MarketRegime.UPTREND: 0.7,
+            MarketRegime.DOWNTREND: 0.1,
+            MarketRegime.RANGING: 0.1,
+            MarketRegime.VOLATILITY_EXPANSION: 0.05,
+            MarketRegime.VOLATILITY_CONTRACTION: 0.05
+        },
+        MarketRegime.DOWNTREND: {
+            MarketRegime.UPTREND: 0.1,
+            MarketRegime.DOWNTREND: 0.7,
+            MarketRegime.RANGING: 0.1,
+            MarketRegime.VOLATILITY_EXPANSION: 0.05,
+            MarketRegime.VOLATILITY_CONTRACTION: 0.05
+        },
+        MarketRegime.RANGING: {
+            MarketRegime.UPTREND: 0.15,
+            MarketRegime.DOWNTREND: 0.15,
+            MarketRegime.RANGING: 0.5,
+            MarketRegime.VOLATILITY_EXPANSION: 0.15,
+            MarketRegime.VOLATILITY_CONTRACTION: 0.05
+        },
+        MarketRegime.VOLATILITY_EXPANSION: {
+            MarketRegime.UPTREND: 0.3,
+            MarketRegime.DOWNTREND: 0.3,
+            MarketRegime.RANGING: 0.2,
+            MarketRegime.VOLATILITY_EXPANSION: 0.1,
+            MarketRegime.VOLATILITY_CONTRACTION: 0.1
+        },
+        MarketRegime.VOLATILITY_CONTRACTION: {
+            MarketRegime.UPTREND: 0.1,
+            MarketRegime.DOWNTREND: 0.1,
+            MarketRegime.RANGING: 0.1,
+            MarketRegime.VOLATILITY_EXPANSION: 0.6,
+            MarketRegime.VOLATILITY_CONTRACTION: 0.1
+        }
+    }
+    
+    for _ in range(num_samples):
+        if remaining_duration <= 0:
+            # Time to transition to a new regime
+            # Get transition probabilities for current regime
+            transition_probs = transition_matrix[current_regime]
+            next_regimes = list(transition_probs.keys())
+            next_probs = list(transition_probs.values())
+            
+            # Choose next regime based on transition probabilities
+            current_regime = np.random.choice(next_regimes, p=next_probs)
+            regime_params = MarketRegime.get_regime_parameters(current_regime)
+            remaining_duration = np.random.randint(*regime_params['duration_range'])
+        
+        regimes.append(current_regime)
+        remaining_duration -= 1
+    
+    logger.info(f"Generated regime sequence with {len(regimes)} elements")
+    # Log regime distribution in the generated sequence
+    regime_counts = {regime: regimes.count(regime) for regime in set(regimes)}
+    for regime, count in regime_counts.items():
+        logger.info(f"  - {regime}: {count} periods ({count/len(regimes)*100:.1f}%)")
+    
+    return regimes
+
+def generate_price_process(num_samples, regimes, base_price=10000.0, base_volatility=0.002, seed=None):
+    """Generate a realistic price process with regime-switching dynamics.
+    
+    Parameters:
+    -----------
+    num_samples : int
+        Number of samples to generate
+    regimes : list
+        List of regime types for each time step
+    base_price : float
+        Starting price
+    base_volatility : float
+        Base volatility level
+    seed : int, optional
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    tuple
+        (prices, volatilities, volumes) - numpy arrays for each component
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Initialize arrays
+    prices = np.zeros(num_samples)
+    volatilities = np.zeros(num_samples)
+    volumes = np.zeros(num_samples)
+    
+    # Set initial price
+    prices[0] = base_price
+    
+    # Initialize for GARCH-like volatility process
+    alpha = 0.1  # News impact
+    beta = 0.85  # Volatility persistence
+    gamma = 0.02  # Asymmetry factor (negative returns increase volatility more)
+    omega = base_volatility**2 * (1 - alpha - beta)  # Long-run variance
+    
+    # Initial volatility
+    current_volatility = base_volatility
+    volatilities[0] = current_volatility
+    
+    # Initialize volume with log-normal distribution
+    volumes[0] = np.random.lognormal(10, 1)
+    
+    # Support and resistance levels
+    support_levels = [base_price * 0.9]
+    resistance_levels = [base_price * 1.1]
+    
+    # Generate price, volatility, and volume processes
+    for i in range(1, num_samples):
+        # Get regime parameters
+        regime = regimes[i]
+        params = MarketRegime.get_regime_parameters(regime, base_volatility)
+        
+        # Update volatility (GARCH-like process)
+        if i > 1:
+            # Calculate return
+            ret = (prices[i-1] / prices[i-2]) - 1
+            
+            # Asymmetric effect: negative returns increase volatility more
+            leverage = 1 + (gamma * (ret < 0))
+            
+            # GARCH update
+            current_volatility = np.sqrt(
+                omega + 
+                alpha * (ret**2) * leverage + 
+                beta * volatilities[i-1]**2
+            )
+        
+        # Scale volatility by regime
+        scaled_volatility = current_volatility * params['sigma'] / base_volatility
+        volatilities[i] = scaled_volatility
+        
+        # Mean-reverting component (if applicable)
+        mean_reversion = 0
+        if params['mean_reversion_strength'] > 0:
+            # Determine local mean (could be moving average in real implementation)
+            local_mean = np.mean(prices[max(0, i-30):i]) if i > 0 else prices[0]
+            # Calculate mean reversion effect
+            mean_reversion = params['mean_reversion_strength'] * (local_mean - prices[i-1])
+        
+        # Support and resistance effects
+        sr_effect = 0
+        
+        # Find closest support level below current price
+        closest_support = max([s for s in support_levels if s < prices[i-1]], default=0)
+        # Find closest resistance level above current price
+        closest_resistance = min([r for r in resistance_levels if r > prices[i-1]], default=float('inf'))
+        
+        # Distance to closest support/resistance (as percentage of price)
+        support_distance = (prices[i-1] - closest_support) / prices[i-1] if closest_support > 0 else 1.0
+        resistance_distance = (closest_resistance - prices[i-1]) / prices[i-1] if closest_resistance < float('inf') else 1.0
+        
+        # Effect becomes stronger as price approaches support/resistance
+        if support_distance < 0.03:  # Within 3% of support
+            # Stronger support as we get closer
+            bounce_probability = 0.7 * (1 - support_distance / 0.03)
+            if np.random.random() < bounce_probability:
+                # Bounce effect - pulls price up
+                sr_effect = 0.002 * (1 - support_distance / 0.03)
+        
+        if resistance_distance < 0.03:  # Within 3% of resistance
+            # Stronger resistance as we get closer
+            bounce_probability = 0.7 * (1 - resistance_distance / 0.03)
+            if np.random.random() < bounce_probability:
+                # Resistance effect - pulls price down
+                sr_effect = -0.002 * (1 - resistance_distance / 0.03)
+        
+        # Occasionally break support/resistance
+        if (support_distance < 0.01 and np.random.random() < 0.05) or \
+           (resistance_distance < 0.01 and np.random.random() < 0.05):
+            # Support/resistance breakout
+            if support_distance < resistance_distance:
+                # Support break - strong move down
+                sr_effect = -0.01
+                # Remove this support level and add a new one lower
+                if closest_support in support_levels:
+                    support_levels.remove(closest_support)
+                    # Resistance becomes support when broken
+                    resistance_levels.append(closest_support)
+                new_support = closest_support * 0.95
+                support_levels.append(new_support)
+            else:
+                # Resistance break - strong move up
+                sr_effect = 0.01
+                # Remove this resistance level and add a new one higher
+                if closest_resistance in resistance_levels:
+                    resistance_levels.remove(closest_resistance)
+                    # Resistance becomes support when broken
+                    support_levels.append(closest_resistance)
+                new_resistance = closest_resistance * 1.05
+                resistance_levels.append(new_resistance)
+        
+        # Occasionally add new support/resistance levels
+        if i % 500 == 0:
+            # Add new levels near current price
+            new_support = prices[i-1] * 0.97
+            new_resistance = prices[i-1] * 1.03
+            support_levels.append(new_support)
+            resistance_levels.append(new_resistance)
+            # Cleanup old levels (keep a reasonable number)
+            support_levels = sorted(support_levels, reverse=True)[:5]
+            resistance_levels = sorted(resistance_levels)[:5]
+        
+        # Combined price change
+        drift = params['mu']
+        random_component = np.random.normal(0, scaled_volatility)
+        
+        # Final return calculation
+        price_return = drift + random_component + mean_reversion + sr_effect
+        
+        # Update price
+        prices[i] = prices[i-1] * (1 + price_return)
+        
+        # Generate volume (correlated with volatility and absolute returns)
+        base_volume = np.random.lognormal(10, 0.5)
+        volume_factor = params['volume_factor']
+        # Volume increases with volatility and absolute returns
+        volume_multiplier = 1.0 + 2.0 * abs(price_return) + 0.5 * scaled_volatility / base_volatility
+        volumes[i] = base_volume * volume_factor * volume_multiplier
+    
+    return prices, volatilities, volumes
+
+def generate_realistic_ohlc(close_prices, volatilities, seed=None):
+    """Generate realistic Open, High, Low values based on Close prices and volatility.
+    
+    Parameters:
+    -----------
+    close_prices : numpy.ndarray
+        Array of close prices
+    volatilities : numpy.ndarray
+        Array of price volatilities
+    seed : int, optional
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    tuple
+        (open_prices, high_prices, low_prices) - numpy arrays for OHLC data
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    num_samples = len(close_prices)
+    open_prices = np.zeros(num_samples)
+    high_prices = np.zeros(num_samples)
+    low_prices = np.zeros(num_samples)
+    
+    # Set initial values
+    open_prices[0] = close_prices[0] * (1 - np.random.uniform(0, 0.002))
+    high_prices[0] = max(open_prices[0], close_prices[0]) * (1 + np.random.uniform(0, 0.003))
+    low_prices[0] = min(open_prices[0], close_prices[0]) * (1 - np.random.uniform(0, 0.003))
+    
+    # Generate OHLC for remaining periods
+    for i in range(1, num_samples):
+        # Open price: Close of previous candle with small noise
+        # This creates a gap with small probability (more common in daily timeframes)
+        gap_probability = 0.05 if i % 96 == 0 else 0.01  # Higher probability for "daily" candles
+        
+        if np.random.random() < gap_probability:
+            # Create a gap - larger for "daily" candles
+            gap_size = np.random.uniform(-0.01, 0.01) * (3.0 if i % 96 == 0 else 1.0)
+            open_prices[i] = close_prices[i-1] * (1 + gap_size)
+        else:
+            # Regular open (close of previous period with tiny noise)
+            open_prices[i] = close_prices[i-1] * (1 + np.random.uniform(-0.0005, 0.0005))
+        
+        # Price direction for this candle
+        price_direction = 1 if close_prices[i] >= open_prices[i] else -1
+        
+        # Range is influenced by volatility
+        candle_range_factor = 2.0 + np.random.exponential(1.0)  # Occasional large ranges
+        range_size = volatilities[i] * candle_range_factor
+        
+        # For bear candles: High comes first, then Low
+        # For bull candles: Low comes first, then High
+        
+        if price_direction > 0:  # Bullish candle
+            # Price tends to go lower before moving higher in bull candles
+            # Low is below both open and close
+            low_extension = np.random.uniform(0.2, 1.0) * range_size
+            low_prices[i] = min(open_prices[i], close_prices[i]) * (1 - low_extension)
+            
+            # High is above close
+            high_extension = np.random.uniform(0.1, 0.8) * range_size
+            high_prices[i] = max(open_prices[i], close_prices[i]) * (1 + high_extension)
+        else:  # Bearish candle
+            # Price tends to go higher before moving lower in bear candles
+            # High is above both open and close
+            high_extension = np.random.uniform(0.2, 1.0) * range_size
+            high_prices[i] = max(open_prices[i], close_prices[i]) * (1 + high_extension)
+            
+            # Low is below close
+            low_extension = np.random.uniform(0.1, 0.8) * range_size
+            low_prices[i] = min(open_prices[i], close_prices[i]) * (1 - low_extension)
+        
+        # Ensure high is always highest and low is always lowest
+        high_prices[i] = max(high_prices[i], open_prices[i], close_prices[i])
+        low_prices[i] = min(low_prices[i], open_prices[i], close_prices[i])
+    
+    return open_prices, high_prices, low_prices
+
 def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', config_path=None):
     """Generate synthetic data for training.
     
@@ -66,41 +489,27 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
         config = load_config(config_path)
         num_samples = config.get('num_samples', num_samples)
         output_dir = config.get('output_dir', output_dir)
-        pattern_distribution = config.get('pattern_distribution', {
-            "uptrend": 0.25,
-            "downtrend": 0.25,
-            "sideways": 0.15,
-            "reversal_top": 0.1,
-            "reversal_bottom": 0.1,
-            "support_bounce": 0.075,
-            "resistance_bounce": 0.075,
-            "support_break": 0.025,
-            "resistance_break": 0.025
-        })
+        base_price = config.get('base_price', 10000.0)
+        base_volatility = config.get('base_volatility', 0.002)
+        regime_distribution = config.get('regime_distribution', None)
         include_indicators = config.get('include_indicators', True)
         train_ratio = config.get('train_ratio', 0.7)
         val_ratio = config.get('val_ratio', 0.15)
         test_ratio = config.get('test_ratio', 0.15)
         shuffle = config.get('shuffle', False)  # Default to chronological order
+        seed = config.get('seed', None)
         
         logger.info(f"Generating {num_samples} samples based on configuration")
     else:
-        pattern_distribution = {
-            "uptrend": 0.25,
-            "downtrend": 0.25,
-            "sideways": 0.15,
-            "reversal_top": 0.1,
-            "reversal_bottom": 0.1,
-            "support_bounce": 0.075,
-            "resistance_bounce": 0.075,
-            "support_break": 0.025,
-            "resistance_break": 0.025
-        }
+        base_price = 10000.0
+        base_volatility = 0.002
+        regime_distribution = None
         include_indicators = True
         train_ratio = 0.7
         val_ratio = 0.15
         test_ratio = 0.15
         shuffle = False
+        seed = None
         
         logger.info(f"Generating {num_samples} samples with default settings")
     
@@ -111,20 +520,28 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
         freq='15min'
     )
     
-    # Generate random price data (simple random walk)
-    base_price = 10000.0  # Starting price
-    returns = np.random.normal(0, 0.002, num_samples)  # Small random returns
-    cumulative_returns = np.exp(np.cumsum(returns))  # Log-normal price path
-    prices = base_price * cumulative_returns
+    # Generate market regimes
+    logger.info("Generating market regime sequence...")
+    regimes = generate_regime_sequence(num_samples, regime_distribution, seed)
+    
+    # Generate price, volatility, and volume processes
+    logger.info("Generating price, volatility, and volume processes...")
+    prices, volatilities, volumes = generate_price_process(
+        num_samples, regimes, base_price, base_volatility, seed
+    )
+    
+    # Generate realistic OHLC data
+    logger.info("Generating realistic OHLC data...")
+    open_prices, high_prices, low_prices = generate_realistic_ohlc(prices, volatilities, seed)
     
     # Create 15m dataframe
     df_15m = pd.DataFrame({
         'timestamp': date_range,
-        'open': prices * (1 - np.random.uniform(0, 0.005, num_samples)),
-        'high': prices * (1 + np.random.uniform(0, 0.01, num_samples)),
-        'low': prices * (1 - np.random.uniform(0, 0.01, num_samples)),
+        'open': open_prices,
+        'high': high_prices,
+        'low': low_prices,
         'close': prices,
-        'volume': np.random.lognormal(10, 1, num_samples)
+        'volume': volumes
     })
     df_15m.set_index('timestamp', inplace=True)
     
@@ -137,7 +554,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
         'volume': 'sum'
     })
     
-    # Create 1d dataframe (aggregate from 1h)
+    # Create 1d dataframe (aggregate from 15m)
     df_1d = df_15m.resample('1D').agg({
         'open': 'first',
         'high': 'max',
@@ -146,10 +563,12 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
         'volume': 'sum'
     })
     
-    logger.info(f"Generated dataframes: 15m ({len(df_15m)} rows), 4h ({len(df_4h)} rows), 1d ({len(df_1d)} rows)")
+    logger.info(f"Generated dataframes: 15m ({len(df_15m)} rows), "
+                f"4h ({len(df_4h)} rows), 1d ({len(df_1d)} rows)")
     
     # Add comprehensive set of indicators
     if include_indicators:
+        logger.info("Calculating technical indicators...")
         for df in [df_15m, df_4h, df_1d]:
             # Basic OHLCV features (5 features)
             # 'open', 'high', 'low', 'close', 'volume' are already in the DataFrame
@@ -162,7 +581,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
             # Price position relative to moving averages
             df['price_sma_ratio'] = df['close'] / df['sma_25']
-            df['sma_cross_signal'] = ((df['sma_7'] > df['sma_25']).astype(int) * 2 - 1)  # +1 for bullish, -1 for bearish
+            df['sma_cross_signal'] = ((df['sma_7'] > df['sma_25']).astype(int) * 2 - 1)
 
             # Momentum indicators (6 features)
             # RSI
@@ -177,7 +596,8 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             # Stochastic Oscillator
             low_14 = df['low'].rolling(window=14).min()
             high_14 = df['high'].rolling(window=14).max()
-            df['stoch_k'] = 100 * ((df['close'] - low_14) / (high_14 - low_14 + np.finfo(float).eps))
+            df['stoch_k'] = 100 * ((df['close'] - low_14) / 
+                                    (high_14 - low_14 + np.finfo(float).eps))
             df['stoch_d'] = df['stoch_k'].rolling(window=3).mean()
             
             # MACD calculation
@@ -194,7 +614,8 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             df['bb_upper'] = df['bb_middle'] + 2 * std_20
             df['bb_lower'] = df['bb_middle'] - 2 * std_20
             df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
-            df['bb_pct_b'] = (df['close'] - df['bb_lower']) / ((df['bb_upper'] - df['bb_lower']) + np.finfo(float).eps)
+            df['bb_pct_b'] = (df['close'] - df['bb_lower']) / (
+                (df['bb_upper'] - df['bb_lower']) + np.finfo(float).eps)
             
             # ATR calculation
             high_low = df['high'] - df['low']
@@ -210,11 +631,14 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             
             # On-Balance Volume
             df['price_change'] = df['close'].diff()
-            df['price_direction'] = np.where(df['price_change'] > 0, 1, np.where(df['price_change'] < 0, -1, 0))
+            df['price_direction'] = np.where(df['price_change'] > 0, 1, 
+                                          np.where(df['price_change'] < 0, -1, 0))
             df['obv'] = (df['volume'] * df['price_direction']).cumsum()
             
             # Chaikin Money Flow
-            money_flow_multiplier = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'] + np.finfo(float).eps)
+            money_flow_multiplier = ((df['close'] - df['low']) - 
+                                    (df['high'] - df['close'])) / (
+                                    df['high'] - df['low'] + np.finfo(float).eps)
             money_flow_volume = money_flow_multiplier * df['volume']
             df['cmf_20'] = money_flow_volume.rolling(20).sum() / df['volume'].rolling(20).sum()
 
@@ -223,6 +647,34 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             df['log_return'] = np.log(df['close'] / df['close'].shift(1))
             df['high_low_range'] = (df['high'] - df['low']) / df['close']
             df['body_size'] = abs(df['open'] - df['close']) / df['close']
+            
+            # Store volatility from the simulation
+            if df is df_15m:
+                df['true_volatility'] = volatilities
+            elif df is df_4h:
+                # Resample volatility to 4h (using max as volatility tends to cluster)
+                vol_series = pd.Series(volatilities, index=df_15m.index)
+                df['true_volatility'] = vol_series.resample('4h').max()
+            elif df is df_1d:
+                # Resample volatility to 1d
+                vol_series = pd.Series(volatilities, index=df_15m.index)
+                df['true_volatility'] = vol_series.resample('1D').max()
+            
+            # Store regime information
+            if df is df_15m:
+                # Add regime info
+                regimes_series = pd.Series(regimes, index=df_15m.index)
+                df['market_regime'] = regimes_series
+            elif df is df_4h:
+                # Resample regimes to 4h (using mode/most frequent)
+                regimes_series = pd.Series(regimes, index=df_15m.index)
+                # Since we can't easily aggregate categorical data with pandas,
+                # we'll just take the first element of each 4h window
+                df['market_regime'] = regimes_series.resample('4h').first()
+            elif df is df_1d:
+                # Resample regimes to 1d
+                regimes_series = pd.Series(regimes, index=df_15m.index)
+                df['market_regime'] = regimes_series.resample('1D').first()
             
             # Clean up NaN values that resulted from rolling windows
             df.fillna(method='bfill', inplace=True)
@@ -241,7 +693,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             dataset,
             primary_tf='15m',
             threshold_pct=0.015,  # 1.5% threshold for significant moves
-            lookforward_periods={'15m': 16, '4h': 4, '1d': 1}  # Look forward periods for each timeframe
+            lookforward_periods={'15m': 16, '4h': 4, '1d': 1}
         )
         
         # Replace the price_direction in the primary timeframe with the enhanced version
@@ -274,7 +726,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
     return dataset
 
 def save_dataset_hdf5(dataset, output_dir, filename="synthetic_dataset.h5"):
-    """Save the entire dataset as a single HDF5 file with multiple groups for timeframes"""
+    """Save the entire dataset as a single HDF5 file with multiple groups for timeframes."""
     
     # Define HDF5 file path
     hdf5_path = os.path.join(output_dir, filename)
@@ -284,7 +736,8 @@ def save_dataset_hdf5(dataset, output_dir, filename="synthetic_dataset.h5"):
         for timeframe, df in dataset.items():
             # Save the DataFrame to the HDF5 file, using timeframe as the group name
             store.put(f'/{timeframe}', df, format='table', data_columns=True)
-            logger.info(f"Saved {timeframe} data to {hdf5_path}/{timeframe} ({len(df)} rows)")
+            logger.info(f"Saved {timeframe} data to {hdf5_path}/{timeframe} "
+                      f"({len(df)} rows)")
     
     # Create metadata file
     metadata = {
@@ -302,7 +755,7 @@ def save_dataset_hdf5(dataset, output_dir, filename="synthetic_dataset.h5"):
     logger.info(f"Saved dataset metadata to {metadata_path}")
 
 def create_and_save_splits(dataset, train_ratio, val_ratio, test_ratio, shuffle, output_dir):
-    """Create train/val/test splits and save them as separate HDF5 files"""
+    """Create train/val/test splits and save them as separate HDF5 files."""
     
     split_sizes = {"train": train_ratio, "val": val_ratio, "test": test_ratio}
     split_datasets = {split_name: {} for split_name in split_sizes.keys()}
@@ -325,9 +778,12 @@ def create_and_save_splits(dataset, train_ratio, val_ratio, test_ratio, shuffle,
         split_datasets["val"][timeframe] = data.iloc[train_idx:val_idx]
         split_datasets["test"][timeframe] = data.iloc[val_idx:]
         
-        logger.info(f"Split {timeframe} data: train={len(split_datasets['train'][timeframe])}, "
-                   f"val={len(split_datasets['val'][timeframe])}, "
-                   f"test={len(split_datasets['test'][timeframe])}")
+        logger.info(
+            f"Split {timeframe} data: "
+            f"train={len(split_datasets['train'][timeframe])}, "
+            f"val={len(split_datasets['val'][timeframe])}, "
+            f"test={len(split_datasets['test'][timeframe])}"
+        )
     
     # Save each split as a separate HDF5 file
     for split_name, split_data in split_datasets.items():
@@ -341,12 +797,31 @@ def create_and_save_splits(dataset, train_ratio, val_ratio, test_ratio, shuffle,
 
 def main():
     """Main entry point for data generation."""
-    parser = argparse.ArgumentParser(description="Generate synthetic data for cryptocurrency trading model")
-    parser.add_argument("--num_samples", type=int, default=525600,
-                      help="Number of 15-minute samples to generate (default: 525600 for ~15 years)")
-    parser.add_argument("--output_dir", type=str, default="data/synthetic",
-                      help="Directory where the data will be saved (default: data/synthetic)")
-    parser.add_argument("--config", type=str, help="Path to configuration file")
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic data for cryptocurrency trading model"
+    )
+    parser.add_argument(
+        "--num_samples", 
+        type=int, 
+        default=525600,
+        help="Number of 15-minute samples to generate (default: 525600 for ~15 years)"
+    )
+    parser.add_argument(
+        "--output_dir", 
+        type=str, 
+        default="data/synthetic",
+        help="Directory where the data will be saved (default: data/synthetic)"
+    )
+    parser.add_argument(
+        "--config", 
+        type=str, 
+        help="Path to configuration file"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Random seed for reproducibility"
+    )
     
     args = parser.parse_args()
     
@@ -361,10 +836,12 @@ def main():
             config_path=args.config
         )
     else:
-        generate_synthetic_data(
-            num_samples=args.num_samples,
-            output_dir=args.output_dir
-        )
+        config = {
+            "num_samples": args.num_samples,
+            "output_dir": args.output_dir,
+            "seed": args.seed
+        }
+        generate_synthetic_data(**config)
     
     logger.info("Data generation complete.")
 

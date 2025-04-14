@@ -3,6 +3,11 @@ numpy>=1.24.0
 pandas>=1.3.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
+tables>=3.7.0  # HDF5 support
+scipy>=1.10.0
+statsmodels>=0.13.5
+mplfinance>=0.12.9b0  # For candlestick charts
+pandas-ta>=0.3.14b0  # For technical analysis indicators
 
 # Deep Learning
 torch>=1.13.0
