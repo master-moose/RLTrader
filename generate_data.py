@@ -281,6 +281,10 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
     # Support and resistance levels
     support_levels = [base_price * 0.9]
     resistance_levels = [base_price * 1.1]
+
+    # Add price limits to prevent numeric overflow
+    max_price = 1e6  # Maximum allowed price
+    min_price = 1e-6  # Minimum allowed price
     
     # Generate price, volatility, and volume processes
     for i in range(1, num_samples):
@@ -290,103 +294,133 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
         
         # Update volatility (GARCH-like process)
         if i > 1:
-            # Calculate return
-            ret = (prices[i-1] / prices[i-2]) - 1
+            # Calculate return with safeguard against extreme prices
+            if np.isfinite(prices[i-1]) and np.isfinite(prices[i-2]) and prices[i-2] > 0:
+                ret = (prices[i-1] / prices[i-2]) - 1
+                ret = np.clip(ret, -0.5, 0.5)  # Limit extreme returns
+            else:
+                ret = 0  # Default to zero if we have bad values
             
             # Asymmetric effect: negative returns increase volatility more
             leverage = 1 + (gamma * (ret < 0))
             
-            # GARCH update
+            # GARCH update with safeguards
             current_volatility = np.sqrt(
                 omega + 
                 alpha * (ret**2) * leverage + 
                 beta * volatilities[i-1]**2
             )
+            
+            # Sanity check on volatility
+            if not np.isfinite(current_volatility) or current_volatility <= 0:
+                current_volatility = base_volatility
         
         # Scale volatility by regime
         scaled_volatility = current_volatility * params['sigma'] / base_volatility
+        scaled_volatility = np.clip(scaled_volatility, base_volatility * 0.1, base_volatility * 10)
         volatilities[i] = scaled_volatility
         
         # Mean-reverting component (if applicable)
         mean_reversion = 0
-        if params['mean_reversion_strength'] > 0:
+        if params['mean_reversion_strength'] > 0 and np.isfinite(prices[i-1]):
             # Determine local mean (could be moving average in real implementation)
-            local_mean = np.mean(prices[max(0, i-30):i]) if i > 0 else prices[0]
-            # Calculate mean reversion effect
-            mean_reversion = params['mean_reversion_strength'] * (local_mean - prices[i-1])
+            local_prices = prices[max(0, i-30):i]
+            local_prices = local_prices[np.isfinite(local_prices)]  # Filter out bad values
+            
+            if len(local_prices) > 0:
+                local_mean = np.mean(local_prices)
+                # Calculate mean reversion effect with safeguard
+                if np.isfinite(local_mean):
+                    mean_reversion = params['mean_reversion_strength'] * (local_mean - prices[i-1])
+                    # Clip to avoid extreme reversion
+                    mean_reversion = np.clip(mean_reversion, -0.05, 0.05)
         
         # Support and resistance effects
         sr_effect = 0
         
-        # Find closest support level below current price
-        closest_support = max([s for s in support_levels if s < prices[i-1]], default=0)
-        # Find closest resistance level above current price
-        closest_resistance = min([r for r in resistance_levels if r > prices[i-1]], default=float('inf'))
-        
-        # Distance to closest support/resistance (as percentage of price)
-        support_distance = (prices[i-1] - closest_support) / prices[i-1] if closest_support > 0 else 1.0
-        resistance_distance = (closest_resistance - prices[i-1]) / prices[i-1] if closest_resistance < float('inf') else 1.0
-        
-        # Effect becomes stronger as price approaches support/resistance
-        if support_distance < 0.03:  # Within 3% of support
-            # Stronger support as we get closer
-            bounce_probability = 0.7 * (1 - support_distance / 0.03)
-            if np.random.random() < bounce_probability:
-                # Bounce effect - pulls price up
-                sr_effect = 0.002 * (1 - support_distance / 0.03)
-        
-        if resistance_distance < 0.03:  # Within 3% of resistance
-            # Stronger resistance as we get closer
-            bounce_probability = 0.7 * (1 - resistance_distance / 0.03)
-            if np.random.random() < bounce_probability:
-                # Resistance effect - pulls price down
-                sr_effect = -0.002 * (1 - resistance_distance / 0.03)
-        
-        # Occasionally break support/resistance
-        if (support_distance < 0.01 and np.random.random() < 0.05) or \
-           (resistance_distance < 0.01 and np.random.random() < 0.05):
-            # Support/resistance breakout
-            if support_distance < resistance_distance:
-                # Support break - strong move down
-                sr_effect = -0.01
-                # Remove this support level and add a new one lower
-                if closest_support in support_levels:
-                    support_levels.remove(closest_support)
-                    # Resistance becomes support when broken
-                    resistance_levels.append(closest_support)
-                new_support = closest_support * 0.95
+        # Only calculate S/R effects if price is finite and positive
+        if np.isfinite(prices[i-1]) and prices[i-1] > 0:
+            # Find closest support level below current price
+            supports_below = [s for s in support_levels if s < prices[i-1]]
+            closest_support = max(supports_below) if supports_below else 0
+            
+            # Find closest resistance level above current price
+            resistances_above = [r for r in resistance_levels if r > prices[i-1]]
+            closest_resistance = min(resistances_above) if resistances_above else float('inf')
+            
+            # Distance to closest support/resistance (as percentage of price)
+            support_distance = (prices[i-1] - closest_support) / prices[i-1] if closest_support > 0 else 1.0
+            resistance_distance = (closest_resistance - prices[i-1]) / prices[i-1] if closest_resistance < float('inf') else 1.0
+            
+            # Effect becomes stronger as price approaches support/resistance
+            if support_distance < 0.03 and support_distance > 0:  # Within 3% of support
+                # Stronger support as we get closer
+                bounce_probability = 0.7 * (1 - support_distance / 0.03)
+                if np.random.random() < bounce_probability:
+                    # Bounce effect - pulls price up
+                    sr_effect = 0.002 * (1 - support_distance / 0.03)
+            
+            if resistance_distance < 0.03 and resistance_distance > 0:  # Within 3% of resistance
+                # Stronger resistance as we get closer
+                bounce_probability = 0.7 * (1 - resistance_distance / 0.03)
+                if np.random.random() < bounce_probability:
+                    # Resistance effect - pulls price down
+                    sr_effect = -0.002 * (1 - resistance_distance / 0.03)
+            
+            # Occasionally break support/resistance
+            if (support_distance < 0.01 and support_distance > 0 and np.random.random() < 0.05) or \
+               (resistance_distance < 0.01 and resistance_distance > 0 and np.random.random() < 0.05):
+                # Support/resistance breakout
+                if support_distance < resistance_distance:
+                    # Support break - strong move down
+                    sr_effect = -0.01
+                    # Remove this support level and add a new one lower
+                    if closest_support in support_levels:
+                        support_levels.remove(closest_support)
+                        # Resistance becomes support when broken
+                        resistance_levels.append(closest_support)
+                    new_support = closest_support * 0.95
+                    support_levels.append(new_support)
+                else:
+                    # Resistance break - strong move up
+                    sr_effect = 0.01
+                    # Remove this resistance level and add a new one higher
+                    if closest_resistance in resistance_levels:
+                        resistance_levels.remove(closest_resistance)
+                        # Resistance becomes support when broken
+                        support_levels.append(closest_resistance)
+                    new_resistance = closest_resistance * 1.05
+                    resistance_levels.append(new_resistance)
+            
+            # Occasionally add new support/resistance levels
+            if i % 500 == 0:
+                # Add new levels near current price
+                new_support = prices[i-1] * 0.97
+                new_resistance = prices[i-1] * 1.03
                 support_levels.append(new_support)
-            else:
-                # Resistance break - strong move up
-                sr_effect = 0.01
-                # Remove this resistance level and add a new one higher
-                if closest_resistance in resistance_levels:
-                    resistance_levels.remove(closest_resistance)
-                    # Resistance becomes support when broken
-                    support_levels.append(closest_resistance)
-                new_resistance = closest_resistance * 1.05
                 resistance_levels.append(new_resistance)
-        
-        # Occasionally add new support/resistance levels
-        if i % 500 == 0:
-            # Add new levels near current price
-            new_support = prices[i-1] * 0.97
-            new_resistance = prices[i-1] * 1.03
-            support_levels.append(new_support)
-            resistance_levels.append(new_resistance)
-            # Cleanup old levels (keep a reasonable number)
-            support_levels = sorted(support_levels, reverse=True)[:5]
-            resistance_levels = sorted(resistance_levels)[:5]
+                # Cleanup old levels (keep a reasonable number)
+                support_levels = sorted(support_levels, reverse=True)[:5]
+                resistance_levels = sorted(resistance_levels)[:5]
         
         # Combined price change
         drift = params['mu']
         random_component = np.random.normal(0, scaled_volatility)
         
+        # Limit extreme movements
+        random_component = np.clip(random_component, -0.1, 0.1)
+        
         # Final return calculation
         price_return = drift + random_component + mean_reversion + sr_effect
         
-        # Update price
+        # Clip the return to prevent extreme moves
+        price_return = np.clip(price_return, -0.1, 0.1)
+        
+        # Update price with safeguard
         prices[i] = prices[i-1] * (1 + price_return)
+        
+        # Enforce price limits to prevent numerical issues
+        prices[i] = np.clip(prices[i], min_price, max_price)
         
         # Generate volume (correlated with volatility and absolute returns)
         base_volume = np.random.lognormal(10, 0.5)
@@ -394,6 +428,10 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
         # Volume increases with volatility and absolute returns
         volume_multiplier = 1.0 + 2.0 * abs(price_return) + 0.5 * scaled_volatility / base_volatility
         volumes[i] = base_volume * volume_factor * volume_multiplier
+        
+        # Sanity check on volume
+        if not np.isfinite(volumes[i]) or volumes[i] <= 0:
+            volumes[i] = volumes[i-1] if np.isfinite(volumes[i-1]) and volumes[i-1] > 0 else base_volume
     
     return prices, volatilities, volumes
 
@@ -422,13 +460,44 @@ def generate_realistic_ohlc(close_prices, volatilities, seed=None):
     high_prices = np.zeros(num_samples)
     low_prices = np.zeros(num_samples)
     
-    # Set initial values
+    # Make sure all close prices are valid
+    valid_prices = np.isfinite(close_prices) & (close_prices > 0)
+    if not np.all(valid_prices):
+        # Handle invalid prices
+        invalid_indices = np.where(~valid_prices)[0]
+        logger.warning(f"Found {len(invalid_indices)} invalid close prices, fixing them")
+        
+        # Find first valid price
+        first_valid_idx = np.where(valid_prices)[0]
+        if len(first_valid_idx) == 0:
+            logger.error("No valid prices found, cannot generate OHLC data")
+            # Return dummy data
+            return close_prices, close_prices, close_prices
+            
+        first_valid_price = close_prices[first_valid_idx[0]]
+        
+        # Fix invalid prices
+        for idx in invalid_indices:
+            if idx == 0:
+                close_prices[idx] = first_valid_price
+            else:
+                # Use previous valid price
+                close_prices[idx] = close_prices[idx-1]
+    
+    # Set initial values with safeguards
     open_prices[0] = close_prices[0] * (1 - np.random.uniform(0, 0.002))
     high_prices[0] = max(open_prices[0], close_prices[0]) * (1 + np.random.uniform(0, 0.003))
     low_prices[0] = min(open_prices[0], close_prices[0]) * (1 - np.random.uniform(0, 0.003))
     
     # Generate OHLC for remaining periods
     for i in range(1, num_samples):
+        if not np.isfinite(close_prices[i]) or close_prices[i] <= 0:
+            # Skip invalid prices
+            open_prices[i] = close_prices[i]
+            high_prices[i] = close_prices[i]
+            low_prices[i] = close_prices[i]
+            continue
+            
         # Open price: Close of previous candle with small noise
         # This creates a gap with small probability (more common in daily timeframes)
         gap_probability = 0.05 if i % 96 == 0 else 0.01  # Higher probability for "daily" candles
@@ -441,38 +510,56 @@ def generate_realistic_ohlc(close_prices, volatilities, seed=None):
             # Regular open (close of previous period with tiny noise)
             open_prices[i] = close_prices[i-1] * (1 + np.random.uniform(-0.0005, 0.0005))
         
+        # Ensure open price is valid
+        if not np.isfinite(open_prices[i]) or open_prices[i] <= 0:
+            open_prices[i] = close_prices[i]
+        
         # Price direction for this candle
         price_direction = 1 if close_prices[i] >= open_prices[i] else -1
         
-        # Range is influenced by volatility
-        candle_range_factor = 2.0 + np.random.exponential(1.0)  # Occasional large ranges
-        range_size = volatilities[i] * candle_range_factor
+        # Range is influenced by volatility, but capped to avoid extreme values
+        candle_range_factor = min(2.0 + np.random.exponential(1.0), 5.0)
+        range_size = min(volatilities[i] * candle_range_factor, 0.1)
         
         # For bear candles: High comes first, then Low
         # For bull candles: Low comes first, then High
         
+        # Limit extension factors to prevent overflow
+        max_extension = 0.5
+        
         if price_direction > 0:  # Bullish candle
             # Price tends to go lower before moving higher in bull candles
             # Low is below both open and close
-            low_extension = np.random.uniform(0.2, 1.0) * range_size
-            low_prices[i] = min(open_prices[i], close_prices[i]) * (1 - low_extension)
+            base_price_low = min(open_prices[i], close_prices[i])
+            low_extension = min(np.random.uniform(0.2, 0.8) * range_size, max_extension)
+            low_prices[i] = base_price_low * (1 - low_extension)
             
             # High is above close
-            high_extension = np.random.uniform(0.1, 0.8) * range_size
-            high_prices[i] = max(open_prices[i], close_prices[i]) * (1 + high_extension)
+            base_price_high = max(open_prices[i], close_prices[i])
+            high_extension = min(np.random.uniform(0.1, 0.7) * range_size, max_extension)
+            high_prices[i] = base_price_high * (1 + high_extension)
         else:  # Bearish candle
             # Price tends to go higher before moving lower in bear candles
             # High is above both open and close
-            high_extension = np.random.uniform(0.2, 1.0) * range_size
-            high_prices[i] = max(open_prices[i], close_prices[i]) * (1 + high_extension)
+            base_price_high = max(open_prices[i], close_prices[i])
+            high_extension = min(np.random.uniform(0.2, 0.8) * range_size, max_extension)
+            high_prices[i] = base_price_high * (1 + high_extension)
             
             # Low is below close
-            low_extension = np.random.uniform(0.1, 0.8) * range_size
-            low_prices[i] = min(open_prices[i], close_prices[i]) * (1 - low_extension)
+            base_price_low = min(open_prices[i], close_prices[i])
+            low_extension = min(np.random.uniform(0.1, 0.7) * range_size, max_extension)
+            low_prices[i] = base_price_low * (1 - low_extension)
         
         # Ensure high is always highest and low is always lowest
         high_prices[i] = max(high_prices[i], open_prices[i], close_prices[i])
         low_prices[i] = min(low_prices[i], open_prices[i], close_prices[i])
+        
+        # Final sanity check
+        if not np.isfinite(high_prices[i]) or high_prices[i] <= 0:
+            high_prices[i] = close_prices[i] * 1.001
+        
+        if not np.isfinite(low_prices[i]) or low_prices[i] <= 0:
+            low_prices[i] = close_prices[i] * 0.999
     
     return open_prices, high_prices, low_prices
 
@@ -643,7 +730,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
             df['cmf_20'] = money_flow_volume.rolling(20).sum() / df['volume'].rolling(20).sum()
 
             # Price-derived features (4 features)
-            df['return'] = df['close'].pct_change()
+            df['return'] = df['close'].pct_change(fill_method=None)
             df['log_return'] = np.log(df['close'] / df['close'].shift(1))
             df['high_low_range'] = (df['high'] - df['low']) / df['close']
             df['body_size'] = abs(df['open'] - df['close']) / df['close']
@@ -677,8 +764,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
                 df['market_regime'] = regimes_series.resample('1D').first()
             
             # Clean up NaN values that resulted from rolling windows
-            df.fillna(method='bfill', inplace=True)
-            df.fillna(0, inplace=True)
+            df.fillna(0, inplace=True)  # Simply replace NaNs with zeros
 
     dataset = {
         '15m': df_15m,
