@@ -261,10 +261,19 @@ class TradingMetricsCallback(BaseCallback):
     
     def _on_episode_end(self) -> None:
         """Process metrics at the end of an episode."""
-        # Calculate episode statistics
-        episode_reward = sum(self.current_episode_metrics["rewards"])
-        episode_length = len(self.current_episode_metrics["rewards"])
-        episode_time = time.time() - self.last_time
+        # Ensure Monitor wrapper info is available
+        if 'episode' not in self.locals['infos'][0]:
+            logger.warning("Monitor wrapper 'episode' info not found in _on_episode_end. Skipping metric logging.")
+            return
+            
+        ep_info = self.locals['infos'][0]['episode']
+        episode_reward = ep_info['r'] # Get reward from Monitor
+        episode_length = ep_info['l'] # Get length from Monitor
+        # episode_time = ep_info['t'] # Get time from Monitor
+        # --- Remove manual calculation ---
+        # episode_reward = sum(self.current_episode_metrics["rewards"])
+        # episode_length = len(self.current_episode_metrics["rewards"])
+        episode_time = time.time() - self.last_time # Keep manual time for now, Monitor time might be different
         
         # Store episode statistics
         self.episode_rewards.append(episode_reward)
