@@ -1,79 +1,23 @@
-# Base packages
-numpy>=1.20.0
-pandas>=1.3.0
-scipy>=1.7.3
-matplotlib>=3.5.0
-seaborn>=0.11.0
-scikit-learn>=1.0.2
-pandas-ta==0.3.14b0
-h5py>=3.6.0
-jupyter>=1.0.0
-tqdm>=4.62.0
-pytest==7.3.1
-joblib==1.2.0
+# Core dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
-# Deep learning
-torch>=1.10.0
-torchvision>=0.15.0
-pytorch-lightning>=1.7.0
-torchmetrics>=0.11.0
-lightning-bolts>=0.6.0
+# Deep Learning
+torch>=1.13.0
+tqdm>=4.65.0
 
-# Time series and financial libraries
-ta>=0.10.0         # Technical indicators
-yfinance>=0.1.70
-imbalanced-learn>=0.10.0
+# Reinforcement Learning
+gymnasium>=0.28.1
+stable-baselines3>=2.0.0
 
-# For reinforcement learning
-gym>=0.21.0,<0.24.0
-stable-baselines3>=1.6.0
+# System monitoring
+psutil>=5.9.0
+GPUtil>=1.4.0
 
-# For logging and experiment tracking
-tensorboard>=2.10.0
-wandb>=0.15.0
+# Logging and visualization
+tensorboard>=2.12.0
 
-# Database
-influxdb>=5.3.0
-pymongo==4.4.1
-optuna==3.2.0
-pyyaml==6.0
-
-# Data handling
-ccxt>=1.60.0       # For crypto exchange API
-pyarrow>=10.0.0    # Fast data serialization
-tables==3.10.1     # HDF5 support (PyTables)
-blosc2>=2.0.0      # Compression for HDF5
-numexpr>=2.8.0     # Numerical expressions (used by PyTables)
-jsonschema>=4.17.0
-
-# Optimization
-numba>=0.55.0      # JIT compilation for faster code
-bottleneck>=1.3.0  # Fast array operations
-
-# Utilities
-jinja2>=3.0.0      # Template engine for report generation
-loguru>=0.5.3      # Better logging
-py-cpuinfo>=9.0.0
-
-# Optional but recommended
-ipywidgets>=7.6.0  # Interactive widgets for notebooks
-
-# GPU acceleration (conditional based on platform)
-cupy-cuda12x>=13.0.0; platform_system != "Darwin"
-
-# FinRL-specific dependencies
-finrl==0.3.7
-stable-baselines3>=1.6.0
-gym>=0.21.0,<0.24.0
-stockstats>=0.3.2
-yfinance>=0.1.70
-scikit-learn>=1.0.2
-pyfolio>=0.9.2
-tensorboard>=2.10.0
-gymnasium>=0.26.0
-pandas-market-calendars>=4.1.4
-exchange-calendars>=4.2.6
-alpaca-trade-api>=3.0.0
-ccxt>=2.6.36
-wrds>=3.1.6 
-shimmy>=2.0
+# Others
+typing-extensions>=4.5.0

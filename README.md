@@ -1,147 +1,141 @@
-# Cryptocurrency Trading with LSTM-DQN
+# LSTM-DQN Trading Agent
 
-This project implements a cryptocurrency trading system using deep reinforcement learning. The system consists of two main components:
+This project implements a cryptocurrency trading agent using a Deep Q-Network (DQN) enhanced with a Long Short-Term Memory (LSTM) network for feature extraction.
 
-1. **LSTM Model**: A deep learning model that learns patterns in cryptocurrency price data and predicts future price movements.
-2. **DQN Agent**: A reinforcement learning agent that uses the LSTM model for state representation and learns optimal trading strategies.
+The agent is built using Python, PyTorch, Gymnasium (formerly OpenAI Gym), and Stable-Baselines3.
 
 ## Project Structure
 
 ```
 .
-├── crypto_trading_model/          # Core model implementation
-│   ├── lstm_lightning.py          # LSTM model implementation using PyTorch Lightning
-│   ├── dqn_agent.py               # Deep Q-Network agent implementation
-│   └── trading_environment.py     # Trading environment for reinforcement learning
-├── train_improved_lstm.py         # Script to train the LSTM model
-├── evaluate_lstm.py               # Script to evaluate the trained LSTM model
-├── train_dqn_agent.py             # Script to train the DQN agent
-├── evaluate_dqn_agent.py          # Script to evaluate the trained DQN agent
-├── data/                          # Directory for storing datasets
-│   └── synthetic/                 # Synthetic data for testing
-├── models/                        # Directory for storing trained models
-│   ├── lstm_improved/             # LSTM model checkpoints
-│   └── dqn/                       # DQN agent checkpoints
-└── README.md                      # This file
+├── rl_agent/
+│   ├── __init__.py
+│   ├── callbacks.py       # Custom callbacks for training (monitoring, logging, saving)
+│   ├── config.py          # Configuration settings and constants
+│   ├── data/              # Data loading and preprocessing
+│   │   └── data_loader.py
+│   ├── environment.py     # Trading environment implementation
+│   ├── env_wrappers.py    # Environment wrappers (safeguards, risk management)
+│   ├── models/              # Model definitions
+│   │   ├── __init__.py
+│   │   └── lstm_dqn.py      # LSTM-DQN specific model components (if needed)
+│   ├── train.py           # Training and evaluation logic
+│   └── utils.py           # Utility functions (logging, resource checks, plots)
+├── data/                  # Directory for storing trading data (e.g., CSV files)
+├── logs/                  # Directory for storing logs, TensorBoard data, and saved models
+├── checkpoints/           # Directory for storing model checkpoints
+├── train_dqn.py           # Main script to start training or evaluation
+├── requirements.txt       # Python dependencies (to be added)
+└── README.md              # This file
 ```
 
-## Installation
+## Features
 
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/crypto-trading-lstm-dqn.git
-cd crypto-trading-lstm-dqn
-```
+*   **LSTM Feature Extraction**: Uses an LSTM network to process time-series features before feeding them to the Q-network.
+*   **DQN Agent**: Implements the Deep Q-Network algorithm for learning trading policies.
+*   **Customizable Environment**: Includes a `TradingEnvironment` based on Gymnasium.
+*   **Environment Wrappers**: Implements safeguards like trade cooldowns, oscillation prevention, and basic risk management.
+*   **Callbacks**: Provides custom callbacks for:
+    *   Resource monitoring (CPU, RAM, GPU)
+    *   Trading metrics logging (portfolio value, returns, Sharpe ratio)
+    *   Saving best models during training
+    *   Saving periodic checkpoints
+    *   TensorBoard integration
+*   **Configuration Management**: Allows training parameters to be specified via command-line arguments or a configuration file.
 
-2. Install the required dependencies:
-```bash
-pip install -r requirements.txt
-```
+## Setup
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd lstm-dqn-trading-agent
+    ```
+2.  **Create a virtual environment (recommended):**
+    ```bash
+    python -m venv venv
+    # Activate the environment
+    # Windows:
+    venv\Scripts\activate
+    # macOS/Linux:
+    source venv/bin/activate
+    ```
+3.  **Install dependencies:**
+    *A `requirements.txt` file should be created. For now, manually install necessary packages:*
+    ```bash
+    pip install torch torchvision torchaudio gymnasium stable-baselines3[extra] pandas numpy psutil matplotlib seaborn gputil
+    ```
+    *(Note: Ensure you install the correct PyTorch version for your system, potentially with CUDA support if you have a compatible GPU)*
+
+4.  **Prepare Data**: Place your training, validation (optional), and testing (optional) data CSV files in the `data/` directory.
 
 ## Usage
 
-### 1. Train the LSTM Model
+Use the `train_dqn.py` script to train or evaluate the agent.
 
-First, you need to train the LSTM model to understand patterns in cryptocurrency price data:
-
-```bash
-python train_improved_lstm.py --data_dir data/synthetic --max_epochs 100
-```
-
-Key arguments:
-- `--data_dir`: Directory containing training data (HDF5 format)
-- `--max_epochs`: Maximum number of training epochs
-- `--batch_size`: Batch size for training
-- `--learning_rate`: Learning rate
-- `--regenerate_labels`: Flag to regenerate labels (only use when changing labeling strategy)
-
-### 2. Evaluate the LSTM Model
-
-Evaluate the performance of the trained LSTM model:
+**Training:**
 
 ```bash
-python evaluate_lstm.py --model_dir models/lstm_improved --model_path models/checkpoints/lstm-epoch=XX-val_loss=X.XXXX.ckpt --data_dir data/synthetic
+python train_dqn.py --data_path data/your_training_data.csv \
+                    --val_data_path data/your_validation_data.csv \
+                    --model_type lstm_dqn \
+                    --features close,volume,rsi,macd \
+                    --sequence_length 60 \
+                    --lstm_hidden_size 128 \
+                    --fc_hidden_size 64 \
+                    --learning_rate 0.0001 \
+                    --total_timesteps 200000 \
+                    --eval_freq 10000 \
+                    --save_freq 20000 \
+                    --log_dir ./logs \
+                    --checkpoint_dir ./checkpoints \
+                    --model_name lstm_dqn_v1
 ```
 
-Key arguments:
-- `--model_dir`: Directory containing the model configuration
-- `--model_path`: Path to the specific checkpoint to evaluate
-- `--data_dir`: Directory containing test data
-- `--batch_size`: Batch size for evaluation
+**Evaluation:**
 
-### 3. Train the DQN Agent
-
-Train the DQN agent using the trained LSTM model for state representation:
+To evaluate a pre-trained model:
 
 ```bash
-python train_dqn_agent.py --lstm_model_path models/checkpoints/lstm-epoch=XX-val_loss=X.XXXX.ckpt --data_dir data/synthetic --episodes 1000
+python train_dqn.py --eval_only \
+                    --resume_from logs/lstm_dqn_v1/best_model.zip \
+                    --test_data_path data/your_test_data.csv \
+                    --model_type lstm_dqn \
+                    --features close,volume,rsi,macd \
+                    --sequence_length 60 \
+                    --log_dir ./logs \
+                    --model_name lstm_dqn_v1
 ```
 
-Key arguments:
-- `--lstm_model_path`: Path to the trained LSTM model checkpoint
-- `--data_dir`: Directory containing training data
-- `--episodes`: Number of episodes to train
-- `--output_dir`: Directory to save the trained DQN agent
+**Command-line Arguments:**
 
-### 4. Evaluate the DQN Agent
+Run `python train_dqn.py --help` to see all available arguments for customizing data, environment, model, and training parameters.
 
-Evaluate the performance of the trained DQN agent:
+## TODO
 
-```bash
-python evaluate_dqn_agent.py --model_path models/dqn/dqn_agent_best.pt --lstm_model_path models/checkpoints/lstm-epoch=XX-val_loss=X.XXXX.ckpt --data_dir data/synthetic
-```
-
-Key arguments:
-- `--model_path`: Path to the trained DQN agent
-- `--lstm_model_path`: Path to the trained LSTM model checkpoint
-- `--data_dir`: Directory containing test data
-- `--output_dir`: Directory to save evaluation results
+*   Add `requirements.txt`.
+*   Implement detailed risk management rules in `SafeTradingEnvWrapper`.
+*   Refine reward function in `TradingEnvironment`.
+*   Add comprehensive unit and integration tests.
+*   Implement other RL algorithms (PPO, A2C, SAC) for comparison.
 
 ## Model Architecture
 
-### LSTM Model
+The LSTM-DQN model consists of:
 
-The LSTM model is designed to predict price movements in cryptocurrency markets. It consists of:
-
-- Stacked LSTM layers for sequence modeling
-- Dropout for regularization
-- Dense layers for final classification
-- Multi-timeframe feature extraction
-
-The model is trained to predict three classes: Buy (1), Hold (0), and Sell (-1).
-
-### DQN Agent
-
-The Deep Q-Network (DQN) agent learns optimal trading strategies based on the LSTM model's state representation. Key features include:
-
-- Experience replay buffer for stable learning
-- Double DQN architecture to reduce overestimation bias
-- Epsilon-greedy exploration strategy
-- Target network updates for stable learning
-
-### Trading Environment
-
-The trading environment simulates cryptocurrency trading. It includes:
-
-- Multi-timeframe market data loading
-- Transaction fees and realistic portfolio value calculation
-- Reward function based on profit and loss
-- Support for different trading actions (buy, hold, sell)
+1. **Feature Extraction**: LSTM layers process the time series data to extract temporal features
+2. **Q-Network**: Fully connected layers map the extracted features to Q-values for each action
+3. **Action Selection**: Actions are selected based on the Q-values (with exploration during training)
 
 ## Performance Metrics
 
-The system evaluates performance using the following metrics:
+The framework calculates and tracks various performance metrics:
 
-- **For LSTM Model**: Accuracy, Precision, Recall, F1 Score
-- **For DQN Agent**: Total profit, Number of trades, Return over initial investment
-
-## Customization
-
-You can customize various aspects of the system:
-
-- **LSTM Model**: Change the architecture, hyperparameters, or labeling strategy
-- **DQN Agent**: Modify exploration strategy, reward scaling, or replay buffer size
-- **Trading Environment**: Adjust transaction fees, initial balance, or reward computation
+- **Portfolio Value**: Total value of portfolio (cash + assets)
+- **Total Return**: Percentage return on initial investment
+- **Sharpe Ratio**: Risk-adjusted return metric
+- **Maximum Drawdown**: Largest drop from peak to trough
+- **Win Rate**: Percentage of profitable trades
+- **Trade Frequency**: Number of trades per time period
 
 ## License
 
@@ -149,5 +143,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- PyTorch and PyTorch Lightning for deep learning implementation
-- Libraries used: NumPy, Pandas, Matplotlib, h5py 
+- Stable-Baselines3 for the reinforcement learning framework
+- PyTorch for the deep learning framework
+- Thanks to the reinforcement learning and algorithmic trading communities for inspiration and ideas 
