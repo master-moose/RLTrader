@@ -28,6 +28,7 @@ from stable_baselines3.common.env_util import make_vec_env # For vectorized envs
 from stable_baselines3.common.vec_env import VecEnv  # Add VecEnv import
 from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
 # from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
+from stable_baselines3.common.buffers import ReplayBuffer, PrioritizedReplayBuffer # Import PrioritizedReplayBuffer
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy#, CnnPolicy as DqnCnnPolicy
 from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy # For SAC
@@ -507,25 +508,30 @@ def create_model(
                 if config["fc_hidden_size"] > 0 else [64, 64]
         model_kwargs["policy_kwargs"] = policy_kwargs # Ensure policy_kwargs are passed
         
-        # Add PER arguments if enabled
+        # --- Handle Prioritized Experience Replay (PER) ---
         if config.get("prioritized_replay", False):
-            model_kwargs["prioritized_replay"] = True
-            model_kwargs["prioritized_replay_alpha"] = config["prioritized_replay_alpha"]
-            model_kwargs["prioritized_replay_beta0"] = config["prioritized_replay_beta0"]
-            model_kwargs["prioritized_replay_eps"] = config["prioritized_replay_eps"]
             logger.info("Prioritized Experience Replay (PER) enabled for DQN.")
+            model_kwargs["replay_buffer_class"] = PrioritizedReplayBuffer
+            model_kwargs["replay_buffer_kwargs"] = {
+                "alpha": config["prioritized_replay_alpha"],
+                "beta0": config["prioritized_replay_beta0"],
+                # beta_steps is deprecated/removed? SB3 handles beta scheduling internally
+                "eps": config["prioritized_replay_eps"]
+            }
+        else:
+            # Explicitly set default if PER is off (optional, but clear)
+            model_kwargs["replay_buffer_class"] = ReplayBuffer
+            model_kwargs["replay_buffer_kwargs"] = {} # No special kwargs for default buffer
 
-        # Remove AntiHoldPolicy logic
-        # if not use_lstm_features:  # Apply AntiHold only if not using LSTM
-        #     model_kwargs["policy"] = AntiHoldPolicy
-        #     policy_kwargs["hold_action_bias"] = config.get("hold_action_bias", 
-        #                                                  -1.0)
-        # if "net_arch" not in policy_kwargs:  # Set default arch if not set by LSTM
-        #     policy_kwargs["net_arch"] = [config["fc_hidden_size"]] * 2 \
-        #         if config["fc_hidden_size"] > 0 else [64, 64]
-        
-        # Remove kwargs not used by DQN
+        # --- Remove kwargs not accepted by DQN.__init__ ---
+        # Remove PER flags as they are handled by replay_buffer_class/kwargs now
+        model_kwargs.pop("prioritized_replay", None)
+        model_kwargs.pop("prioritized_replay_alpha", None)
+        model_kwargs.pop("prioritized_replay_beta0", None)
+        model_kwargs.pop("prioritized_replay_eps", None)
         model_kwargs.pop("tensorboard_log", None)  # DQN uses learn's tb_log_name
+        # --- End Removal ---
+        
         model = DQN(**model_kwargs)
 
     elif model_type == "ppo":
