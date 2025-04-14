@@ -365,11 +365,14 @@ class TradingMetricsCallback(BaseCallback):
         try:
             # Ensure all values are serializable
             for key, value in episode_data["detailed_metrics"].items():
-                if isinstance(value, list) and value and \
-                   isinstance(value[0], np.generic):
-                    episode_data["detailed_metrics"][key] = \
-                        [v.item() for v in value]
-                elif isinstance(value, np.generic):
+                if isinstance(value, list) and value:
+                    # Convert numpy types within lists
+                    if isinstance(value[0], np.generic):
+                        episode_data["detailed_metrics"][key] = [v.item() for v in value]
+                    # Handle non-numpy lists just in case (pass through)
+                    else:
+                        pass 
+                elif isinstance(value, np.generic): # Convert scalar numpy types
                     episode_data["detailed_metrics"][key] = value.item()
             
             episode_file = os.path.join(self.log_dir, 
