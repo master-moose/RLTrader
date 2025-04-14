@@ -386,9 +386,9 @@ class TradingEnvironment(Env):
                 self.trades.append(sell_info)
                 self.sell_prices.append(current_price)
                 
-                logger.debug(f"Sold {self.shares_held:.6f} shares at "
+                logger.debug(f"Step {self.current_step}: Sold {self.shares_held:.6f} shares at "
                            f"{current_price:.2f} for {sell_amount:.2f} "
-                           f"(fee: {fee:.2f})", current_step=self.current_step)
+                           f"(fee: {fee:.2f})")
                 
                 self.shares_held = 0
                 self.asset_value = 0
@@ -431,12 +431,12 @@ class TradingEnvironment(Env):
                     }
                     self.trades.append(buy_info)
                     
-                    logger.debug(f"Bought {self.shares_held:.6f} shares at "
+                    logger.debug(f"Step {self.current_step}: Bought {self.shares_held:.6f} shares at "
                                f"{current_price:.2f} for {buy_cost:.2f} "
-                               f"(fee: {fee:.2f})", current_step=self.current_step)
+                               f"(fee: {fee:.2f})")
                 else:
                     # Log if we tried to buy but couldn't afford it
-                    logger.debug(f"Attempted buy at step {self.current_step} with balance "
+                    logger.debug(f"Step {self.current_step}: Attempted buy with balance "
                                f"{self.balance:.2f}, but calculated shares {shares_to_buy:.8f} "
                                f"was too small. Holding instead.")
                     # Correct action tracking if buy fails
@@ -459,7 +459,7 @@ class TradingEnvironment(Env):
                     self.total_trades -=1 # Correct trade count
 
         elif action == 1: # Hold
-             logger.debug(f"Holding at step {self.current_step}. "
+             logger.debug(f"Step {self.current_step}: Holding. "
                           f"Shares: {self.shares_held:.4f}, Balance: {self.balance:.2f}")
 
         # Return fee paid in this step for potential use in reward calculation
