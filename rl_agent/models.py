@@ -205,4 +205,5 @@ class AntiHoldPolicy(DQNPolicy):
         
         # Get the actions using the modified Q-values
         actions = q_values.argmax(dim=1).reshape(-1)
-        return actions, q_values
+        # Return only the actions tensor as expected by the base class
+        return actions
