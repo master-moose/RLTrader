@@ -624,10 +624,10 @@ def create_model(
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
+        
+        # QRDQN specific args - set n_quantiles in policy_kwargs
+        policy_kwargs["n_quantiles"] = config.get("n_quantiles", 200)  # Default to 200 quantiles
         model_kwargs["policy_kwargs"] = policy_kwargs
-
-        # QRDQN specific args
-        model_kwargs["n_quantiles"] = config.get("n_quantiles", 200)  # Default to 200 quantiles
 
         # Remove incompatible args
         model_kwargs.pop("tensorboard_log", None)
