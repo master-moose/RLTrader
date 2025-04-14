@@ -139,6 +139,22 @@ class ResourceMonitorCallback(BaseCallback):
         return self.resource_history
 
 
+def convert_to_native_types(data):
+    """Recursively convert numpy types to native Python types."""
+    if isinstance(data, dict):
+        return {k: convert_to_native_types(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_to_native_types(item) for item in data]
+    elif isinstance(data, np.floating):
+        return float(data)
+    elif isinstance(data, np.integer):
+        return int(data)
+    elif isinstance(data, np.ndarray):
+        return convert_to_native_types(data.tolist()) # Convert numpy arrays to lists first
+    # Add checks for other potential non-serializable types if necessary
+    return data
+
+
 class TradingMetricsCallback(BaseCallback):
     """
     Callback for tracking trading-specific metrics during training.
@@ -357,36 +373,22 @@ class TradingMetricsCallback(BaseCallback):
         last_episode_metrics = self.metrics_history[-1]
         
         # Combine episode metrics and last step's info
+        # Ensure deep copy to avoid modifying original data
         episode_data = {
-            **last_episode_metrics, 
-            "detailed_metrics": self.current_episode_metrics
+            **last_episode_metrics,
+            # Convert the detailed metrics dict recursively
+            "detailed_metrics": convert_to_native_types(self.current_episode_metrics) 
         }
         
         try:
-            # Ensure all values are serializable
-            serializable_detailed_metrics = {}
-            for key, value_list in episode_data["detailed_metrics"].items():
-                if isinstance(value_list, list) and value_list:
-                    # Convert all potential numpy floats/ints in the list to Python native types
-                    try:
-                        serializable_detailed_metrics[key] = [float(v) if isinstance(v, (np.floating, float)) else int(v) if isinstance(v, (np.integer, int)) else v for v in value_list]
-                    except (TypeError, ValueError):
-                        # Handle cases where conversion might fail or list contains non-numerics
-                        serializable_detailed_metrics[key] = value_list # Keep original if conversion fails for any element
-                elif isinstance(value_list, (np.floating, float)): # Convert scalar numpy/python floats
-                    serializable_detailed_metrics[key] = float(value_list)
-                elif isinstance(value_list, (np.integer, int)): # Convert scalar numpy/python ints
-                    serializable_detailed_metrics[key] = int(value_list)
-                else: # Keep other types as is
-                    serializable_detailed_metrics[key] = value_list
-
-            # Replace original detailed_metrics with the serializable version
-            episode_data["detailed_metrics"] = serializable_detailed_metrics
-
+            # Convert the overall episode_data dict as well, just in case
+            serializable_episode_data = convert_to_native_types(episode_data)
+            
             episode_file = os.path.join(self.log_dir,
                                         f"episode_{self.episode_count}.json")
             with open(episode_file, 'w') as f:
-                json.dump(episode_data, f, indent=4)
+                # Dump the fully converted data
+                json.dump(serializable_episode_data, f, indent=4) 
 
             if self.verbose > 1:
                 logger.debug(f"Saved episode data to {episode_file}")

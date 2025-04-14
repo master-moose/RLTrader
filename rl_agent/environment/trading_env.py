@@ -215,6 +215,16 @@ class TradingEnvironment(Env):
         # Get info
         info = self._get_info()
         
+        # --- DEBUG LOGGING --- 
+        if terminated or truncated:
+            logger.debug(
+                f"DEBUG STEP: current_step={self.current_step}, "
+                f"episode_step={self.episode_step}, max_steps={self.max_steps}, "
+                f"action={action}, terminated={terminated}, truncated={truncated}, "
+                f"is_end_of_data={is_end_of_data}, is_max_steps_reached={is_max_steps_reached}"
+            )
+        # --- END DEBUG LOGGING ---
+        
         # Gymnasium expects 5 return values: obs, reward, terminated, truncated, info
         return observation, reward, terminated, truncated, info
     
