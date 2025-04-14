@@ -364,22 +364,30 @@ class TradingMetricsCallback(BaseCallback):
         
         try:
             # Ensure all values are serializable
-            for key, value in episode_data["detailed_metrics"].items():
-                if isinstance(value, list) and value:
-                    # Convert numpy types within lists
-                    if isinstance(value[0], np.generic):
-                        episode_data["detailed_metrics"][key] = [v.item() for v in value]
-                    # Handle non-numpy lists just in case (pass through)
-                    else:
-                        pass 
-                elif isinstance(value, np.generic): # Convert scalar numpy types
-                    episode_data["detailed_metrics"][key] = value.item()
-            
-            episode_file = os.path.join(self.log_dir, 
+            serializable_detailed_metrics = {}
+            for key, value_list in episode_data["detailed_metrics"].items():
+                if isinstance(value_list, list) and value_list:
+                    # Convert all potential numpy floats/ints in the list to Python native types
+                    try:
+                        serializable_detailed_metrics[key] = [float(v) if isinstance(v, (np.floating, float)) else int(v) if isinstance(v, (np.integer, int)) else v for v in value_list]
+                    except (TypeError, ValueError):
+                        # Handle cases where conversion might fail or list contains non-numerics
+                        serializable_detailed_metrics[key] = value_list # Keep original if conversion fails for any element
+                elif isinstance(value_list, (np.floating, float)): # Convert scalar numpy/python floats
+                    serializable_detailed_metrics[key] = float(value_list)
+                elif isinstance(value_list, (np.integer, int)): # Convert scalar numpy/python ints
+                    serializable_detailed_metrics[key] = int(value_list)
+                else: # Keep other types as is
+                    serializable_detailed_metrics[key] = value_list
+
+            # Replace original detailed_metrics with the serializable version
+            episode_data["detailed_metrics"] = serializable_detailed_metrics
+
+            episode_file = os.path.join(self.log_dir,
                                         f"episode_{self.episode_count}.json")
             with open(episode_file, 'w') as f:
                 json.dump(episode_data, f, indent=4)
-                
+
             if self.verbose > 1:
                 logger.debug(f"Saved episode data to {episode_file}")
         except Exception as e:
