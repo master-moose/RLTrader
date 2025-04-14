@@ -599,16 +599,18 @@ def get_callback_list(
     callbacks = []
     
     # --- Add Curriculum Callback --- #
-    if target_transaction_fee > 0:  # Only add if curriculum is intended
-        callbacks.append(CurriculumCallback(
-            target_fee=target_transaction_fee,
-            curriculum_duration_fraction=curriculum_duration_fraction,
-            verbose=1
-        ))
-        logger.info(f"Added CurriculumCallback for transaction fee "
-                    f"scheduling to {target_transaction_fee:.6f}")
-    else:
-        logger.info("Target transaction fee is 0, skipping CurriculumCallback.")
+    # TEMPORARILY DISABLED to establish baseline
+    # if target_transaction_fee > 0:  # Only add if curriculum is intended
+    #     callbacks.append(CurriculumCallback(
+    #         target_fee=target_transaction_fee,
+    #         curriculum_duration_fraction=curriculum_duration_fraction,
+    #         verbose=1
+    #     ))
+    #     logger.info(f"Added CurriculumCallback for transaction fee "
+    #                 f"scheduling to {target_transaction_fee:.6f}")
+    # else:
+    #     logger.info("Target transaction fee is 0, skipping CurriculumCallback.")
+    logger.info("CurriculumCallback for transaction fee is currently DISABLED.")
 
     # --- Standard Callbacks --- #
 
@@ -641,7 +643,8 @@ def get_callback_list(
             n_eval_episodes=n_eval_episodes,
             best_model_save_path=best_model_path,
             log_path=eval_log_path,
-            patience=early_stopping_patience,
+            # Force patience=0 to disable early stopping for now
+            patience=0, 
             verbose=1
         ))
         

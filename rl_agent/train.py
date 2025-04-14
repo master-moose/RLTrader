@@ -26,11 +26,13 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 # Add SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env # For vectorized envs
 from stable_baselines3.common.vec_env import VecEnv  # Add VecEnv import
+from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
 # from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy#, CnnPolicy as DqnCnnPolicy
 from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy # For SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel  # Add BaseRLModel
+from stable_baselines3.common.monitor import Monitor # Add Monitor import
 
 # Add parent directory to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -706,6 +708,25 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         env_kwargs=None
     )
     
+    # --- Apply VecNormalize to test_env --- #
+    # Find VecNormalize stats associated with the loaded model
+    vec_normalize_stats_path = None
+    if os.path.exists(model_path):
+        potential_stats_path = model_path.replace(".zip", "_vecnormalize.pkl")
+        if os.path.exists(potential_stats_path):
+            vec_normalize_stats_path = potential_stats_path
+
+    if vec_normalize_stats_path:
+        logger.info(f"Loading VecNormalize stats for evaluation: {vec_normalize_stats_path}")
+        test_env = VecNormalize.load(vec_normalize_stats_path, test_env)
+        test_env.training = False # Set to inference mode
+        test_env.norm_reward = False # Do not normalize rewards for evaluation
+    else:
+        logger.warning("VecNormalize stats not found for the loaded model. Evaluation might be inaccurate.")
+        # Optionally, apply default normalization, but results might be skewed
+        # test_env = VecNormalize(test_env, norm_obs=True, norm_reward=False, training=False)
+    # --- End VecNormalize for test_env --- #
+
     # Load the model
     model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC, "lstm_dqn": DQN}
     model = model_cls[config["model_type"]].load(model_path, env=test_env)
@@ -830,12 +851,20 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
             # If base_seed is None, avoid TypeError by passing None
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed # Pass the calculated seed
+            
+            # Create the base environment
             env = create_env(config=env_config, is_eval=False)
-            # Apply wrappers if needed (e.g., Monitor)
-            # env = Monitor(env, 
-            #               filename=os.path.join(log_path, f'monitor_{rank}.csv'))
-            # Don't explicitly seed here, rely on seed passed to __init__ 
-            # via env_config
+            
+            # Apply Monitor wrapper for proper logging
+            monitor_log_path = os.path.join(log_path, f'monitor_{rank}.csv')
+            # Ensure the directory for monitor logs exists if log_path is deep
+            os.makedirs(os.path.dirname(monitor_log_path), exist_ok=True) 
+            env = Monitor(env, filename=monitor_log_path)
+            
+            # Seeding is handled within create_env via env_config["seed"] now
+            # if instance_seed is not None:
+            #     env.seed(instance_seed) # Deprecated, use reset(seed=...) or pass in init
+
             return env
         return _init
 
@@ -850,6 +879,30 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
         vec_env_cls=vec_env_cls,
         env_kwargs=None  # Pass None here as we use a lambda for env_id
     )
+
+    # --- Apply VecNormalize --- #
+    # Check if loading a model, and if VecNormalize stats exist
+    vec_normalize_stats_path = None
+    if config.get("load_model"):
+        potential_stats_path = config["load_model"].replace(".zip", "_vecnormalize.pkl")
+        if os.path.exists(potential_stats_path):
+            vec_normalize_stats_path = potential_stats_path
+            logger.info(f"Found VecNormalize stats at: {vec_normalize_stats_path}")
+
+    if vec_normalize_stats_path:
+        logger.info(f"Loading VecNormalize stats from: {vec_normalize_stats_path}")
+        train_env = VecNormalize.load(vec_normalize_stats_path, train_env)
+        train_env.training = True # Make sure it continues training
+    else:
+        logger.info("Applying new VecNormalize wrapper (norm_obs=True, norm_reward=False).")
+        train_env = VecNormalize(
+            train_env, 
+            norm_obs=True, 
+            norm_reward=False, # Keep reward scaling separate for now
+            clip_obs=10., # Clip obs to avoid extreme values
+            gamma=config["gamma"] # Use the same gamma
+        )
+    # --- End VecNormalize --- #
 
     # Apply VecNormalize if desired (needs careful handling with LSTM)
     # train_env = VecNormalize(train_env, norm_obs=True, 
@@ -871,6 +924,24 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
             vec_env_cls=vec_env_cls,  # Use same vectorization method
             env_kwargs=None
         )
+        
+        # --- Apply VecNormalize to eval_env (MOVED HERE) --- #
+        if vec_normalize_stats_path: # Use stats loaded for train_env
+            logger.info(f"Applying loaded VecNormalize stats to eval_env.")
+            eval_env = VecNormalize.load(vec_normalize_stats_path, eval_env)
+            eval_env.training = False # Set to inference mode
+            eval_env.norm_reward = False # Ensure reward normalization is off for eval
+        else: # Use the same normalization settings as train_env
+            logger.info("Applying new VecNormalize wrapper to eval_env.")
+            eval_env = VecNormalize(
+                eval_env, 
+                norm_obs=True, 
+                norm_reward=False, 
+                clip_obs=10.,
+                gamma=config["gamma"], 
+                training=False # Set to inference mode initially
+            )
+        # --- End VecNormalize for eval_env (MOVED HERE) --- #
 
     # --- Model Creation / Loading --- #
     if config.get("load_model"):
@@ -945,10 +1016,14 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     final_model_path = os.path.join(log_path, "final_model.zip")
     model.save(final_model_path)
     logger.info(f"Final model saved to {final_model_path}")
-    # Save VecNormalize stats if used
-    # if isinstance(train_env, VecNormalize):
-    #     train_env.save(os.path.join(log_path, "vecnormalize.pkl"))
     
+    # --- Save VecNormalize stats --- #
+    if isinstance(train_env, VecNormalize):
+        stats_path = final_model_path.replace(".zip", "_vecnormalize.pkl")
+        train_env.save(stats_path)
+        logger.info(f"VecNormalize stats saved to {stats_path}")
+    # --- End Save VecNormalize --- #
+
     # --- Final Metrics --- #
     metrics = {
         "training_time": training_time,
@@ -993,6 +1068,7 @@ def main():
     ensure_dir_exists(os.path.join(checkpoint_base_dir, model_name))
 
     # --- Mode Selection --- #
+    print(f"DEBUG: Value of config[\'eval_only\'] before mode selection check: {config.get('eval_only')}") # DEBUG PRINT ADDED
     if config["eval_only"]:
         # --- Evaluation Mode --- #
         print("Running in Evaluation-Only Mode")

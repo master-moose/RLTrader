@@ -151,6 +151,9 @@ class TradingEnvironment(Env):
         self.total_holds = 0
         self.max_drawdown = 0
         
+        # Steps taken within the current episode
+        self.episode_step = 0
+        
         # Get initial observation
         observation = self._get_observation()
         info = self._get_info()
@@ -175,10 +178,15 @@ class TradingEnvironment(Env):
         
         # Move to the next time step
         self.current_step += 1
+        self.episode_step += 1 # Increment episode step counter
         
         # Check if the episode is done
-        done = self.current_step >= len(self.data) - 1
-        truncated = False
+        is_end_of_data = self.current_step >= len(self.data) - 1
+        # Compare episode_step to max_steps, not current_step
+        is_max_steps_reached = self.max_steps is not None and \
+                               self.episode_step >= self.max_steps
+        terminated = is_end_of_data # Termination condition
+        truncated = is_max_steps_reached and not is_end_of_data # Truncation condition
         
         # Update portfolio value
         self._update_portfolio_value()
@@ -208,7 +216,6 @@ class TradingEnvironment(Env):
         info = self._get_info()
         
         # Gymnasium expects 5 return values: obs, reward, terminated, truncated, info
-        terminated = done
         return observation, reward, terminated, truncated, info
     
     def _take_action(self, action):
@@ -314,28 +321,30 @@ class TradingEnvironment(Env):
         portfolio_change = self.portfolio_value - prev_portfolio_value
         reward = portfolio_change * self.reward_scaling
         
-        # Discourage holding without position by adding a small negative reward
-        if action == 1 and self.shares_held == 0:
-            idle_penalty = -0.1 * self.reward_scaling
-            reward += idle_penalty
-        
-        # Encourage selling near peak or buying near bottom for better trading
-        if action == 0 and len(self.sell_prices) > 0 and \
-           self.last_buy_price is not None:
-            # Reward for selling at a profit
-            last_sell_price = self.sell_prices[-1]
-            buy_sell_ratio = (last_sell_price - self.last_buy_price) / \
-                           self.last_buy_price
-            if buy_sell_ratio > 0:
-                profit_bonus = buy_sell_ratio * 1.0 * self.reward_scaling
-                reward += profit_bonus
-        
-        # Penalize excessive drawdown
-        if self.max_drawdown > 0.3:  # Penalize drawdowns over 30%
-            drawdown_penalty = (self.max_drawdown - 0.3) * 10 * \
-                             self.reward_scaling
-            reward -= drawdown_penalty
-        
+        # --- Simplified Reward: Temporarily disable other components ---
+        # # Discourage holding without position by adding a small negative reward
+        # if action == 1 and self.shares_held == 0:
+        #     idle_penalty = -0.1 * self.reward_scaling
+        #     reward += idle_penalty
+        # 
+        # # Encourage selling near peak or buying near bottom for better trading
+        # if action == 0 and len(self.sell_prices) > 0 and \
+        #    self.last_buy_price is not None:
+        #     # Reward for selling at a profit
+        #     last_sell_price = self.sell_prices[-1]
+        #     buy_sell_ratio = (last_sell_price - self.last_buy_price) / \
+        #                    self.last_buy_price
+        #     if buy_sell_ratio > 0:
+        #         profit_bonus = buy_sell_ratio * 1.0 * self.reward_scaling
+        #         reward += profit_bonus
+        # 
+        # # Penalize excessive drawdown
+        # if self.max_drawdown > 0.3:  # Penalize drawdowns over 30%
+        #     drawdown_penalty = (self.max_drawdown - 0.3) * 10 * \
+        #                      self.reward_scaling
+        #     reward -= drawdown_penalty
+        # --- End Simplified Reward ---
+
         return reward
     
     def _get_observation(self):
