@@ -178,32 +178,3 @@ class LSTMFeatureExtractor(BaseFeaturesExtractor):
             features = lstm_out[:, -1, :]
             
         return features
-
-
-class AntiHoldPolicy(DQNPolicy):
-    """
-    A custom DQN policy that discourages the hold action by artificially
-    reducing its Q-value during action selection.
-    """
-    
-    def __init__(self, *args, hold_action_bias=-1.0, **kwargs):
-        """Initialize the anti-hold policy with a bias against the hold action"""
-        super().__init__(*args, **kwargs)
-        self.hold_action_bias = hold_action_bias
-        self.hold_action = HOLD_ACTION  # The action index for hold
-    
-    def _predict(self, obs, deterministic=True):
-        """
-        Overrides the parent class _predict method to apply a bias against holding.
-        This method reduces the Q-value of the hold action to discourage the agent from holding.
-        """
-        q_values = self.q_net(obs)
-        
-        # Apply a negative bias to the hold action's Q-value
-        # Use a milder bias (-1.0 instead of -3.0) to discourage holding without causing oscillation
-        q_values[:, self.hold_action] += self.hold_action_bias
-        
-        # Get the actions using the modified Q-values
-        actions = q_values.argmax(dim=1).reshape(-1)
-        # Return only the actions tensor as expected by the base class
-        return actions

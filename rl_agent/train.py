@@ -54,7 +54,7 @@ from rl_agent.utils import (
 # Placeholder for environment patching utilities (to be added)
 # from rl_agent.env_patching import comprehensive_environment_patch
 from rl_agent.environment import TradingEnvironment # Ensure this is the correct env class
-from rl_agent.models import LSTMFeatureExtractor, AntiHoldPolicy # Import custom components
+from rl_agent.models import LSTMFeatureExtractor # Import custom components
 # Remove LSTMDQN import if handled within create_model
 # from rl_agent.models.lstm_dqn import LSTMDQN
 from rl_agent.data.data_loader import DataLoader
@@ -311,6 +311,25 @@ def parse_args():
              "no training"
     )
     
+    # --- New DQN PER arguments ---
+    parser.add_argument(
+        "--prioritized_replay", action="store_true",
+        help="Enable Prioritized Experience Replay (PER) for DQN"
+    )
+    parser.add_argument(
+        "--prioritized_replay_alpha", type=float, default=0.6,
+        help="Alpha parameter for PER (default: 0.6)"
+    )
+    parser.add_argument(
+        "--prioritized_replay_beta0", type=float, default=0.4,
+        help="Initial beta parameter for PER importance sampling (default: 0.4)"
+    )
+    parser.add_argument(
+        "--prioritized_replay_eps", type=float, default=1e-6,
+        help="Epsilon parameter for PER to avoid zero priority (default: 1e-6)"
+    )
+    # --- End New DQN PER arguments ---
+
     args = parser.parse_args()
     
     # Auto-generate model name if not provided
@@ -470,25 +489,41 @@ def create_model(
 
     # --- Algorithm Specific Setup --- #
     if model_type == "dqn" or model_type == "lstm_dqn":
-        model_kwargs["policy"] = DqnMlpPolicy  # Base policy
+        model_kwargs["policy"] = DqnMlpPolicy  # Always use MlpPolicy (handles Dueling)
         model_kwargs["buffer_size"] = config["buffer_size"]
         model_kwargs["batch_size"] = config["batch_size"]
-        model_kwargs["learning_starts"] = config.get("learning_starts", 10000)
-        model_kwargs["train_freq"] = config.get("train_freq", 1)
-        model_kwargs["gradient_steps"] = config.get("gradient_steps", 1)
+        # Use new args parsed from CLI, including gradient_steps, learning_starts
+        model_kwargs["learning_starts"] = config["learning_starts"]
+        model_kwargs["gradient_steps"] = config["gradient_steps"]
+        # model_kwargs["train_freq"] = config.get("train_freq", 1) # Keep default train_freq=(1, 'step')
         model_kwargs["target_update_interval"] = config["target_update_interval"]
         model_kwargs["exploration_fraction"] = config["exploration_fraction"]
         model_kwargs["exploration_initial_eps"] = config["exploration_initial_eps"]
         model_kwargs["exploration_final_eps"] = config["exploration_final_eps"]
-        # Use AntiHoldPolicy if model_type is DQN 
-        # (or LSTM-DQN if desired)
-        if not use_lstm_features:  # Apply AntiHold only if not using LSTM
-            model_kwargs["policy"] = AntiHoldPolicy
-            policy_kwargs["hold_action_bias"] = config.get("hold_action_bias", 
-                                                         -1.0)
+        
+        # Set default net_arch for DqnMlpPolicy
         if "net_arch" not in policy_kwargs:  # Set default arch if not set by LSTM
             policy_kwargs["net_arch"] = [config["fc_hidden_size"]] * 2 \
                 if config["fc_hidden_size"] > 0 else [64, 64]
+        model_kwargs["policy_kwargs"] = policy_kwargs # Ensure policy_kwargs are passed
+        
+        # Add PER arguments if enabled
+        if config.get("prioritized_replay", False):
+            model_kwargs["prioritized_replay"] = True
+            model_kwargs["prioritized_replay_alpha"] = config["prioritized_replay_alpha"]
+            model_kwargs["prioritized_replay_beta0"] = config["prioritized_replay_beta0"]
+            model_kwargs["prioritized_replay_eps"] = config["prioritized_replay_eps"]
+            logger.info("Prioritized Experience Replay (PER) enabled for DQN.")
+
+        # Remove AntiHoldPolicy logic
+        # if not use_lstm_features:  # Apply AntiHold only if not using LSTM
+        #     model_kwargs["policy"] = AntiHoldPolicy
+        #     policy_kwargs["hold_action_bias"] = config.get("hold_action_bias", 
+        #                                                  -1.0)
+        # if "net_arch" not in policy_kwargs:  # Set default arch if not set by LSTM
+        #     policy_kwargs["net_arch"] = [config["fc_hidden_size"]] * 2 \
+        #         if config["fc_hidden_size"] > 0 else [64, 64]
+        
         # Remove kwargs not used by DQN
         model_kwargs.pop("tensorboard_log", None)  # DQN uses learn's tb_log_name
         model = DQN(**model_kwargs)
