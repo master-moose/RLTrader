@@ -282,9 +282,9 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
     support_levels = [base_price * 0.9]
     resistance_levels = [base_price * 1.1]
 
-    # Add price limits to prevent numeric overflow
-    max_price = 1e6  # Maximum allowed price
-    min_price = 1e-6  # Minimum allowed price
+    # Add price limits to enforce the 5000-120000 range
+    min_price = 5000.0  # Minimum allowed price
+    max_price = 120000.0  # Maximum allowed price
     
     # Generate price, volatility, and volume processes
     for i in range(1, num_samples):
@@ -329,11 +329,21 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
             
             if len(local_prices) > 0:
                 local_mean = np.mean(local_prices)
+                
+                # Apply price range constraints to mean reversion target
+                local_mean = np.clip(local_mean, min_price, max_price)
+                
                 # Calculate mean reversion effect with safeguard
                 if np.isfinite(local_mean):
                     mean_reversion = params['mean_reversion_strength'] * (local_mean - prices[i-1])
                     # Clip to avoid extreme reversion
                     mean_reversion = np.clip(mean_reversion, -0.05, 0.05)
+                    
+                    # Add stronger mean reversion when price is approaching the min/max bounds
+                    if prices[i-1] < min_price * 1.1:  # Within 10% of min price
+                        mean_reversion += 0.005  # Add upward pressure
+                    elif prices[i-1] > max_price * 0.9:  # Within 10% of max price
+                        mean_reversion -= 0.005  # Add downward pressure
         
         # Support and resistance effects
         sr_effect = 0
@@ -342,11 +352,11 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
         if np.isfinite(prices[i-1]) and prices[i-1] > 0:
             # Find closest support level below current price
             supports_below = [s for s in support_levels if s < prices[i-1]]
-            closest_support = max(supports_below) if supports_below else 0
+            closest_support = max(supports_below) if supports_below else min_price
             
             # Find closest resistance level above current price
             resistances_above = [r for r in resistance_levels if r > prices[i-1]]
-            closest_resistance = min(resistances_above) if resistances_above else float('inf')
+            closest_resistance = min(resistances_above) if resistances_above else max_price
             
             # Distance to closest support/resistance (as percentage of price)
             support_distance = (prices[i-1] - closest_support) / prices[i-1] if closest_support > 0 else 1.0
@@ -380,6 +390,8 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
                         # Resistance becomes support when broken
                         resistance_levels.append(closest_support)
                     new_support = closest_support * 0.95
+                    # Ensure new support isn't below min_price
+                    new_support = max(new_support, min_price)
                     support_levels.append(new_support)
                 else:
                     # Resistance break - strong move up
@@ -390,6 +402,8 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
                         # Resistance becomes support when broken
                         support_levels.append(closest_resistance)
                     new_resistance = closest_resistance * 1.05
+                    # Ensure new resistance isn't above max_price
+                    new_resistance = min(new_resistance, max_price)
                     resistance_levels.append(new_resistance)
             
             # Occasionally add new support/resistance levels
@@ -397,6 +411,11 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
                 # Add new levels near current price
                 new_support = prices[i-1] * 0.97
                 new_resistance = prices[i-1] * 1.03
+                
+                # Ensure support and resistance stay within range
+                new_support = max(new_support, min_price)
+                new_resistance = min(new_resistance, max_price)
+                
                 support_levels.append(new_support)
                 resistance_levels.append(new_resistance)
                 # Cleanup old levels (keep a reasonable number)
@@ -413,13 +432,27 @@ def generate_price_process(num_samples, regimes, base_price=10000.0, base_volati
         # Final return calculation
         price_return = drift + random_component + mean_reversion + sr_effect
         
+        # Apply stronger constraints near boundaries
+        if prices[i-1] <= min_price * 1.05:  # Within 5% of minimum
+            # Reduce negative returns, increase positive returns
+            if price_return < 0:
+                price_return *= 0.5  # Dampen downward moves
+            else:
+                price_return *= 1.2  # Amplify upward moves
+        elif prices[i-1] >= max_price * 0.95:  # Within 5% of maximum
+            # Reduce positive returns, increase negative returns
+            if price_return > 0:
+                price_return *= 0.5  # Dampen upward moves
+            else:
+                price_return *= 1.2  # Amplify downward moves
+        
         # Clip the return to prevent extreme moves
         price_return = np.clip(price_return, -0.1, 0.1)
         
         # Update price with safeguard
         prices[i] = prices[i-1] * (1 + price_return)
         
-        # Enforce price limits to prevent numerical issues
+        # Enforce price limits to keep within 5000-120000 range
         prices[i] = np.clip(prices[i], min_price, max_price)
         
         # Generate volume (correlated with volatility and absolute returns)
