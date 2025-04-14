@@ -26,7 +26,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 # Add SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env # For vectorized envs
 from stable_baselines3.common.vec_env import VecEnv  # Add VecEnv import
-# from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
+from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize import
 # Import ReplayBuffer only
 from stable_baselines3.common.buffers import ReplayBuffer #, PrioritizedReplayBuffer # Import PrioritizedReplayBuffer
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy#, CnnPolicy as DqnCnnPolicy
