@@ -149,13 +149,24 @@ class TradingEnvironment(Env):
         self.total_buys = 0
         self.total_sells = 0
         self.total_holds = 0
-        self.max_drawdown = 0
+        self.max_drawdown = 0.0 # Reset max drawdown
+
+        # --- Initialize new state variables --- <<< MOVED BEFORE _get_info()
+        self.step_returns = [] # For Sharpe ratio calculation
+        self.episode_start_price = self.data['close'].iloc[self.current_step]
+        self.consecutive_holds = 0
+        self.consecutive_buys = 0 # Track consecutive buys for consistency penalty
+        self.consecutive_sells = 0 # Track consecutive sells for consistency penalty
+        self.last_action = 1 # Assume initial action is Hold (or None?) - Let's use 1 (Hold)
+        self.exploration_bonus_value = self.exploration_start # Reset exploration bonus
+        self.total_fees_paid = 0.0 # Reset total fees
         
         # Steps taken within the current episode
         self.episode_step = 0
         
         # Get initial observation
         observation = self._get_observation()
+        # Now safe to call _get_info() as attributes are initialized
         info = self._get_info()
         
         return observation, info
