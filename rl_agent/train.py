@@ -397,7 +397,11 @@ def create_model(
     model_type = config["model_type"].lower()
     learning_rate = config["learning_rate"]
     seed = config.get("seed")
+    
+    # Determine device setting based on model type and config
     device = "cpu" if config["cpu_only"] else "auto"
+    # Remove forced CPU for A2C - let user control via cpu_only flag
+    
     policy_kwargs = {}
     model_kwargs = {
         "policy": None,  # Determined below
@@ -719,9 +723,16 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
     )
     
     # Calculate additional metrics
-    final_portfolio_value = portfolio_values[-1] if len(portfolio_values) > 0 else 0
-    initial_portfolio_value = portfolio_values[0] if len(portfolio_values) > 0 else config.get("initial_balance", 10000)
-    total_return = (final_portfolio_value / initial_portfolio_value) - 1 if initial_portfolio_value > 0 else 0
+    if len(portfolio_values) > 0:
+        final_portfolio_value = portfolio_values[-1]
+        initial_portfolio_value = portfolio_values[0]
+        total_return = (final_portfolio_value / initial_portfolio_value) - 1 if initial_portfolio_value > 0 else 0
+    else:
+        # Handle the case of empty portfolio values (no episodes completed)
+        final_portfolio_value = 0.0
+        initial_portfolio_value = config.get("initial_balance", 10000)
+        total_return = 0.0
+        logger.warning("No portfolio values recorded during evaluation!")
     
     # Try to calculate more complex metrics if portfolio values is not empty
     metrics = {
@@ -730,7 +741,8 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         "total_return": total_return,
     }
     
-    if len(portfolio_values) > 1:
+    # Only calculate additional metrics if we have enough portfolio values
+    if len(portfolio_values) > 10:  # Need enough data points for meaningful metrics
         try:
             # Calculate additional trading metrics
             trading_metrics = calculate_trading_metrics(portfolio_values)
@@ -745,6 +757,8 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
             )
         except Exception as e:
             logger.warning(f"Error calculating advanced metrics: {e}")
+    else:
+        logger.warning(f"Not enough portfolio values ({len(portfolio_values)}) for advanced metrics calculation.")
     
     # Log metrics
     logger.info(f"Evaluation Results:")
@@ -884,15 +898,16 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     callbacks = get_callback_list(
         eval_env=eval_env,
         log_dir=log_path,  # Base log dir for metrics/best model
-        eval_freq=config["eval_freq"],
+        eval_freq=max(config["eval_freq"], 5000),  # Ensure minimum 5000 timesteps between evals
         n_eval_episodes=config["n_eval_episodes"],
         save_freq=config["save_freq"],  # Checkpoint freq
         keep_checkpoints=config["keep_checkpoints"],
         resource_check_freq=config["resource_check_freq"],
         metrics_log_freq=config["metrics_log_freq"],
-        early_stopping_patience=config["early_stopping_patience"],
+        # Make early stopping more lenient to give training a chance
+        early_stopping_patience=max(20, config["early_stopping_patience"]),  # At least 20 evals
         checkpoint_save_path=checkpoint_save_path,  # Pass the path
-        model_name=config["model_type"], # Pass model type as name prefix
+        model_name=config["model_type"],  # Pass model type as name prefix
         custom_callbacks=[]  # Keep empty or pass actual custom ones if needed
     )
 
@@ -1006,7 +1021,7 @@ def main():
             eval_config["load_model"] = final_model_path
             eval_config["test_data_path"] = config["test_data_path"]
 
-            test_metrics = evaluate(config)
+            test_metrics = evaluate(eval_config)  # FIX: Use eval_config instead of config
 
             print("\n--- Training Summary ---")
             print(f"Training time: {train_metrics['training_time']:.2f} seconds")
