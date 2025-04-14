@@ -25,10 +25,12 @@ from stable_baselines3 import DQN, PPO, A2C, SAC  # Add A2C, PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv 
 # Add SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env # For vectorized envs
+from stable_baselines3.common.vec_env import VecEnv  # Add VecEnv import
 # from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy#, CnnPolicy as DqnCnnPolicy
 from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy # For SAC
+from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel  # Add BaseRLModel
 
 # Add parent directory to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -522,63 +524,249 @@ def create_model(
     return model
 
 
-# Update evaluate_model to use config
+# Update evaluate_model to handle vectorized environments
 def evaluate_model(
-    model: Any,
-    env: gym.Env,  # Expects a single, unwrapped env for evaluation
+    model: BaseRLModel,
+    env: gym.Env,
     config: Dict[str, Any],
     n_episodes: int = 1,
     deterministic: bool = True,
-) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[float, np.ndarray, List[int], List[float]]:
     """
-    Evaluate a model on an environment.
+    Evaluate a model over n_episodes and return metrics.
+    
+    Args:
+        model: The trained model
+        env: The environment to evaluate on
+        config: Configuration dictionary
+        n_episodes: Number of episodes to evaluate
+        deterministic: Whether to use deterministic actions
+        
+    Returns:
+        Tuple containing:
+        - mean reward
+        - portfolio values
+        - actions taken
+        - rewards received
     """
+    is_vectorized = isinstance(env, VecEnv)
+    n_envs = env.num_envs if is_vectorized else 1
+    
+    # Tracking variables
     episode_rewards = []
-    episode_lengths = []
-    portfolio_values_list = []
-    actions_list = []
-    rewards_list = []
-    seed = config.get("seed")
+    all_portfolio_values = []
+    all_actions = []
+    all_rewards = []
     
-    for i in range(n_episodes):
-        # Use offset seed for eval
-        eval_seed = seed + i + 100 if seed is not None else None  
-        obs, info = env.reset(seed=eval_seed)
-        done = False
-        episode_reward = 0
-        episode_length = 0
-        # Get initial balance correctly
-        initial_balance = getattr(env, 'initial_balance', 
-                                config["initial_balance"])
-        current_portfolio_values = [info.get('portfolio_value', initial_balance)]
-        current_actions = []
-        current_rewards = []
+    # Reset environment
+    obs, _ = env.reset()  # Updated for gymnasium API
+    
+    # Determine number of episodes to run per environment
+    episodes_per_env = n_episodes // n_envs
+    if n_episodes % n_envs != 0:
+        episodes_per_env += 1
+    
+    total_episodes_done = 0
+    current_episode_rewards = np.zeros(n_envs)
+    current_episode_portfolio_values = [[] for _ in range(n_envs)]
+    current_episode_actions = [[] for _ in range(n_envs)]
+    current_episode_rewards_list = [[] for _ in range(n_envs)]
+    
+    # Track which environments have completed episodes
+    episodes_completed = np.zeros(n_envs)
+    
+    # Main evaluation loop
+    while total_episodes_done < n_episodes:
+        # Get model prediction
+        action, _ = model.predict(obs, deterministic=deterministic)
         
-        while not done:
-            action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            
-            episode_reward += reward
-            episode_length += 1
-            portfolio_value = info.get('portfolio_value', 
-                                       current_portfolio_values[-1])
-            current_portfolio_values.append(portfolio_value)
-            current_actions.append(int(action))
-            current_rewards.append(float(reward))
+        # Step environment - Update for gymnasium API
+        obs, rewards, terminated, truncated, infos = env.step(action)
         
-        episode_rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
-        portfolio_values_list.append(current_portfolio_values)
-        actions_list.append(current_actions)
-        rewards_list.append(current_rewards)
+        # Combine terminated and truncated for done signal
+        dones = np.logical_or(terminated, truncated) if isinstance(terminated, np.ndarray) else (terminated or truncated)
+        
+        # Update tracking for each environment
+        for i in range(n_envs):
+            # Only track if this environment hasn't completed all its episodes
+            if episodes_completed[i] < episodes_per_env:
+                current_episode_rewards[i] += rewards[i]
+                
+                # Get portfolio value from info
+                if is_vectorized:
+                    if "portfolio_value" in infos:
+                        portfolio_value = infos["portfolio_value"][i]
+                    elif "env_info" in infos and "portfolio_value" in infos["env_info"][i]:
+                        portfolio_value = infos["env_info"][i]["portfolio_value"]
+                    else:
+                        portfolio_value = 0.0  # Fallback
+                else:
+                    if "portfolio_value" in infos:
+                        portfolio_value = infos["portfolio_value"]
+                    elif "env_info" in infos and "portfolio_value" in infos["env_info"]:
+                        portfolio_value = infos["env_info"]["portfolio_value"]
+                    else:
+                        portfolio_value = 0.0  # Fallback
+                
+                current_episode_portfolio_values[i].append(portfolio_value)
+                current_episode_actions[i].append(action[i] if isinstance(action, np.ndarray) else action)
+                current_episode_rewards_list[i].append(rewards[i])
+                
+                # Handle episode completion
+                if dones[i] if isinstance(dones, np.ndarray) else dones:
+                    episode_rewards.append(current_episode_rewards[i])
+                    
+                    # Add completed episode data to the overall tracking
+                    all_portfolio_values.extend(current_episode_portfolio_values[i])
+                    all_actions.extend(current_episode_actions[i])
+                    all_rewards.extend(current_episode_rewards_list[i])
+                    
+                    # Reset tracking for this environment
+                    current_episode_rewards[i] = 0
+                    current_episode_portfolio_values[i] = []
+                    current_episode_actions[i] = []
+                    current_episode_rewards_list[i] = []
+                    
+                    # Increment completed episodes counter
+                    episodes_completed[i] += 1
+                    total_episodes_done += 1
+                    
+                    # If we've reached our target episodes, stop tracking this environment
+                    if total_episodes_done >= n_episodes:
+                        break
+    
+    # Calculate mean reward across all completed episodes
+    mean_reward = np.mean(episode_rewards) if episode_rewards else 0.0
+    
+    return mean_reward, np.array(all_portfolio_values), all_actions, all_rewards
 
-    mean_reward = np.mean(episode_rewards)
-    portfolio_values = np.array(portfolio_values_list[0])
-    actions = np.array(actions_list[0])
-    rewards = np.array(rewards_list[0])
+
+# Implement the missing evaluate function
+def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Evaluate a trained model on test data.
     
-    return mean_reward, portfolio_values, actions, rewards
+    Args:
+        config: Configuration dictionary
+        
+    Returns:
+        Dictionary of evaluation metrics
+    """
+    # Setup logger
+    log_path = os.path.join(config["log_dir"], config["model_name"], "evaluation")
+    ensure_dir_exists(log_path)
+    setup_logger(
+        log_dir=log_path,
+        log_level=logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO,
+    )
+    
+    # Check if model path exists
+    model_path = config["load_model"]
+    if not os.path.exists(model_path):
+        logger.error(f"Model path not found: {model_path}")
+        sys.exit(1)
+    
+    # Get information about the number of environments and vectorization method from config
+    num_envs = config.get("num_envs", 1)
+    vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
+    
+    # Load test data
+    if not config.get("test_data_path"):
+        logger.error("No test data path provided")
+        sys.exit(1)
+    
+    # Create test environment with same settings as training
+    logger.info(f"Creating test environment from: {config['test_data_path']}")
+    test_env_config = config.copy()
+    test_env_config["data_path"] = config["test_data_path"]
+    
+    # Use same environment creation pattern and same num_envs as training
+    base_seed_from_config = config.get("seed")
+    
+    # Function to create a single env instance - same as in train()
+    def make_single_env(rank: int, base_seed: Optional[int]):
+        def _init():
+            env_config = test_env_config.copy()
+            # Calculate a unique seed for this env instance
+            instance_seed = base_seed + rank if base_seed is not None else None
+            env_config["seed"] = instance_seed # Pass the calculated seed
+            env = create_env(config=env_config, is_eval=True)
+            return env
+        return _init
+    
+    test_env = make_vec_env(
+        env_id=make_single_env(rank=0, base_seed=base_seed_from_config),
+        n_envs=num_envs,
+        seed=None,  # Let make_single_env handle seed generation per instance
+        vec_env_cls=vec_env_cls,
+        env_kwargs=None
+    )
+    
+    # Load the model
+    model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC, "lstm_dqn": DQN}
+    model = model_cls[config["model_type"]].load(model_path, env=test_env)
+    
+    # Run evaluation
+    n_eval_episodes = config.get("n_eval_episodes", 5)
+    logger.info(f"Starting evaluation for {n_eval_episodes} episodes")
+    
+    mean_reward, portfolio_values, actions, rewards = evaluate_model(
+        model=model,
+        env=test_env,
+        config=config,
+        n_episodes=n_eval_episodes,
+        deterministic=True
+    )
+    
+    # Calculate additional metrics
+    final_portfolio_value = portfolio_values[-1] if len(portfolio_values) > 0 else 0
+    initial_portfolio_value = portfolio_values[0] if len(portfolio_values) > 0 else config.get("initial_balance", 10000)
+    total_return = (final_portfolio_value / initial_portfolio_value) - 1 if initial_portfolio_value > 0 else 0
+    
+    # Try to calculate more complex metrics if portfolio values is not empty
+    metrics = {
+        "mean_reward": mean_reward,
+        "final_portfolio_value": final_portfolio_value,
+        "total_return": total_return,
+    }
+    
+    if len(portfolio_values) > 1:
+        try:
+            # Calculate additional trading metrics
+            trading_metrics = calculate_trading_metrics(portfolio_values)
+            metrics.update(trading_metrics)
+            
+            # Create evaluation plots
+            create_evaluation_plots(
+                portfolio_values=portfolio_values,
+                actions=actions,
+                rewards=rewards,
+                save_path=log_path
+            )
+        except Exception as e:
+            logger.warning(f"Error calculating advanced metrics: {e}")
+    
+    # Log metrics
+    logger.info(f"Evaluation Results:")
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            logger.info(f"  {key}: {value:.4f}")
+        else:
+            logger.info(f"  {key}: {value}")
+    
+    # Save metrics to JSON file
+    metrics_file = os.path.join(log_path, "evaluation_metrics.json")
+    try:
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+        logger.info(f"Metrics saved to {metrics_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save metrics: {e}")
+    
+    # Close environment
+    test_env.close()
+    
+    return metrics
 
 
 # Update train function
@@ -660,19 +848,15 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
                    f"{config['val_data_path']}")
         eval_env_config = config.copy()
         eval_env_config["data_path"] = config["val_data_path"]
-        # Create single eval env instance, then potentially vectorize if 
-        # needed by callback
-        eval_env_instance = create_env(config=eval_env_config, is_eval=True)
-        # Wrap if necessary (e.g., Monitor)
-        # eval_env_instance = Monitor(eval_env_instance)
-        eval_env = DummyVecEnv([lambda: eval_env_instance]) # Wrap for SB3 Eval
-        # Apply VecNormalize if train_env is normalized 
-        # (MUST use stats from train_env)
-        # if isinstance(train_env, VecNormalize):
-        #     eval_env = VecNormalize.load(os.path.join(log_path, 
-        #                                             "vecnormalize.pkl"), eval_env)
-        #     eval_env.training = False
-        #     eval_env.norm_reward = False
+        
+        # Use identical environment creation pattern as training
+        eval_env = make_vec_env(
+            env_id=make_single_env(rank=0, base_seed=base_seed_from_config),
+            n_envs=num_envs,  # Use same number of envs as training
+            seed=None,  # Let make_single_env handle seed generation
+            vec_env_cls=vec_env_cls,  # Use same vectorization method
+            env_kwargs=None
+        )
 
     # --- Model Creation / Loading --- #
     if config.get("load_model"):
@@ -761,124 +945,6 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     return model, metrics
 
 
-# Update evaluate function
-def evaluate(
-    config: Dict[str, Any],  # Use config dict
-) -> Dict[str, Any]:
-    """
-    Evaluate a trained model based on config.
-    Requires load_model and test_data_path in config.
-    """
-    load_path = config.get("load_model")
-    test_data_path = config.get("test_data_path")
-    n_episodes = config.get("n_eval_episodes", 1)
-    model_name = config["model_name"]
-    log_dir = config["log_dir"]
-
-    if not load_path or not test_data_path:
-        # Use print here as logger might not be configured yet
-        print("Error: Evaluation requires --load_model and --test_data_path.")
-        sys.exit(1)
-    if not os.path.exists(load_path):
-        print(f"Error: Model path not found: {load_path}")
-        sys.exit(1)
-
-    # Setup logger for evaluation
-    eval_log_dir = os.path.join(log_dir, model_name, "evaluation")
-    ensure_dir_exists(eval_log_dir)
-    setup_logger(
-        log_dir=eval_log_dir,
-        log_filename="evaluation.log",
-    )
-    
-    logger.info(f"Evaluating model: {load_path}")
-    logger.info(f"Using test data from: {test_data_path}")
-    
-    # Create test environment
-    eval_config = config.copy()
-    eval_config["data_path"] = test_data_path
-    test_env_instance = create_env(config=eval_config, is_eval=True)
-    # Potentially wrap with Monitor
-    # test_env_instance = Monitor(test_env_instance)
-
-    # Load model (don't wrap env here, load needs unwrapped)
-    logger.info(f"Loading model from {load_path}")
-    model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC,
-                   "lstm_dqn": DQN}
-    try:
-        # Load without env first to check custom objects if necessary
-        # model = model_cls[config["model_type"]].load(load_path, 
-        #                                             custom_objects={...})
-        model = model_cls[config["model_type"]].load(load_path)
-        # Set the environment AFTER loading if necessary 
-        # (SB3 usually handles this)
-        # model.set_env(DummyVecEnv([lambda: test_env_instance]))
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}", exc_info=True)
-        sys.exit(1)
-
-    # Evaluate model using the single instance env
-    logger.info(f"Starting evaluation for {n_episodes} episodes")
-    evaluation_start_time = time.time()
-    mean_reward, portfolio_values, actions, rewards = evaluate_model(
-        model=model,
-        env=test_env_instance,  # Pass the single instance
-        config=config,
-        n_episodes=n_episodes,
-        deterministic=True,
-    )
-    evaluation_time = time.time() - evaluation_start_time
-    test_env_instance.close()  # Close the single env instance
-    
-    # Calculate trading metrics
-    logger.info("Calculating trading metrics")
-    trading_metrics = calculate_trading_metrics(
-        portfolio_values=portfolio_values,
-        risk_free_rate=0.0,
-    )
-    
-    # Create evaluation plots
-    logger.info("Creating evaluation plots")
-    plot_path = os.path.join(eval_log_dir, f"{model_name}_evaluation_plot.png")
-    create_evaluation_plots(
-        portfolio_values=portfolio_values,
-        actions=actions,
-        rewards=rewards,
-        save_path=plot_path,
-        show_plot=False,
-    )
-    
-    # Prepare evaluation metrics
-    metrics = {
-        "mean_reward": float(mean_reward),
-        "final_portfolio_value": float(portfolio_values[-1]),
-        "total_return": float((portfolio_values[-1] - portfolio_values[0]) /
-                              (portfolio_values[0] + 1e-10)),
-        "evaluation_time": evaluation_time,
-        "n_episodes": n_episodes,
-        **trading_metrics,
-    }
-    
-    # Save metrics to file
-    metrics_path = os.path.join(eval_log_dir, "metrics.json")
-    try:
-        with open(metrics_path, "w") as f:
-            json.dump(metrics, f, indent=4)
-            logger.info(f"Evaluation metrics saved to {metrics_path}")
-    except Exception as e:
-        logger.error(f"Failed to save evaluation metrics: {e}")
-    
-    # Log metrics
-    logger.info(f"Evaluation plot saved to {plot_path}")
-    logger.info(f"Mean reward: {mean_reward:.2f}")
-    logger.info(f"Final portfolio value: {portfolio_values[-1]:.2f}")
-    logger.info(f"Total Return: {metrics['total_return']:.2%}")
-    logger.info(f"Sharpe ratio: {metrics['sharpe_ratio']:.2f}")
-    logger.info(f"Max drawdown: {metrics['max_drawdown']:.2%}")
-    
-    return metrics
-
-
 # Updated main function to handle different models and eval mode
 def main():
     """Main function to parse args, setup, and run training or evaluation."""
@@ -921,7 +987,7 @@ def main():
         if config.get("test_data_path") is None:
             print("Error: Must provide --test_data_path for evaluation mode.")
             sys.exit(1)
-        evaluate(config=config)
+        evaluate(config)
 
     else:
         # --- Training Mode --- #
@@ -940,7 +1006,7 @@ def main():
             eval_config["load_model"] = final_model_path
             eval_config["test_data_path"] = config["test_data_path"]
 
-            test_metrics = evaluate(config=eval_config)
+            test_metrics = evaluate(config)
 
             print("\n--- Training Summary ---")
             print(f"Training time: {train_metrics['training_time']:.2f} seconds")
