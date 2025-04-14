@@ -954,6 +954,20 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
         model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC,
                        "lstm_dqn": DQN}  # Load LSTM-DQN as DQN
         model = model_cls[config["model_type"]].load(load_path, env=train_env)
+
+        # --- Override loaded learning rate if specified --- #
+        if 'learning_rate' in config and config['learning_rate'] is not None:
+            new_lr = config['learning_rate']
+            # Check if optimizer exists (it should after loading)
+            if hasattr(model.policy, 'optimizer') and model.policy.optimizer is not None:
+                logger.info(f"Overriding loaded model's learning rate. Setting LR to: {new_lr}")
+                # Set LR for all parameter groups in the optimizer
+                for param_group in model.policy.optimizer.param_groups:
+                    param_group['lr'] = new_lr
+            else:
+                logger.warning("Could not find optimizer to override learning rate after loading.")
+        # --- End LR Override --- #
+
         # Reset timesteps? Usually False when loading unless specified
     else:
         logger.info(f"Creating new {config['model_type']} model")
