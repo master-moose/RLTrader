@@ -347,6 +347,12 @@ def parse_args():
         help="Weight for exploration bonus in reward calculation (default: 0.1)"
     )
 
+    # QRDQN specific parameters
+    parser.add_argument(
+        "--n_quantiles", type=int, default=200,
+        help="Number of quantiles for QRDQN (default: 200)"
+    )
+
     args = parser.parse_args()
 
     # Auto-generate model name if not provided
@@ -602,7 +608,9 @@ def create_model(
         model = SAC(**model_kwargs)
 
     elif model_type == "qrdqn":
-        model_kwargs["policy"] = DqnMlpPolicy  # QRDQN uses DQN Policies
+        # Import QRDQNPolicy from sb3_contrib
+        from sb3_contrib.qrdqn.policies import QRDQNPolicy
+        model_kwargs["policy"] = QRDQNPolicy  # Use QRDQNPolicy instead of DQNMlpPolicy
         model_kwargs["buffer_size"] = config["buffer_size"]
         model_kwargs["batch_size"] = config["batch_size"]
         model_kwargs["learning_starts"] = config["learning_starts"]
@@ -612,14 +620,14 @@ def create_model(
         model_kwargs["exploration_initial_eps"] = config["exploration_initial_eps"]
         model_kwargs["exploration_final_eps"] = config["exploration_final_eps"]
 
-        # Set default net_arch for DqnMlpPolicy
+        # Set default net_arch for QRDQNPolicy
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
         model_kwargs["policy_kwargs"] = policy_kwargs
 
-        # QRDQN specific args (e.g., n_quantiles) could be added
-        # policy_kwargs['n_quantiles'] = config.get("n_quantiles", 50)
+        # QRDQN specific args
+        model_kwargs["n_quantiles"] = config.get("n_quantiles", 200)  # Default to 200 quantiles
 
         # Remove incompatible args
         model_kwargs.pop("tensorboard_log", None)
