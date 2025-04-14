@@ -159,6 +159,54 @@ def parse_args():
         "--target_cash_ratio", type=str, default="0.3-0.7",
         help="Target cash ratio range for reward shaping (default: '0.3-0.7')"
     )
+    
+    # --- Reward Component Weights --- #
+    parser.add_argument(
+        "--portfolio_change_weight", type=float, default=1.0,
+        help="Weight for portfolio value change reward (default: 1.0)"
+    )
+    parser.add_argument(
+        "--drawdown_penalty_weight", type=float, default=0.5,
+        help="Weight for drawdown penalty (default: 0.5)"
+    )
+    parser.add_argument(
+        "--sharpe_reward_weight", type=float, default=0.5,
+        help="Weight for Sharpe ratio reward (default: 0.5)"
+    )
+    parser.add_argument(
+        "--fee_penalty_weight", type=float, default=2.0,
+        help="Weight for transaction fee penalty (default: 2.0)"
+    )
+    parser.add_argument(
+        "--benchmark_reward_weight", type=float, default=0.5,
+        help="Weight for benchmark comparison reward (default: 0.5)"
+    )
+    parser.add_argument(
+        "--consistency_penalty_weight", type=float, default=0.2,
+        help="Weight for trade consistency penalty (default: 0.2)"
+    )
+    parser.add_argument(
+        "--idle_penalty_weight", type=float, default=0.1,
+        help="Weight for idle position penalty (default: 0.1)"
+    )
+    parser.add_argument(
+        "--profit_bonus_weight", type=float, default=0.5,
+        help="Weight for profit bonus (default: 0.5)"
+    )
+    
+    # --- Additional Reward Parameters --- #
+    parser.add_argument(
+        "--sharpe_window", type=int, default=20,
+        help="Window size for Sharpe ratio calculation (default: 20)"
+    )
+    parser.add_argument(
+        "--consistency_threshold", type=int, default=3,
+        help="Minimum consecutive actions before flip is acceptable (default: 3)"
+    )
+    parser.add_argument(
+        "--idle_threshold", type=int, default=5,
+        help="Number of consecutive holds before applying idle penalty (default: 5)"
+    )
 
     # --- Training Parameters --- #
     parser.add_argument(

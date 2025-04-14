@@ -45,6 +45,19 @@ class TradingEnvironment(Env):
         exploration_end: float = 0.01,
         exploration_decay_rate: float = 0.0001,
         exploration_bonus_weight: float = 0.1,
+        # Add reward component weights with defaults
+        portfolio_change_weight: float = 1.0,
+        drawdown_penalty_weight: float = 0.5,
+        sharpe_reward_weight: float = 0.5,
+        fee_penalty_weight: float = 2.0,
+        benchmark_reward_weight: float = 0.5,
+        consistency_penalty_weight: float = 0.2,
+        idle_penalty_weight: float = 0.1,
+        profit_bonus_weight: float = 0.5,
+        # Add additional reward parameters
+        sharpe_window: int = 20,
+        consistency_threshold: int = 3,
+        idle_threshold: int = 5,
     ):
         """
         Initialize the trading environment.
@@ -61,10 +74,27 @@ class TradingEnvironment(Env):
             max_steps: Maximum number of steps in an episode
             random_start: Start from a random position in the data
             render_mode: Gymnasium render mode ('human', 'rgb_array', None)
+            
+            # Exploration parameters
             exploration_start: Starting value of exploration bonus
             exploration_end: Ending value of exploration bonus
             exploration_decay_rate: Rate at which exploration bonus decays
             exploration_bonus_weight: Weight of exploration bonus in reward
+            
+            # Reward component weights
+            portfolio_change_weight: Weight for portfolio value change reward
+            drawdown_penalty_weight: Weight for drawdown penalty
+            sharpe_reward_weight: Weight for Sharpe ratio reward
+            fee_penalty_weight: Weight for transaction fee penalty
+            benchmark_reward_weight: Weight for benchmark comparison reward
+            consistency_penalty_weight: Weight for trade consistency penalty
+            idle_penalty_weight: Weight for idle position penalty
+            profit_bonus_weight: Weight for profit bonus
+            
+            # Additional reward parameters
+            sharpe_window: Window size for Sharpe ratio calculation
+            consistency_threshold: Minimum consecutive actions before flip is acceptable
+            idle_threshold: Number of consecutive holds before applying idle penalty
         """
         super(TradingEnvironment, self).__init__()
         
@@ -85,6 +115,21 @@ class TradingEnvironment(Env):
         self.exploration_end = exploration_end
         self.exploration_decay_rate = exploration_decay_rate
         self.exploration_bonus_weight = exploration_bonus_weight
+        
+        # Store reward component weights
+        self.portfolio_change_weight = portfolio_change_weight
+        self.drawdown_penalty_weight = drawdown_penalty_weight
+        self.sharpe_reward_weight = sharpe_reward_weight
+        self.fee_penalty_weight = fee_penalty_weight
+        self.benchmark_reward_weight = benchmark_reward_weight
+        self.consistency_penalty_weight = consistency_penalty_weight
+        self.idle_penalty_weight = idle_penalty_weight
+        self.profit_bonus_weight = profit_bonus_weight
+        
+        # Store additional reward parameters
+        self.sharpe_window = sharpe_window
+        self.consistency_threshold = consistency_threshold
+        self.idle_threshold = idle_threshold
         
         # Data preprocessing
         for feature in self.features:
@@ -505,28 +550,38 @@ class TradingEnvironment(Env):
 
         # 7. Idle Penalty (Penalize holding too long)
         if action == 1 and self.consecutive_holds > self.idle_threshold:
-            # Apply penalty for each step held beyond the threshold
+            # Apply penalty that scales with the number of steps held beyond the threshold
             penalty_factor = self.consecutive_holds - self.idle_threshold
-            reward_components['idle_penalty'] = -penalty_factor * 0.1 * self.idle_penalty_weight # Scaled penalty
+            # Make penalty proportional to time spent idle - stronger penalty the longer it stays idle
+            reward_components['idle_penalty'] = -penalty_factor * 0.1 * self.idle_penalty_weight
 
-        # 8. Profit Bonus (Bonus for positive returns)
-        step_return = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value if prev_portfolio_value else 0
-        if step_return > 0:
-            reward_components['profit_bonus'] = step_return * self.profit_bonus_weight
+        # 8. Profit/Selling Bonus (Reward for profitable trades when selling)
+        if action == 0 and self.shares_held > 0 and self.last_buy_price is not None:
+            # Calculate return on this specific trade
+            if current_price > self.last_buy_price:  # If profitable
+                step_return = (current_price - self.last_buy_price) / self.last_buy_price
+                reward_components['profit_bonus'] = step_return * self.profit_bonus_weight
 
-        # 9. Exploration Bonus (Decaying bonus)
-        reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
+        # 9. Exploration Bonus (decreases over time)
+        if self.exploration_bonus_value > 0:
+            # Encourage exploration by giving a bonus that diminishes over time
+            # Only apply to buys and sells to encourage action exploration
+            if action != 1:  # Not hold - applies to buys and sells
+                reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
 
-        # Sum all weighted components (raw total)
-        raw_total_reward = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # Exclude helper keys
-        reward_components['raw_total'] = raw_total_reward
+        # Sum all reward components for the raw total
+        raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward']
+        reward_components['raw_total'] = raw_total
 
-        # Apply final reward scaling
-        scaled_total_reward = raw_total_reward * self.reward_scaling
-        reward_components['total_reward'] = scaled_total_reward
+        # Apply reward scaling for the final reward
+        reward_components['total_reward'] = raw_total * self.reward_scaling
 
-        # Log reward breakdown for debugging (optional)
-        # logger.debug(f"Reward Breakdown (Step {self.current_step}): {reward_components}")
+        # Log the reward breakdown if needed
+        if self.episode_step % 100 == 0 or action != 1:  # Log on non-hold actions or periodically
+            component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items() 
+                                      if k not in ['raw_total', 'total_reward']])
+            logger.debug(f"Reward components: {component_str}")
+            logger.debug(f"Total reward: {reward_components['total_reward']:.4f}")
 
         return reward_components
     
