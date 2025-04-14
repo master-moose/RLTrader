@@ -207,8 +207,9 @@ def parse_args():
         help="Number of steps per update for PPO/A2C (default: 2048)"
     )
     parser.add_argument(
-        "--ent_coef", type=float, default=0.01,
-        help="Entropy coefficient for PPO/A2C (default: 0.01)"
+        "--ent_coef", type=str, default="0.01", 
+        help="Entropy coefficient for PPO/A2C/SAC (default: 0.01 for PPO/A2C, "
+             "'auto' recommended for SAC)"
     )
     parser.add_argument(
         "--vf_coef", type=float, default=0.5,
@@ -244,6 +245,21 @@ def parse_args():
         "--target_update_interval", type=int, default=10000,
         help="Update frequency for target network in DQN/SAC (default: 10000)"
     )
+
+    # --- New SAC arguments ---
+    parser.add_argument(
+        "--tau", type=float, default=0.005,
+        help="Soft update coefficient (tau) for SAC target networks (default: 0.005)"
+    )
+    parser.add_argument(
+        "--gradient_steps", type=int, default=1,
+        help="Number of gradient steps per update for SAC/DQN (default: 1)"
+    )
+    parser.add_argument(
+        "--learning_starts", type=int, default=1000,
+        help="Number of steps before learning starts for SAC/DQN (default: 1000)"
+    )
+    # --- End New SAC arguments ---
 
     # --- LSTM Specific --- #
     parser.add_argument(
@@ -509,13 +525,28 @@ def create_model(
         model_kwargs["policy"] = SacMlpPolicy
         model_kwargs["buffer_size"] = config["buffer_size"]
         model_kwargs["batch_size"] = config["batch_size"]
-        model_kwargs["learning_starts"] = config.get("learning_starts", 1000)
-        model_kwargs["train_freq"] = config.get("train_freq", 1)
-        model_kwargs["gradient_steps"] = config.get("gradient_steps", 1)
+        model_kwargs["learning_starts"] = config["learning_starts"]
+        model_kwargs["gradient_steps"] = config["gradient_steps"]
         model_kwargs["target_update_interval"] = config["target_update_interval"]
-        model_kwargs["ent_coef"] = config.get("ent_coef", "auto")
-        model_kwargs["target_entropy"] = config.get("target_entropy", "auto")
-        model_kwargs["tau"] = config.get("tau", 0.005)
+        model_kwargs["tau"] = config["tau"]
+        
+        # Handle ent_coef ('auto' or float)
+        ent_coef_value = config.get("ent_coef", "auto") # Default to 'auto' if not specified
+        if isinstance(ent_coef_value, str) and ent_coef_value.lower() == 'auto':
+            model_kwargs["ent_coef"] = 'auto'
+        else:
+            try:
+                # Try converting to float if not 'auto'
+                model_kwargs["ent_coef"] = float(ent_coef_value) 
+            except ValueError:
+                logger.warning(f"Invalid ent_coef value '{ent_coef_value}'. Defaulting to 'auto'.")
+                model_kwargs["ent_coef"] = 'auto'
+                
+        # model_kwargs["target_entropy"] = config.get("target_entropy", "auto") # Keep default target_entropy
+        # Remove old ent_coef handling
+        # model_kwargs["ent_coef"] = config.get("ent_coef", "auto")
+        # model_kwargs["target_entropy"] = config.get("target_entropy", "auto")
+        # model_kwargs["tau"] = config.get("tau", 0.005)
         # SAC needs policy_kwargs adjusted if fc_hidden_size is used
         if "fc_hidden_size" in config and config["fc_hidden_size"] > 0 and \
            "net_arch" not in policy_kwargs:
