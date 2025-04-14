@@ -36,7 +36,8 @@ from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy # For SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel  # Add BaseRLModel
 from stable_baselines3.common.monitor import Monitor # Add Monitor import
 # Import recurrent policy from contrib
-from sb3_contrib.common.policies import MlpLstmPolicy
+# from sb3_contrib.common.policies import MlpLstmPolicy # Removed - Incorrect import for QRDQN
+from rl_agent.callback import TensorboardCallback, CheckpointCallback, ProgressBarManager
 
 # Add parent directory to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
