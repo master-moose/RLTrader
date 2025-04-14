@@ -40,6 +40,11 @@ class TradingEnvironment(Env):
         max_steps: Optional[int] = None,
         random_start: bool = True,
         render_mode: Optional[str] = None,
+        # Add exploration parameters with defaults
+        exploration_start: float = 1.0,
+        exploration_end: float = 0.01,
+        exploration_decay_rate: float = 0.0001,
+        exploration_bonus_weight: float = 0.1,
     ):
         """
         Initialize the trading environment.
@@ -56,6 +61,10 @@ class TradingEnvironment(Env):
             max_steps: Maximum number of steps in an episode
             random_start: Start from a random position in the data
             render_mode: Gymnasium render mode ('human', 'rgb_array', None)
+            exploration_start: Starting value of exploration bonus
+            exploration_end: Ending value of exploration bonus
+            exploration_decay_rate: Rate at which exploration bonus decays
+            exploration_bonus_weight: Weight of exploration bonus in reward
         """
         super(TradingEnvironment, self).__init__()
         
@@ -70,6 +79,12 @@ class TradingEnvironment(Env):
         self.sequence_length = sequence_length
         self.random_start = random_start
         self.render_mode = render_mode
+        
+        # Store exploration parameters
+        self.exploration_start = exploration_start
+        self.exploration_end = exploration_end
+        self.exploration_decay_rate = exploration_decay_rate
+        self.exploration_bonus_weight = exploration_bonus_weight
         
         # Data preprocessing
         for feature in self.features:

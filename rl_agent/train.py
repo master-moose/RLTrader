@@ -329,6 +329,24 @@ def parse_args():
     # )
     # --- End New DQN PER arguments ---
 
+    # Add new exploration bonus arguments for TradingEnvironment
+    parser.add_argument(
+        "--exploration_start", type=float, default=1.0,
+        help="Starting value for exploration bonus in TradingEnvironment (default: 1.0)"
+    )
+    parser.add_argument(
+        "--exploration_end", type=float, default=0.01,
+        help="Final value for exploration bonus in TradingEnvironment (default: 0.01)"
+    )
+    parser.add_argument(
+        "--exploration_decay_rate", type=float, default=0.0001,
+        help="Decay rate for exploration bonus per step (default: 0.0001)"
+    )
+    parser.add_argument(
+        "--exploration_bonus_weight", type=float, default=0.1,
+        help="Weight for exploration bonus in reward calculation (default: 0.1)"
+    )
+
     args = parser.parse_args()
 
     # Auto-generate model name if not provided
@@ -411,7 +429,7 @@ def create_env(
         "exploration_bonus_weight", "sharpe_window",
         "consistency_threshold", "idle_threshold",
         "exploration_start", "exploration_end",
-        "exploration_decay_steps"
+        "exploration_decay_rate"
     ]
     
     # Add them to env_kwargs ONLY if they exist in the config dict
