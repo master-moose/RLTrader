@@ -52,7 +52,7 @@ def main():
     try:
         run_agent_main()
         logger.info("Main script finished successfully.")
-                except Exception as e:
+    except Exception as e:
         logger.critical(
             f"An unexpected error occurred in the main script: {e}",
             exc_info=True

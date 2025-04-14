@@ -207,6 +207,10 @@ def parse_args():
         help="Entropy coefficient for PPO/A2C (default: 0.01)"
     )
     parser.add_argument(
+        "--vf_coef", type=float, default=0.5,
+        help="Value function coefficient for PPO/A2C (default: 0.5)"
+    )
+    parser.add_argument(
         "--n_epochs", type=int, default=10,
         help="Number of epochs per update for PPO (default: 10)"
     )
@@ -296,7 +300,7 @@ def parse_args():
     
     # Process features string into list
     if isinstance(args.features, str):
-    args.features = args.features.split(",")
+        args.features = args.features.split(",")
     
     return args
 
@@ -471,9 +475,9 @@ def create_model(
         model_kwargs["batch_size"] = config["batch_size"]
         model_kwargs["n_epochs"] = config["n_epochs"]
         model_kwargs["ent_coef"] = config["ent_coef"]
+        model_kwargs["vf_coef"] = config["vf_coef"]
         model_kwargs["clip_range"] = config["clip_range"]
         model_kwargs["gae_lambda"] = config.get("gae_lambda", 0.95)
-        model_kwargs["vf_coef"] = config.get("vf_coef", 0.5)
         model_kwargs["max_grad_norm"] = config.get("max_grad_norm", 0.5)
         if "net_arch" not in policy_kwargs:  # Set default arch if not set by LSTM
             policy_kwargs["net_arch"] = [config["fc_hidden_size"]] * 2 \
@@ -484,8 +488,8 @@ def create_model(
         model_kwargs["policy"] = ActorCriticPolicy
         model_kwargs["n_steps"] = config["n_steps"]
         model_kwargs["ent_coef"] = config["ent_coef"]
+        model_kwargs["vf_coef"] = config["vf_coef"]
         model_kwargs["gae_lambda"] = config.get("gae_lambda", 0.95)
-        model_kwargs["vf_coef"] = config.get("vf_coef", 0.5)
         model_kwargs["max_grad_norm"] = config.get("max_grad_norm", 0.5)
         model_kwargs["rms_prop_eps"] = config.get("rms_prop_eps", 1e-5)
         if "net_arch" not in policy_kwargs:  # Set default arch if not set by LSTM
@@ -713,9 +717,9 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
                f"total timesteps...")
     training_start_time = time.time()
     try:
-    model.learn(
-        total_timesteps=config["total_timesteps"],
-        callback=callbacks,
+        model.learn(
+            total_timesteps=config["total_timesteps"],
+            callback=callbacks,
             log_interval=1,  # Log basic SB3 stats every episode
             reset_num_timesteps=False if config.get("load_model") else True
         )
@@ -858,8 +862,8 @@ def evaluate(
     # Save metrics to file
     metrics_path = os.path.join(eval_log_dir, "metrics.json")
     try:
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=4)
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=4)
             logger.info(f"Evaluation metrics saved to {metrics_path}")
     except Exception as e:
         logger.error(f"Failed to save evaluation metrics: {e}")
@@ -886,11 +890,11 @@ def main():
         if os.path.exists(args.load_config):
             # Use print before logger setup
             print(f"Loading configuration from {args.load_config}") 
-        file_config = load_config(args.load_config)
+            file_config = load_config(args.load_config)
             # Update file_config with non-None CLI args
             cli_overrides = {k: v for k, v in vars(args).items() if v is not None}
             file_config.update(cli_overrides)
-        config = file_config
+            config = file_config
             # Re-process features if loaded from config and is string
             if 'features' in config and isinstance(config['features'], str):
                 config['features'] = config['features'].split(",")
