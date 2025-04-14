@@ -22,11 +22,12 @@ import gymnasium as gym
 
 # Import SB3 models
 from stable_baselines3 import DQN, PPO, A2C, SAC  # Add A2C, PPO, SAC
+# Import SB3 Contrib models
+from sb3_contrib import QRDQN, RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv 
 # Add SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env # For vectorized envs
-from stable_baselines3.common.vec_env import VecEnv  # Add VecEnv import
-from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize import
+from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
 # Import ReplayBuffer only
 from stable_baselines3.common.buffers import ReplayBuffer #, PrioritizedReplayBuffer # Import PrioritizedReplayBuffer
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy#, CnnPolicy as DqnCnnPolicy
@@ -34,6 +35,8 @@ from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy # For SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel  # Add BaseRLModel
 from stable_baselines3.common.monitor import Monitor # Add Monitor import
+# Import recurrent policy from contrib
+from sb3_contrib.common.policies import MlpLstmPolicy
 
 # Add parent directory to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,7 +78,7 @@ def parse_args():
     # --- Model Selection --- #
     parser.add_argument(
         "--model_type", type=str, default="dqn",
-        choices=["dqn", "ppo", "a2c", "sac", "lstm_dqn"],  # Add lstm_dqn choice
+        choices=["dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo"],  # Add qrdqn, recurrentppo
         help="RL algorithm to use (default: dqn). Use lstm_dqn for DQN with "
              "LSTM features."
     )
@@ -599,6 +602,58 @@ def create_model(
             policy_kwargs["net_arch"] = [config["fc_hidden_size"]] * 2
         model = SAC(**model_kwargs)
 
+    # --- QRDQN Specific Setup (from sb3_contrib) ---
+    elif model_type == "qrdqn":
+        model_kwargs["policy"] = DqnMlpPolicy # QRDQN uses DQN Policies
+        model_kwargs["buffer_size"] = config["buffer_size"]
+        model_kwargs["batch_size"] = config["batch_size"]
+        model_kwargs["learning_starts"] = config["learning_starts"]
+        model_kwargs["gradient_steps"] = config["gradient_steps"]
+        model_kwargs["target_update_interval"] = config["target_update_interval"]
+        model_kwargs["exploration_fraction"] = config["exploration_fraction"]
+        model_kwargs["exploration_initial_eps"] = config["exploration_initial_eps"]
+        model_kwargs["exploration_final_eps"] = config["exploration_final_eps"]
+        
+        # Set default net_arch for DqnMlpPolicy if not set by LSTM (unlikely here)
+        if "net_arch" not in policy_kwargs:
+            policy_kwargs["net_arch"] = [config["fc_hidden_size"]] * 2 \
+                if config["fc_hidden_size"] > 0 else [64, 64]
+        model_kwargs["policy_kwargs"] = policy_kwargs
+        
+        # QRDQN specific args (e.g., n_quantiles) could be added here if needed
+        # policy_kwargs['n_quantiles'] = config.get("n_quantiles", 50) # Example
+        
+        # Remove incompatible args
+        model_kwargs.pop("tensorboard_log", None) 
+        model = QRDQN(**model_kwargs)
+
+    # --- RecurrentPPO Specific Setup (from sb3_contrib) ---
+    elif model_type == "recurrentppo":
+        model_kwargs["policy"] = MlpLstmPolicy # Use the recurrent policy
+        model_kwargs["n_steps"] = config["n_steps"]
+        model_kwargs["batch_size"] = config["batch_size"]
+        model_kwargs["n_epochs"] = config["n_epochs"]
+        model_kwargs["ent_coef"] = config["ent_coef"]
+        model_kwargs["vf_coef"] = config["vf_coef"]
+        model_kwargs["clip_range"] = config["clip_range"]
+        model_kwargs["gae_lambda"] = config.get("gae_lambda", 0.95)
+        model_kwargs["max_grad_norm"] = config.get("max_grad_norm", 0.5)
+
+        # Configure LSTM within the policy_kwargs
+        if "lstm_hidden_size" in config:
+            policy_kwargs["lstm_hidden_size"] = config["lstm_hidden_size"]
+        # policy_kwargs["n_lstm_layers"] = config.get("n_lstm_layers", 1) # Example if needed
+        # policy_kwargs["enable_critic_lstm"] = config.get("enable_critic_lstm", True) # Example if needed
+
+        # Set net_arch if fc_hidden_size is specified for layers *after* LSTM
+        if "fc_hidden_size" in config and config["fc_hidden_size"] > 0:
+             # Recurrent policies often handle net_arch differently, check SB3-Contrib docs
+             # Might need specific keys like pi_arch, vf_arch or handled within MlpLstmPolicy
+             # For simplicity, assuming MlpLstmPolicy uses fc_hidden_size correctly if passed
+             pass # Let MlpLstmPolicy handle internal structure based on lstm_hidden_size
+        
+        model = RecurrentPPO(**model_kwargs)
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
@@ -632,7 +687,7 @@ def evaluate_model(
         - actions taken
         - rewards received
     """
-    is_vectorized = isinstance(env, VecEnv)
+    is_vectorized = isinstance(env, VecNormalize)
     n_envs = env.num_envs if is_vectorized else 1
     
     # Tracking variables
@@ -809,7 +864,8 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
     # --- End VecNormalize for test_env --- #
 
     # Load the model
-    model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC, "lstm_dqn": DQN}
+    model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC, 
+                   "lstm_dqn": DQN, "qrdqn": QRDQN, "recurrentppo": RecurrentPPO} # Add new types
     model = model_cls[config["model_type"]].load(model_path, env=test_env)
     
     # Run evaluation
@@ -1033,7 +1089,7 @@ def train(config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
             sys.exit(1)
 
         model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC,
-                       "lstm_dqn": DQN}  # Load LSTM-DQN as DQN
+                       "lstm_dqn": DQN, "qrdqn": QRDQN, "recurrentppo": RecurrentPPO} # Add new types
         model = model_cls[config["model_type"]].load(load_path, env=train_env)
 
         # --- Override loaded learning rate if specified --- #
