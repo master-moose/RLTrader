@@ -26,9 +26,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 # Add SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env # For vectorized envs
 from stable_baselines3.common.vec_env import VecEnv  # Add VecEnv import
-from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
 # from stable_baselines3.common.vec_env import VecNormalize # Add VecNormalize
-from stable_baselines3.common.buffers import ReplayBuffer, PrioritizedReplayBuffer # Import PrioritizedReplayBuffer
+# Import ReplayBuffer only
+from stable_baselines3.common.buffers import ReplayBuffer #, PrioritizedReplayBuffer # Import PrioritizedReplayBuffer
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy#, CnnPolicy as DqnCnnPolicy
 from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy # For SAC
@@ -509,22 +509,27 @@ def create_model(
         model_kwargs["policy_kwargs"] = policy_kwargs # Ensure policy_kwargs are passed
         
         # --- Handle Prioritized Experience Replay (PER) ---
-        if config.get("prioritized_replay", False):
-            logger.info("Prioritized Experience Replay (PER) enabled for DQN.")
-            model_kwargs["replay_buffer_class"] = PrioritizedReplayBuffer
-            model_kwargs["replay_buffer_kwargs"] = {
-                "alpha": config["prioritized_replay_alpha"],
-                "beta0": config["prioritized_replay_beta0"],
-                # beta_steps is deprecated/removed? SB3 handles beta scheduling internally
-                "eps": config["prioritized_replay_eps"]
-            }
-        else:
-            # Explicitly set default if PER is off (optional, but clear)
-            model_kwargs["replay_buffer_class"] = ReplayBuffer
-            model_kwargs["replay_buffer_kwargs"] = {} # No special kwargs for default buffer
+        # --- PER DISABLED for SB3 v2.6.0 compatibility ---
+        # if config.get("prioritized_replay", False):
+        #     logger.info("Prioritized Experience Replay (PER) enabled for DQN.")
+        #     model_kwargs["replay_buffer_class"] = PrioritizedReplayBuffer
+        #     model_kwargs["replay_buffer_kwargs"] = {
+        #         "alpha": config["prioritized_replay_alpha"],
+        #         "beta0": config["prioritized_replay_beta0"],
+        #         # beta_steps is deprecated/removed? SB3 handles beta scheduling internally
+        #         "eps": config["prioritized_replay_eps"]
+        #     }
+        # else:
+        #     # Explicitly set default if PER is off (optional, but clear)
+        #     model_kwargs["replay_buffer_class"] = ReplayBuffer
+        #     model_kwargs["replay_buffer_kwargs"] = {} # No special kwargs for default buffer
+        # Use default buffer
+        model_kwargs["replay_buffer_class"] = ReplayBuffer
+        model_kwargs["replay_buffer_kwargs"] = {}
 
         # --- Remove kwargs not accepted by DQN.__init__ ---
         # Remove PER flags as they are handled by replay_buffer_class/kwargs now
+        # Also removing them explicitly here just in case
         model_kwargs.pop("prioritized_replay", None)
         model_kwargs.pop("prioritized_replay_alpha", None)
         model_kwargs.pop("prioritized_replay_beta0", None)
