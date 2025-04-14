@@ -18,15 +18,11 @@ from typing import Dict, Any, List, Optional, Union, Callable
 import gymnasium as gym
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EvalCallback
 from stable_baselines3.common.vec_env import VecEnv
-from collections import deque
 import psutil
 import torch
 import gc
-import traceback
-import itertools
 
 from .utils import check_resources, ensure_dir_exists
-from .env_wrappers import SafeTradingEnvWrapper
 
 # Setup logger
 logger = logging.getLogger("rl_agent")
@@ -84,21 +80,26 @@ class ResourceMonitorCallback(BaseCallback):
             if self.verbose > 0:
                 mem_used = resource_info["memory_percent"]
                 cpu_used = resource_info["cpu_percent"]
-                logger.info(f"Step {self.n_calls}: Memory: {mem_used:.1f}%, CPU: {cpu_used:.1f}%")
+                logger.info(f"Step {self.n_calls}: Memory: {mem_used:.1f}%, "
+                           f"CPU: {cpu_used:.1f}%")
                 
                 if "gpu_memory_used" in resource_info:
                     gpu_mem = resource_info["gpu_memory_used"]
                     gpu_util = resource_info["gpu_utilization"]
-                    logger.info(f"GPU Memory: {gpu_mem:.1f}MB, GPU Utilization: {gpu_util:.1f}%")
+                    logger.info(f"GPU Memory: {gpu_mem:.1f}MB, "
+                               f"GPU Utilization: {gpu_util:.1f}%")
             
             # Log to tensorboard if available
             if hasattr(self, 'logger') and self.logger:
-                self.logger.record('resources/memory_mb', resource_info["memory_used"] * 1024)
+                self.logger.record('resources/memory_mb', 
+                                   resource_info["memory_used"] * 1024)
                 self.logger.record('resources/cpu_percent', cpu_used)
                 if "gpu_memory_used" in resource_info:
-                    self.logger.record('resources/gpu_memory_gb', resource_info["gpu_memory_used"] / 1024)
+                    self.logger.record('resources/gpu_memory_gb', 
+                                       resource_info["gpu_memory_used"] / 1024)
                 if "gpu_utilization" in resource_info:
-                    self.logger.record('resources/gpu_utilization', resource_info["gpu_utilization"])
+                    self.logger.record('resources/gpu_utilization', 
+                                       resource_info["gpu_utilization"])
             
             # Calculate change since last check
             memory_mb = resource_info["memory_used"] * 1024
@@ -106,12 +107,15 @@ class ResourceMonitorCallback(BaseCallback):
             
             # Log significant changes
             if abs(memory_change) > 500:  # Over 500MB change
-                logger.warning(f"Memory usage changed by {memory_change:.1f}MB to {memory_mb:.1f}MB")
+                logger.warning(f"Memory usage changed by {memory_change:.1f}MB "
+                              f"to {memory_mb:.1f}MB")
             
             # Check for critical memory usage (over 90% of system memory)
             system_memory = psutil.virtual_memory()
             if system_memory.percent > 90:
-                logger.warning(f"CRITICAL: System memory usage at {system_memory.percent}%, consider stopping training")
+                logger.warning(f"CRITICAL: System memory usage at "
+                              f"{system_memory.percent}%, "
+                              f"consider stopping training")
                 
                 # Try to free some memory
                 gc.collect()
@@ -120,7 +124,8 @@ class ResourceMonitorCallback(BaseCallback):
                 
                 # Stop if extremely critical (over 95%)
                 if system_memory.percent > 95:
-                    logger.error("CRITICAL MEMORY SHORTAGE: Stopping training to prevent system crash")
+                    logger.error("CRITICAL MEMORY SHORTAGE: Stopping training "
+                                 "to prevent system crash")
                     return False
             
             # Update last values
@@ -183,50 +188,58 @@ class TradingMetricsCallback(BaseCallback):
         self.last_time = time.time()
     
     def _on_step(self) -> bool:
-        """
-        Track metrics at each step during training.
-        
-        Returns:
-            Whether training should continue
-        """
-        # Get environment info
-        if hasattr(self.model, "env") and hasattr(self.model.env, "get_attr"):
-            # For vectorized environments
-            try:
-                infos = self.model.env.get_attr("info_buffer")
-                dones = self.model.env.get_attr("episode_returns")
-                
-                # Process only the first environment for simplicity
-                if len(infos) > 0 and len(infos[0]) > 0:
-                    info = infos[0][-1]  # Latest info from first env
-                    
-                    # Collect metrics if available
-                    if "portfolio_value" in info:
-                        self.current_episode_metrics["portfolio_values"].append(info["portfolio_value"])
-                    
-                    if "reward" in info:
-                        self.current_episode_metrics["rewards"].append(info["reward"])
-                    
-                    if "action" in info:
-                        self.current_episode_metrics["actions"].append(info["action"])
-                    
-                    if "position" in info:
-                        self.current_episode_metrics["positions"].append(info["position"])
-                    
-                    if "cash" in info:
-                        self.current_episode_metrics["cash"].append(info["cash"])
-                
-                # Check for episode completion
-                if len(dones) > 0 and dones[0] is not None:
-                    self._on_episode_end()
+        """Log metrics at the specified frequency using info dict."""
+        if self.log_freq > 0 and self.n_calls % self.log_freq == 0:
+            if not self.locals['infos']:
+                return True  # Should not happen with Monitor wrapper
             
-            except (AttributeError, KeyError) as e:
-                if self.verbose > 0:
-                    logger.warning(f"Could not get environment info: {e}")
-        
-        # Periodically log metrics
-        if self.n_calls % self.log_freq == 0:
-            self._log_metrics()
+            info = self.locals['infos'][0]
+            
+            # --- Collect metrics from info dict --- 
+            if "portfolio_value" in info:
+                self.current_episode_metrics["portfolio_values"].append(
+                    info["portfolio_value"]
+                )
+            
+            # Use step reward from locals if available, otherwise check info
+            step_reward = self.locals['rewards'][0]
+            if 'rewards' in self.locals:
+                step_reward = self.locals['rewards'][0]
+            else:
+                step_reward = info.get("reward", 0.0)
+            self.current_episode_metrics["rewards"].append(step_reward)
+
+            # Get action from model prediction if needed, or check info
+            # action = self.locals['actions'][0] \n            #     if 'actions' in self.locals else info.get("action", None)
+            # self.current_episode_metrics["actions"].append(action) # Action less useful
+
+            if "position" in info:  # Assuming base env or wrapper adds this
+                self.current_episode_metrics["positions"].append(info["position"])
+            
+            if "cash" in info:  # Assuming base env or wrapper adds this
+                self.current_episode_metrics["cash"].append(info["cash"])
+            
+            # Add metrics from SafeTradingEnvWrapper if present
+            for key in info:
+                if key.startswith('wrapper_'):
+                    metric_name = key.replace('wrapper_', '')
+                    if metric_name not in self.current_episode_metrics:
+                        self.current_episode_metrics[metric_name] = []
+                    self.current_episode_metrics[metric_name].append(info[key])
+
+            # Check for episode completion using Monitor info
+            if "episode" in info:
+                self._on_episode_end()
+                # Reset for next episode
+                self.current_episode_metrics = { 
+                    "portfolio_values": [], "rewards": [], "actions": [], 
+                    "positions": [], "cash": [], "consecutive_holds": [],
+                    "oscillation_count": [], "current_cooldown": [],
+                    "sharpe_ratio": [], "max_drawdown": [], "portfolio_growth_rate": [],
+                    "successful_trade_streak": [], "forced_actions": [],
+                    "cooldown_violations": []
+                }
+                self.episode_start_step = self.n_calls
         
         return True
     
@@ -252,7 +265,8 @@ class TradingMetricsCallback(BaseCallback):
             # Calculate daily returns if we have enough data
             if len(portfolio_values) > 1:
                 daily_returns = np.diff(portfolio_values) / portfolio_values[:-1]
-                sharpe = np.mean(daily_returns) / (np.std(daily_returns) + 1e-10) * np.sqrt(252)  # Annualized
+                sharpe = np.mean(daily_returns) / (np.std(daily_returns) + 1e-10) \
+                         * np.sqrt(252)  # Annualized
                 max_drawdown = self._calculate_max_drawdown(portfolio_values)
             else:
                 daily_returns = []
@@ -261,7 +275,8 @@ class TradingMetricsCallback(BaseCallback):
             
             # Count trades
             actions = self.current_episode_metrics["actions"]
-            trade_count = sum(1 for i in range(1, len(actions)) if actions[i] != actions[i-1])
+            trade_count = sum(1 for i in range(1, len(actions)) \
+                              if actions[i] != actions[i-1])
             
             # Create metrics summary
             metrics = {
@@ -284,11 +299,11 @@ class TradingMetricsCallback(BaseCallback):
             # Log metrics
             if self.verbose > 0:
                 logger.info(f"Episode {self.episode_count} finished: "
-                          f"Reward={episode_reward:.2f}, "
-                          f"Length={episode_length}, "
-                          f"Return={returns*100:.2f}%, "
-                          f"Sharpe={sharpe:.2f}, "
-                          f"Trades={trade_count}")
+                            f"Reward={episode_reward:.2f}, "
+                            f"Length={episode_length}, "
+                            f"Return={returns*100:.2f}%, "
+                            f"Sharpe={sharpe:.2f}, "
+                            f"Trades={trade_count}")
             
             # Save detailed metrics to file
             if self.log_dir:
@@ -350,12 +365,15 @@ class TradingMetricsCallback(BaseCallback):
         try:
             # Ensure all values are serializable
             for key, value in episode_data["detailed_metrics"].items():
-                if isinstance(value, list) and value and isinstance(value[0], np.generic):
-                    episode_data["detailed_metrics"][key] = [v.item() for v in value]
+                if isinstance(value, list) and value and \
+                   isinstance(value[0], np.generic):
+                    episode_data["detailed_metrics"][key] = \
+                        [v.item() for v in value]
                 elif isinstance(value, np.generic):
-                     episode_data["detailed_metrics"][key] = value.item()
+                    episode_data["detailed_metrics"][key] = value.item()
             
-            episode_file = os.path.join(self.log_dir, f"episode_{self.episode_count}.json")
+            episode_file = os.path.join(self.log_dir, 
+                                        f"episode_{self.episode_count}.json")
             with open(episode_file, 'w') as f:
                 json.dump(episode_data, f, indent=4)
                 
@@ -401,7 +419,8 @@ class BestModelCallback(EvalCallback):
             best_model_save_path: Path to save the best model
             log_path: Path to save evaluation logs
             callback_after_eval: Callback to call after evaluation
-            patience: Number of evaluations without improvement before early stopping (0=disabled)
+            patience: Number of evaluations without improvement before early 
+                      stopping (0=disabled)
         """
         if best_model_save_path is None:
             best_model_save_path = os.path.join(log_dir, "best_model")
@@ -434,7 +453,8 @@ class BestModelCallback(EvalCallback):
         continue_training = super()._on_step()
         
         # Check for early stopping if patience is set
-        if continue_training and self.patience > 0 and self.last_mean_reward is not None:
+        if continue_training and self.patience > 0 and \
+           self.last_mean_reward is not None:
             if self.last_mean_reward > self.best_mean_reward:
                 self.best_mean_reward = self.last_mean_reward
                 self.no_improvement_count = 0
@@ -442,11 +462,14 @@ class BestModelCallback(EvalCallback):
                 self.no_improvement_count += 1
                 
                 if self.verbose > 0:
-                    logger.info(f"No improvement in evaluation for {self.no_improvement_count} consecutive evaluations.")
+                    logger.info(f"No improvement in evaluation for "
+                               f"{self.no_improvement_count} consecutive evaluations.")
                 
                 if self.no_improvement_count >= self.patience:
                     if self.verbose > 0:
-                        logger.info(f"Early stopping triggered after {self.no_improvement_count} evaluations without improvement.")
+                        logger.info(f"Early stopping triggered after "
+                                   f"{self.no_improvement_count} evaluations "
+                                   f"without improvement.")
                     return False  # Stop training
         
         return continue_training
@@ -473,7 +496,8 @@ class CheckpointCallback(BaseCallback):
             save_freq: Frequency of saving checkpoints in timesteps
             save_path: Path to save checkpoints
             name_prefix: Prefix for checkpoint filenames
-            keep_checkpoints: Maximum number of checkpoints to keep (0=keep all)
+            keep_checkpoints: Maximum number of checkpoints to keep 
+                              (0=keep all)
             verbose: Verbosity level
         """
         super().__init__(verbose)
@@ -493,8 +517,9 @@ class CheckpointCallback(BaseCallback):
         """
         if self.n_calls % self.save_freq == 0:
             # Generate checkpoint filename
-            checkpoint_num = self.n_calls // self.save_freq
-            path = os.path.join(self.save_path, f"{self.name_prefix}_{self.n_calls}_steps.zip")
+            # checkpoint_num = self.n_calls // self.save_freq # Unused
+            path = os.path.join(self.save_path, 
+                                f"{self.name_prefix}_{self.n_calls}_steps.zip")
             
             # Save the model
             self.model.save(path)
@@ -513,7 +538,8 @@ class CheckpointCallback(BaseCallback):
         try:
             # Get all checkpoint files
             checkpoints = [f for f in os.listdir(self.save_path) 
-                           if f.startswith(self.name_prefix) and f.endswith("_steps.zip")]
+                           if f.startswith(self.name_prefix) and \
+                           f.endswith("_steps.zip")]
             
             # Sort by timestep number (extracted from filename)
             checkpoints.sort(key=lambda f: int(f.split('_')[-2]))
@@ -522,7 +548,8 @@ class CheckpointCallback(BaseCallback):
             if len(checkpoints) > self.keep_checkpoints:
                 num_to_delete = len(checkpoints) - self.keep_checkpoints
                 for i in range(num_to_delete):
-                    file_to_delete = os.path.join(self.save_path, checkpoints[i])
+                    file_to_delete = os.path.join(self.save_path, 
+                                                checkpoints[i])
                     os.remove(file_to_delete)
                     if self.verbose > 1:
                         logger.debug(f"Removed old checkpoint: {file_to_delete}")
@@ -530,6 +557,7 @@ class CheckpointCallback(BaseCallback):
             logger.error(f"Error cleaning up checkpoints: {e}")
 
 
+# Modified get_callback_list to accept curriculum params
 def get_callback_list(
     eval_env: Optional[Union[gym.Env, VecEnv]] = None,
     log_dir: str = "./logs",
@@ -540,11 +568,15 @@ def get_callback_list(
     resource_check_freq: int = 1000,
     metrics_log_freq: int = 1000,
     early_stopping_patience: int = 0,
-    custom_callbacks: Optional[List[BaseCallback]] = None
+    custom_callbacks: Optional[List[BaseCallback]] = None,
+    checkpoint_save_path: str = "./checkpoints", # Added argument
+    model_name: str = "rl_model", # Added argument
+    target_transaction_fee: float = 0.001, # Added argument for curriculum
+    curriculum_duration_fraction: float = 0.5 # Added argument for curriculum
 ) -> CallbackList:
     """
-    Create a list of callbacks for training.
-    
+    Assemble a list of callbacks for training.
+
     Args:
         eval_env: Environment for evaluation
         log_dir: Directory for logs and models
@@ -552,30 +584,51 @@ def get_callback_list(
         n_eval_episodes: Number of evaluation episodes
         save_freq: Checkpoint save frequency
         keep_checkpoints: Number of checkpoints to keep
-        resource_check_freq: Resource check frequency
-        metrics_log_freq: Trading metrics log frequency
+        resource_check_freq: Frequency for resource checks
+        metrics_log_freq: Frequency for logging trading metrics
         early_stopping_patience: Patience for early stopping
         custom_callbacks: List of additional custom callbacks
-    
+        checkpoint_save_path: Directory to save checkpoints
+        model_name: Name prefix for checkpoint files
+        target_transaction_fee: Target fee for curriculum learning
+        curriculum_duration_fraction: Duration fraction for curriculum
+
     Returns:
-        CallbackList containing all specified callbacks
+        CallbackList object
     """
     callbacks = []
     
-    # Checkpoint callback
-    checkpoint_path = os.path.join(log_dir, "checkpoints")
+    # --- Add Curriculum Callback --- #
+    if target_transaction_fee > 0:  # Only add if curriculum is intended
+        callbacks.append(CurriculumCallback(
+            target_fee=target_transaction_fee,
+            curriculum_duration_fraction=curriculum_duration_fraction,
+            verbose=1
+        ))
+        logger.info(f"Added CurriculumCallback for transaction fee "
+                    f"scheduling to {target_transaction_fee:.6f}")
+    else:
+        logger.info("Target transaction fee is 0, skipping CurriculumCallback.")
+
+    # --- Standard Callbacks --- #
+
+    # Checkpoint callback (using provided path and name)
+    # Checkpoint path is now directly passed
     callbacks.append(CheckpointCallback(
         save_freq=save_freq,
-        save_path=checkpoint_path,
+        save_path=checkpoint_save_path, # Use the provided path
+        name_prefix=model_name,         # Use the provided name prefix
         keep_checkpoints=keep_checkpoints,
         verbose=1
     ))
     
     # Resource monitor callback
-    callbacks.append(ResourceMonitorCallback(check_freq=resource_check_freq, verbose=1))
+    callbacks.append(ResourceMonitorCallback(check_freq=resource_check_freq, 
+                                         verbose=1))
     
     # Trading metrics callback
-    callbacks.append(TradingMetricsCallback(log_freq=metrics_log_freq, verbose=1, log_dir=log_dir))
+    callbacks.append(TradingMetricsCallback(log_freq=metrics_log_freq, 
+                                        verbose=1, log_dir=log_dir))
     
     # Evaluation callback (includes best model saving and early stopping)
     if eval_env is not None:
@@ -598,300 +651,113 @@ def get_callback_list(
         
     return CallbackList(callbacks)
 
+
 # TensorboardCallback moved from train_dqn.py
+
 class TensorboardCallback(BaseCallback):
     """
-    Custom callback for tracking metrics.
-    This callback tracks detailed metrics about trading performance and logs them to TensorBoard.
+    Custom callback for logging detailed trading metrics to TensorBoard.
+    Relies on metrics being present in the `info` dictionary returned by env.step().
+    It expects the standard `Monitor` wrapper info ('r', 'l', 't') and potentially
+    custom metrics added by other wrappers (e.g., 'wrapper_*').
     """
-    
-    def __init__(self, verbose=0, model_name=None, debug_frequency=250):
-        """Initialize the callback with options for logging frequency and model name"""
-        super(TensorboardCallback, self).__init__(verbose)
-        self.debug_frequency = debug_frequency
-        self.model_name = model_name if model_name else "model"
-        
-        # Initialize metrics
-        self.episode_count = 0
-        self.trade_count = 0
-        self.last_trades = deque(maxlen=100)  # Track last 100 trades for analysis
-        self.portfolio_values = []
-        
-        # Action tracking
-        self.action_counts = {"sell": 0, "hold": 0, "buy": 0}
-        self.episode_action_counts = {0: 0, 1: 0, 2: 0} # Per episode tracking
-        self.consecutive_holds = 0
-        self.max_consecutive_holds = 0
-        self.hold_action_frequency = 0.0
-        
-        # Hold metrics tracking
-        self.hold_durations = []  # List to track holding periods
-        self.current_hold_duration = 0
-        self.hold_histogram = {i: 0 for i in range(0, 21)}  # For holding periods 0-20+
-        
-        # Force sell tracking
-        self.forced_sells = 0
-        
-        # Portfolio metrics
-        self.initial_portfolio = None
-        self.max_portfolio = 0.0
-        self.min_portfolio = float('inf')
-        
-        # Oscillation metrics
-        self.oscillation_counts = 0
-        self.actions_sequence = []  # Track sequence of actions
-        
-        # Extra metrics for hold analysis
-        self.hold_penalties = []
-        self.average_hold_penalty = 0.0
-        self.total_holds = 0
-        self.hold_ratio = 0.0
-        
-        logger.info("TensorboardCallback initialized")
-    
-    def _on_step(self) -> bool:
-        """
-        Log metrics on each step.
-        This is called at every step of the environment.
-        """
-        # Skip processing if we don't have the model yet
-        if self.model is None:
-            return True
-        
-        # Extract information from the environment
-        # Cast from VecEnv wrapper if needed
-        if hasattr(self.model.get_env(), 'envs'):
-            env = self.model.get_env().envs[0]
-        else:
-            env = self.model.get_env()
-            
-        # Extract wrapper env if available
-        if hasattr(env, 'env'):
-            env = env.env
-            
-        # Unwrap to get the base environment and any wrapper class
-        safe_wrapper = None
-        base_env = None
-        current_env = env
-        
-        # Find the SafeTradingEnvWrapper and base environment
-        while hasattr(current_env, 'env'):
-            if isinstance(current_env, SafeTradingEnvWrapper):
-                safe_wrapper = current_env
-            current_env = current_env.env
-            if not hasattr(current_env, 'env'):
-                base_env = current_env
-                break
-        
-        # Get information from SafeTradingEnvWrapper if available
-        if safe_wrapper is not None:
-            hold_penalty = 0.0
-            if hasattr(safe_wrapper, 'consecutive_holds'):
-                self.consecutive_holds = safe_wrapper.consecutive_holds
-                self.max_consecutive_holds = max(self.max_consecutive_holds, self.consecutive_holds)
-                
-                # Track hold penalties
-                if self.consecutive_holds > 0:
-                    # Calculate estimated penalty
-                    base_penalty = 0.8  # From the wrapper
-                    if self.consecutive_holds > 3:
-                        additional = min((self.consecutive_holds - 3) * 0.1, 10.0)
-                        hold_penalty = base_penalty + additional
-                    else:
-                        hold_penalty = base_penalty
-                    
-                    self.hold_penalties.append(hold_penalty)
-                    self.average_hold_penalty = sum(self.hold_penalties) / len(self.hold_penalties)
-            
-            # Track action distribution
-            if hasattr(safe_wrapper, 'action_counts'):
-                self.action_counts["sell"] = safe_wrapper.action_counts.get(0, 0)
-                self.action_counts["hold"] = safe_wrapper.action_counts.get(1, 0)
-                self.action_counts["buy"] = safe_wrapper.action_counts.get(2, 0)
-                
-                total_actions = sum(self.action_counts.values())
-                if total_actions > 0:
-                    self.hold_action_frequency = self.action_counts["hold"] / total_actions
-                    self.hold_ratio = self.action_counts["hold"] / max(1, self.action_counts["sell"] + self.action_counts["buy"])
-                    
-            # Track oscillation counts
-            if hasattr(safe_wrapper, 'oscillation_count'):
-                self.oscillation_counts = safe_wrapper.oscillation_count
-                
-            # Track action sequence
-            if hasattr(safe_wrapper, 'action_history') and len(safe_wrapper.action_history) > 0:
-                self.actions_sequence = safe_wrapper.action_history[-20:]  # Last 20 actions
-        
-        # Extract information from base environment
-        if base_env is not None:
-            if hasattr(base_env, 'holding_counter'):
-                self.current_hold_duration = base_env.holding_counter
-            
-            # Track forced sells
-            if hasattr(base_env, 'forced_sells'):
-                self.forced_sells = base_env.forced_sells
-                
-            # Update hold duration histogram
-            if self.current_hold_duration > 0:
-                bucket = min(self.current_hold_duration, 20)  # Cap at 20+
-                self.hold_histogram[bucket] = self.hold_histogram.get(bucket, 0) + 1
-                
-            # When not holding (hold_counter is 0), we just completed a holding period
-            if self.current_hold_duration == 0 and hasattr(self, 'last_hold_duration') and self.last_hold_duration > 0:
-                self.hold_durations.append(self.last_hold_duration)
-                self.last_hold_duration = 0
-            elif self.current_hold_duration > 0:
-                self.last_hold_duration = self.current_hold_duration
-        
-        # Log to TensorBoard on regular intervals
-        if self.num_timesteps % self.debug_frequency == 0 and self.verbose > 0 and self.logger:
-            # Log standard metrics
-            self.logger.record("environment/trade_count", self.trade_count)
-            self.logger.record("environment/episode_count", self.episode_count)
-            
-            # Portfolio metrics
-            if hasattr(base_env, 'portfolio_value'):
-                portfolio_value = base_env.portfolio_value
-                self.portfolio_values.append(portfolio_value)
-                
-                # Initialize initial portfolio if not set
-                if self.initial_portfolio is None:
-                    self.initial_portfolio = portfolio_value
-                    
-                # Update min/max portfolio values
-                self.max_portfolio = max(self.max_portfolio, portfolio_value)
-                self.min_portfolio = min(self.min_portfolio, portfolio_value)
-                
-                # Calculate and log portfolio performance
-                portfolio_growth = (portfolio_value - self.initial_portfolio) / self.initial_portfolio if self.initial_portfolio > 0 else 0
-                self.logger.record("portfolio/value", portfolio_value)
-                self.logger.record("portfolio/growth", portfolio_growth)
-                self.logger.record("portfolio/max_value", self.max_portfolio)
-            
-            # Action distribution
-            self.logger.record("actions/sell_count", self.action_counts["sell"])
-            self.logger.record("actions/hold_count", self.action_counts["hold"])
-            self.logger.record("actions/buy_count", self.action_counts["buy"])
-            self.logger.record("actions/hold_ratio", self.hold_ratio)
-            self.logger.record("actions/hold_frequency", self.hold_action_frequency)
-            
-            # Holding metrics
-            self.logger.record("holding/consecutive_holds", self.consecutive_holds)
-            self.logger.record("holding/max_consecutive_holds", self.max_consecutive_holds)
-            self.logger.record("holding/current_duration", self.current_hold_duration)
-            self.logger.record("holding/average_hold_penalty", self.average_hold_penalty)
-            
-            # Force sell and oscillation metrics
-            self.logger.record("trading/forced_sells", self.forced_sells)
-            self.logger.record("trading/oscillation_count", self.oscillation_counts)
-            
-            # More detailed holding histogram
-            for duration, count in self.hold_histogram.items():
-                self.logger.record(f"holding_histogram/duration_{duration}", count)
-                
-            # Log action sequence pattern (converted to string representation)
-            if len(self.actions_sequence) > 0:
-                action_pattern = ''.join([str(a) for a in self.actions_sequence[-10:]])
-                # Can't log strings directly, so log the pattern as a 'categorical' value
-                # Use modulo to keep the value within a reasonable range for TensorBoard
-                self.logger.record("actions/recent_pattern", hash(action_pattern) % 1000)
-                
-                # Check for problematic patterns like long holds using itertools
-                hold_sequences = [len(list(g)) for k, g in itertools.groupby(self.actions_sequence) if k == 1]
-                if hold_sequences:
-                    self.logger.record("actions/longest_hold_sequence", max(hold_sequences))
-            
-            self.logger.dump(self.num_timesteps)
-        
-        return True
-    
-    def _extract_actions_from_envs(self):
-        """Extract action counts directly from environments"""
-        try:
-            action_counts_updated = False
-            
-            if hasattr(self.training_env, 'envs'):
-                for env_idx, env in enumerate(self.training_env.envs):
-                    # Unroll wrappers to find the right env or wrapper
-                    current_env = env
-                    safe_wrapper = None
-                    while hasattr(current_env, 'env'):
-                        if isinstance(current_env, SafeTradingEnvWrapper):
-                            safe_wrapper = current_env
-                        current_env = current_env.env
-                    base_env = current_env
 
-                    # Try SafeTradingEnvWrapper first
-                    if safe_wrapper and hasattr(safe_wrapper, 'action_counts'):
-                        for action, count in safe_wrapper.action_counts.items():
-                            if action == 0: self.action_counts["sell"] += count
-                            if action == 1: self.action_counts["hold"] += count
-                            if action == 2: self.action_counts["buy"] += count
-                        action_counts_updated = True
-                    # Fallback: try to get last action from base env if available
-                    elif hasattr(base_env, 'last_action') and base_env.last_action is not None:
-                        action = base_env.last_action
-                        if action == 0: self.action_counts["sell"] += 1
-                        if action == 1: self.action_counts["hold"] += 1
-                        if action == 2: self.action_counts["buy"] += 1
-                        action_counts_updated = True
+    def __init__(self, verbose=0, model_name=None, log_freq=250):
+        """
+        Initialize the callback.
+
+        Args:
+            verbose: Verbosity level.
+            model_name: Name of the model for logging clarity.
+            log_freq: Log every N steps.
+        """
+        super().__init__(verbose)
+        self.log_freq = log_freq
+        self.model_name = model_name if model_name else "model"
+        self.episode_count = 0
+        # Keep simple counters/trackers if needed across steps/episodes
+        self.total_trades_episode = 0
+        self.last_portfolio_value = None
+
+    def _on_step(self) -> bool:
+        """Log metrics every log_freq steps using the info dict."""
+        if self.log_freq > 0 and self.n_calls % self.log_freq == 0:
+            if self.logger is None:
+                return True  # No logger configured
+
+            # --- Get info from the first environment (assuming VecEnv) ---
+            if 'infos' not in self.locals or not self.locals['infos']:
+                logger.warning("No 'infos' dictionary found in locals. "
+                             "Cannot log metrics.")
+                return True
             
-            # If we couldn't extract any actions, use the action distribution from the logs
-            if not action_counts_updated:
-                # Get actions directly from episode information
-                if hasattr(self, 'model') and hasattr(self.model, 'ep_info_buffer'):
-                    for info in self.model.ep_info_buffer:
-                        if 'action' in info:
-                            action = info['action']
-                            if action == 0: self.action_counts["sell"] += 1
-                            if action == 1: self.action_counts["hold"] += 1
-                            if action == 2: self.action_counts["buy"] += 1
-                            action_counts_updated = True
-                
-                # If still no actions, use a fallback action history from the observation
-                if not action_counts_updated and hasattr(self, 'locals') and 'obs' in self.locals:
-                    obs = self.locals['obs']
-                    if isinstance(obs, np.ndarray) and obs.shape[-1] > 15:  # Assuming augmented observation includes action history
-                        # The augmented observation has action history one-hot encoded in positions beyond the original observation
-                        # We can try to extract it, but this is implementation-specific
-                        logger.warning("Fallback to extracting actions from observation - may not be accurate")
-                        self.action_counts = {0: 1, 1: 5, 2: 1}  # Set some reasonable defaults based on logs
+            info = self.locals['infos'][0]  # Get info dict for the first env
+
+            # --- Log standard Monitor wrapper info --- 
+            if "episode" in info:
+                ep_info = info["episode"]
+                self.logger.record("rollout/ep_rew_mean", ep_info['r'])
+                self.logger.record("rollout/ep_len_mean", ep_info['l'])
+                self.episode_count += 1  # Increment based on Monitor signal
+                # Reset episode-specific counters
+                self.total_trades_episode = 0
+                self.last_portfolio_value = None
             
-            if action_counts_updated:
-                logger.info(f"Successfully extracted actions: {self.action_counts}")
-            else:
-                logger.warning("Failed to extract actions from any source")
-                
-        except Exception as e:
-            logger.error(f"Error extracting actions from environments: {e}")
-            logger.error(traceback.format_exc())
-    
-    def on_episode_end(self, episode_rewards, episode_lengths, episode_info=None):
-        """Called at the end of an episode"""
-        # Log episode action distribution
-        total_actions = sum(self.episode_action_counts.values())
-        if total_actions > 0:
-            episode_action_table = "Episode Action Distribution:\n"
-            episode_action_table += "-" * 40 + "\n"
-            episode_action_table += "| Action | Count | Percentage |\n"
-            episode_action_table += "-" * 40 + "\n"
+            self.logger.record("rollout/episode_count", self.episode_count)
+
+            # --- Log metrics directly from the info dictionary --- 
+            # Keys should be added by TradingEnvironment or wrappers
+            loggable_metrics = [
+                # From TradingEnvironment._get_info()
+                'price', 'balance', 'shares_held', 'asset_value', 
+                'portfolio_value', 'total_trades', 'total_buys', 
+                'total_sells', 'total_holds', 'drawdown', 'cash_ratio',
+                'returns_mean', 'returns_std', 'sharpe_ratio',
+                # From SafeTradingEnvWrapper (prefixed)
+                'wrapper_consecutive_holds', 'wrapper_oscillation_count',
+                'wrapper_current_cooldown', 'wrapper_sharpe_ratio',
+                'wrapper_max_drawdown', 'wrapper_portfolio_growth_rate',
+                'wrapper_successful_trade_streak', 'wrapper_forced_actions',
+                'wrapper_cooldown_violations'
+            ]
+
+            for key in loggable_metrics:
+                if key in info:
+                    # Use appropriate prefixes for TensorBoard readability
+                    if key.startswith('wrapper_'):
+                        tb_key = f"wrapper/{key.replace('wrapper_', '')}"
+                    elif key in ['price', 'balance', 'shares_held', 
+                                 'asset_value', 'portfolio_value', 'cash_ratio']:
+                        tb_key = f"account/{key}"
+                    elif key.startswith('returns') or key in \
+                         ['sharpe_ratio', 'drawdown']:
+                        tb_key = f"performance/{key}"
+                    else:
+                        tb_key = f"trading/{key}"
+                    
+                    self.logger.record(tb_key, info[key])
+                # else: # Optional: Warn if expected key is missing
+                #     logger.debug(f"Metric '{key}' not found in info dict "
+                #                  f"at step {self.n_calls}")
             
-            for action_name, action_id in {"Sell": 0, "Hold": 1, "Buy": 2}.items():
-                count = self.episode_action_counts.get(action_id, 0)
-                percentage = (count / max(1, total_actions)) * 100
-                episode_action_table += f"| {action_name:<6} | {count:>5} | {percentage:>10.1f}% |\n"
-            
-            episode_action_table += "-" * 40
-            logger.info(episode_action_table)
-            
-            # Reset episode action counts
-            self.episode_action_counts = {0: 0, 1: 0, 2: 0}
-        
-        # Call parent method - ensure proper handling of episode end logic
-        if hasattr(super(), 'on_episode_end'):
-            super().on_episode_end(episode_rewards, episode_lengths, episode_info)
-        
-        self.episode_count += 1 # Increment episode count
+            # --- Calculate and Log Custom/Derived Metrics --- 
+            # Example: Trade count for the current episode (if available)
+            if 'total_trades' in info:
+                self.total_trades_episode = info['total_trades']
+            self.logger.record("trading/ep_trade_count", 
+                               self.total_trades_episode)
+
+            # Example: Step reward
+            if 'rewards' in self.locals:
+                step_reward = self.locals['rewards'][0]
+                self.logger.record("rollout/step_reward", step_reward)
+
+            self.logger.dump(step=self.num_timesteps)
+
+        return True
+
+    # Remove _extract_actions_from_envs and on_episode_end as we now
+    # rely on info dict and Monitor wrapper signals
 
 # ResourceCheckCallback moved from train_dqn.py
 # NOTE: This class is duplicated. Removing this one.
@@ -1004,3 +870,94 @@ class TensorboardCallback(BaseCallback):
 #                     logger.warning(f"Error checking GPU memory: {e}")
 #
 #         return True 
+
+# --- NEW CURRICULUM CALLBACK --- #
+
+
+class CurriculumCallback(BaseCallback):
+    """
+    Callback to implement curriculum learning by gradually increasing a parameter.
+    Currently designed to schedule the transaction fee.
+    
+    Args:
+        target_fee (float): The final target transaction fee.
+        curriculum_duration_fraction (float): Fraction of total timesteps over 
+                                          which to increase the fee.
+        verbose (int): Verbosity level.
+    """
+    def __init__(
+        self, 
+        target_fee: float,
+        curriculum_duration_fraction: float = 0.5, 
+        verbose: int = 0
+    ):
+        super().__init__(verbose)
+        self.target_fee = target_fee
+        self.curriculum_duration_fraction = curriculum_duration_fraction
+        self.curriculum_end_step = None
+        self.last_logged_fee = -1.0
+
+    def _on_training_start(self) -> None:
+        """Calculate the end step for the curriculum."""
+        total_timesteps = self.locals['total_timesteps']
+        self.curriculum_end_step = int(total_timesteps * \
+                                     self.curriculum_duration_fraction)
+        if self.verbose > 0:
+            logger.info(f"Curriculum Learning: Transaction fee will increase "
+                        f"from 0.0 to {self.target_fee:.6f} over "
+                        f"{self.curriculum_end_step} steps.")
+        # Initialize fee to 0 in the environment
+        self.training_env.set_attr('current_transaction_fee', 0.0)
+
+    def _on_step(self) -> bool:
+        """
+        Update the transaction fee in the environment based on training progress.
+        """
+        if self.curriculum_end_step is None:
+            logger.warning("Curriculum end step not set. "
+                         "Training may not have started correctly.")
+            return True
+        
+        current_step = self.num_timesteps
+        current_fee_target = 0.0
+        
+        if current_step < self.curriculum_end_step:
+            # Linearly interpolate the fee
+            progress = current_step / self.curriculum_end_step
+            current_fee_target = self.target_fee * progress
+        else:
+            # Curriculum finished, use target fee
+            current_fee_target = self.target_fee
+        
+        # Get the current fee from the first environment using get_attr
+        try:
+            # get_attr returns a list, one item per env
+            env_current_fees = self.training_env.get_attr('current_transaction_fee')
+            env_current_fee = env_current_fees[0] if env_current_fees else -1.0
+        except AttributeError:
+             # Handle cases where the attribute might not exist yet (shouldn't happen after _on_training_start)
+             env_current_fee = -1.0
+             logger.warning("Could not retrieve 'current_transaction_fee' via get_attr.")
+
+        # Check if the fee has actually changed significantly enough to warrant 
+        # logging/setting
+        if abs(current_fee_target - env_current_fee) > 1e-9:
+            self.training_env.set_attr('current_transaction_fee', current_fee_target)
+             
+            # Log the change periodically or when it changes significantly
+            if self.verbose > 1 and \
+               abs(current_fee_target - self.last_logged_fee) > self.target_fee / 10:
+                logger.info(f"Step {current_step}: Curriculum Fee set to "
+                           f"{current_fee_target:.6f}")
+                self.last_logged_fee = current_fee_target
+                 
+        # Set final fee explicitly and log once
+        if current_step == self.curriculum_end_step and self.verbose > 0:
+            self.training_env.set_attr('current_transaction_fee', self.target_fee)
+            logger.info(f"Step {current_step}: Curriculum finished. Fee fixed at "
+                        f"{self.target_fee:.6f}")
+            self.last_logged_fee = self.target_fee
+
+        return True
+
+# --- END NEW CURRICULUM CALLBACK --- # 

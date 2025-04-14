@@ -5,12 +5,10 @@ This module implements a cryptocurrency trading environment
 compatible with the OpenAI Gym interface.
 """
 
-import os
-import gym
+from gymnasium import Env, spaces
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Union, Optional, Any
-from gym import spaces
 import matplotlib.pyplot as plt
 import logging
 
@@ -18,7 +16,7 @@ import logging
 logger = logging.getLogger("rl_agent.environment")
 
 
-class TradingEnvironment(gym.Env):
+class TradingEnvironment(Env):
     """
     A cryptocurrency trading environment for reinforcement learning.
     
@@ -41,6 +39,7 @@ class TradingEnvironment(gym.Env):
         max_position: float = 1.0,
         max_steps: Optional[int] = None,
         random_start: bool = True,
+        render_mode: Optional[str] = None,
     ):
         """
         Initialize the trading environment.
@@ -56,6 +55,7 @@ class TradingEnvironment(gym.Env):
             max_position: Maximum position size as a fraction of balance
             max_steps: Maximum number of steps in an episode
             random_start: Start from a random position in the data
+            render_mode: Gymnasium render mode ('human', 'rgb_array', None)
         """
         super(TradingEnvironment, self).__init__()
         
@@ -63,23 +63,25 @@ class TradingEnvironment(gym.Env):
         self.data = data.copy()
         self.features = features or ["close", "volume", "open", "high", "low"]
         self.initial_balance = initial_balance
-        self.transaction_fee = transaction_fee
+        self.transaction_fee = transaction_fee  # Store the original target fee
         self.reward_scaling = reward_scaling
         self.window_size = window_size
         self.max_position = max_position
         self.sequence_length = sequence_length
         self.random_start = random_start
+        self.render_mode = render_mode
         
         # Data preprocessing
         for feature in self.features:
             if feature not in self.data.columns:
-                raise ValueError(f"Feature '{feature}' not found in data columns: {data.columns.tolist()}")
+                raise ValueError(f"Feature '{feature}' not found in data columns: "
+                               f"{data.columns.tolist()}")
         
         # Define action and observation spaces
         self.action_space = spaces.Discrete(3)  # 0: Sell, 1: Hold, 2: Buy
         
         # Observation space: features + balance + position
-        feature_space = len(self.features) * self.sequence_length  # Historical feature data
+        feature_space = len(self.features) * self.sequence_length  # Historical features
         account_space = 2  # Cash balance and asset position
         total_space = feature_space + account_space
         
@@ -94,10 +96,12 @@ class TradingEnvironment(gym.Env):
         if max_steps is None:
             self.max_steps = len(self.data) - self.sequence_length - 1
         else:
-            self.max_steps = min(max_steps, len(self.data) - self.sequence_length - 1)
+            self.max_steps = min(max_steps, 
+                                 len(self.data) - self.sequence_length - 1)
         
         logger.info(f"Created TradingEnvironment with {len(self.data)} data points, "
-                   f"{len(self.features)} features, and sequence length {self.sequence_length}")
+                   f"{len(self.features)} features, and sequence length "
+                   f"{self.sequence_length}")
         
         # Initialize state
         self.reset()
@@ -117,7 +121,9 @@ class TradingEnvironment(gym.Env):
         
         # Reset the position in the data
         if self.random_start:
-            self.current_step = np.random.randint(self.sequence_length, len(self.data) - self.max_steps)
+            self.current_step = np.random.randint(
+                self.sequence_length, len(self.data) - self.max_steps
+            )
             logger.debug(f"Starting from random position: {self.current_step}")
         else:
             self.current_step = self.sequence_length
@@ -178,12 +184,14 @@ class TradingEnvironment(gym.Env):
         self._update_portfolio_value()
         
         # Update max portfolio value for drawdown calculation
-        self.max_portfolio_value = max(self.max_portfolio_value, self.portfolio_value)
+        self.max_portfolio_value = max(self.max_portfolio_value, 
+                                       self.portfolio_value)
         
         # Calculate drawdown
         drawdown = 0
         if self.max_portfolio_value > 0:
-            drawdown = (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value
+            drawdown = (self.max_portfolio_value - self.portfolio_value) \
+                       / self.max_portfolio_value
         self.max_drawdown = max(self.max_drawdown, drawdown)
         
         # Store portfolio value history
@@ -199,7 +207,9 @@ class TradingEnvironment(gym.Env):
         # Get info
         info = self._get_info()
         
-        return observation, reward, done, truncated, info
+        # Gymnasium expects 5 return values: obs, reward, terminated, truncated, info
+        terminated = done
+        return observation, reward, terminated, truncated, info
     
     def _take_action(self, action):
         """
@@ -223,7 +233,7 @@ class TradingEnvironment(gym.Env):
             if self.shares_held > 0:
                 # Calculate transaction fee
                 sell_amount = self.shares_held * current_price
-                fee = sell_amount * self.transaction_fee
+                fee = sell_amount * self.transaction_fee # Use fixed fee
                 
                 # Update balance and shares
                 self.balance += sell_amount - fee
@@ -241,8 +251,9 @@ class TradingEnvironment(gym.Env):
                 self.trades.append(sell_info)
                 self.sell_prices.append(current_price)
                 
-                logger.debug(f"Sold {self.shares_held:.6f} shares at {current_price:.2f} "
-                           f"for {sell_amount:.2f} (fee: {fee:.2f})")
+                logger.debug(f"Sold {self.shares_held:.6f} shares at "
+                           f"{current_price:.2f} for {sell_amount:.2f} "
+                           f"(fee: {fee:.2f})")
                 
                 self.shares_held = 0
                 self.asset_value = 0
@@ -250,13 +261,13 @@ class TradingEnvironment(gym.Env):
         elif action == 2:  # Buy
             if self.balance > 0:
                 # Calculate max shares we can buy
-                max_buyable_shares = self.balance * self.max_position / (
-                    current_price * (1 + self.transaction_fee))
+                max_buyable_shares = self.balance * self.max_position / \
+                    (current_price * (1 + self.transaction_fee)) # Use fixed fee
                 
                 # Buy shares (using max_position of balance)
                 self.shares_held = max_buyable_shares
                 buy_amount = self.shares_held * current_price
-                fee = buy_amount * self.transaction_fee
+                fee = buy_amount * self.transaction_fee  # Use fixed fee
                 
                 # Update balance and asset value
                 self.balance -= (buy_amount + fee)
@@ -278,8 +289,9 @@ class TradingEnvironment(gym.Env):
                 }
                 self.trades.append(buy_info)
                 
-                logger.debug(f"Bought {self.shares_held:.6f} shares at {current_price:.2f} "
-                           f"for {buy_amount:.2f} (fee: {fee:.2f})")
+                logger.debug(f"Bought {self.shares_held:.6f} shares at "
+                           f"{current_price:.2f} for {buy_amount:.2f} "
+                           f"(fee: {fee:.2f})")
     
     def _update_portfolio_value(self):
         """Update the portfolio value based on current balance and asset prices."""
@@ -308,17 +320,20 @@ class TradingEnvironment(gym.Env):
             reward += idle_penalty
         
         # Encourage selling near peak or buying near bottom for better trading
-        if action == 0 and len(self.sell_prices) > 0 and self.last_buy_price is not None:
+        if action == 0 and len(self.sell_prices) > 0 and \
+           self.last_buy_price is not None:
             # Reward for selling at a profit
             last_sell_price = self.sell_prices[-1]
-            buy_sell_ratio = (last_sell_price - self.last_buy_price) / self.last_buy_price
+            buy_sell_ratio = (last_sell_price - self.last_buy_price) / \
+                           self.last_buy_price
             if buy_sell_ratio > 0:
                 profit_bonus = buy_sell_ratio * 1.0 * self.reward_scaling
                 reward += profit_bonus
         
         # Penalize excessive drawdown
         if self.max_drawdown > 0.3:  # Penalize drawdowns over 30%
-            drawdown_penalty = (self.max_drawdown - 0.3) * 10 * self.reward_scaling
+            drawdown_penalty = (self.max_drawdown - 0.3) * 10 * \
+                             self.reward_scaling
             reward -= drawdown_penalty
         
         return reward
@@ -343,7 +358,8 @@ class TradingEnvironment(gym.Env):
         # Ensure we have exactly sequence_length rows for feature data
         if len(historical_data) < self.sequence_length:
             # Pad with the first row if needed
-            padding = pd.DataFrame([historical_data.iloc[0]] * (self.sequence_length - len(historical_data)))
+            padding = pd.DataFrame([historical_data.iloc[0]] * 
+                                 (self.sequence_length - len(historical_data)))
             historical_data = pd.concat([padding, historical_data])
         
         # Extract features and flatten
@@ -354,7 +370,9 @@ class TradingEnvironment(gym.Env):
         # Add account information
         account_info = [
             self.balance / self.initial_balance,  # Normalized balance
-            self.shares_held * self.data['close'].iloc[self.current_step] / self.initial_balance  # Normalized position
+            # Normalized position value
+            self.shares_held * self.data['close'].iloc[self.current_step] / \
+                self.initial_balance  
         ]
         
         # Combine features and account info
@@ -385,17 +403,21 @@ class TradingEnvironment(gym.Env):
             'total_holds': self.total_holds,
             'drawdown': self.max_drawdown,
             'initial_balance': self.initial_balance,
-            'cash_ratio': self.balance / self.portfolio_value if self.portfolio_value > 0 else 1.0,
+            'cash_ratio': self.balance / self.portfolio_value 
+                          if self.portfolio_value > 0 else 1.0,
         }
         
         # Calculate returns if we have enough history
         if len(self.portfolio_values) > 1:
-            returns = np.diff(self.portfolio_values) / np.array(self.portfolio_values[:-1])
+            returns = np.diff(self.portfolio_values) / \
+                      np.array(self.portfolio_values[:-1])
             if len(returns) > 0:
                 info['returns_mean'] = float(np.mean(returns))
                 info['returns_std'] = float(np.std(returns))
                 if info['returns_std'] > 0:
-                    info['sharpe_ratio'] = float(info['returns_mean'] / info['returns_std'] * np.sqrt(252))
+                    info['sharpe_ratio'] = float(info['returns_mean'] / \
+                                              info['returns_std'] * \
+                                              np.sqrt(252))
                 else:
                     info['sharpe_ratio'] = 0.0
             else:
@@ -405,106 +427,72 @@ class TradingEnvironment(gym.Env):
         
         return info
     
-    def render(self, mode='human'):
+    def render(self):
         """
-        Render the environment.
-        
-        Args:
-            mode: Rendering mode ('human' or 'rgb_array')
+        Render the environment (human mode or rgb_array).
+        """
+        if self.render_mode == 'human':
+            # Implement human-readable rendering (e.g., print status)
+            print(f"Step: {self.current_step}, "
+                  f"Portfolio: {self.portfolio_value:.2f}, "
+                  f"Balance: {self.balance:.2f}, "
+                  f"Shares: {self.shares_held:.4f}")
+            # Potentially add plotting for human mode
+            return None  # Return None for human mode
+
+        elif self.render_mode == 'rgb_array':
+            # --- Basic RGB Array Rendering --- 
+            # Create a simple plot and return as numpy array
+            fig, ax = plt.subplots(figsize=(8, 4))
+            start = max(0, self.current_step - self.window_size)
+            end = self.current_step + 1
             
-        Returns:
-            Rendered image if mode='rgb_array'
-        """
-        if mode not in ['human', 'rgb_array']:
-            raise ValueError(f"Unsupported render mode: {mode}")
-        
-        # Get a window of data
-        end_idx = self.current_step
-        start_idx = max(0, end_idx - self.window_size + 1)
-        window_data = self.data.iloc[start_idx:end_idx+1]
-        
-        # Create figure
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1]})
-        
-        # Plot price
-        ax1.plot(window_data.index, window_data['close'], label='Close Price')
-        
-        # Plot buy/sell points within the window
-        for trade in self.trades:
-            if trade['step'] >= start_idx and trade['step'] <= end_idx:
-                idx = self.data.index[trade['step']]
-                if trade['type'] == 'buy':
-                    ax1.scatter(idx, trade['price'], color='green', marker='^', s=100, label='Buy' if 'Buy' not in ax1.get_legend_handles_labels()[1] else '')
-                else:  # sell
-                    ax1.scatter(idx, trade['price'], color='red', marker='v', s=100, label='Sell' if 'Sell' not in ax1.get_legend_handles_labels()[1] else '')
-        
-        # Plot portfolio value
-        plot_portfolio_values = self.portfolio_values[-(self.window_size+1):]
-        portfolio_indices = self.data.index[max(0, self.current_step - self.window_size):self.current_step+1]
-        if len(portfolio_indices) == len(plot_portfolio_values):
-            ax2.plot(portfolio_indices, plot_portfolio_values, label='Portfolio Value', color='blue')
-        
-        # Plot balance and asset value
-        balance_history = []
-        asset_value_history = []
-        
-        for i in range(start_idx, end_idx+1):
-            if i == end_idx:
-                balance_history.append(self.balance)
-                asset_value_history.append(self.asset_value)
-            else:
-                # For past steps, estimate from trades
-                relevant_trades = [t for t in self.trades if t['step'] <= i]
-                if relevant_trades:
-                    last_trade = relevant_trades[-1]
-                    balance_history.append(last_trade['balance_after'])
-                    
-                    # Estimate asset value based on last transaction
-                    if last_trade['type'] == 'buy':
-                        shares = last_trade['shares']
-                        price = self.data['close'].iloc[i]
-                        asset_value_history.append(shares * price)
-                    else:  # sell or initial
-                        asset_value_history.append(0)
-                else:
-                    # No trades yet
-                    balance_history.append(self.initial_balance)
-                    asset_value_history.append(0)
-        
-        window_indices = window_data.index
-        if len(window_indices) == len(balance_history):
-            ax3.bar(window_indices, balance_history, label='Cash Balance', color='green', alpha=0.5)
-            ax3.bar(window_indices, asset_value_history, bottom=balance_history, label='Asset Value', color='orange', alpha=0.5)
-        
-        # Add labels and legends
-        ax1.set_title('Price Chart with Trading Actions')
-        ax1.set_ylabel('Price')
-        ax1.legend()
-        ax1.grid(True)
-        
-        ax2.set_title('Portfolio Value')
-        ax2.set_ylabel('Value')
-        ax2.legend()
-        ax2.grid(True)
-        
-        ax3.set_title('Account Breakdown')
-        ax3.set_ylabel('Value')
-        ax3.set_xlabel('Time')
-        ax3.legend()
-        ax3.grid(True)
-        
-        plt.tight_layout()
-        
-        # Show or return the figure
-        if mode == 'human':
-            plt.show()
-            return None
-        elif mode == 'rgb_array':
+            # Plot price
+            ax.plot(
+                self.data.index[start:end],
+                self.data['close'].iloc[start:end],
+                label='Close Price', color='blue'
+            )
+            
+            # Mark trades
+            buy_steps = [t['step'] for t in self.trades if t['type'] == 'buy']
+            sell_steps = [t['step'] for t in self.trades if t['type'] == 'sell']
+            
+            buy_indices = [i for i, step in 
+                           enumerate(self.data.index[start:end]) 
+                           if step in buy_steps]
+            sell_indices = [i for i, step in 
+                            enumerate(self.data.index[start:end]) 
+                            if step in sell_steps]
+            
+            if buy_indices:
+                ax.scatter(
+                     self.data.index[start:end][buy_indices],
+                     self.data['close'].iloc[start:end][buy_indices],
+                     marker='^', color='green', s=100, label='Buy'
+                 )
+            if sell_indices:
+                ax.scatter(
+                    self.data.index[start:end][sell_indices],
+                    self.data['close'].iloc[start:end][sell_indices],
+                    marker='v', color='red', s=100, label='Sell'
+                )
+            
+            ax.set_title(f"Trading Environment - Step {self.current_step}")
+            ax.set_ylabel("Price")
+            ax.legend()
+            ax.grid(True)
+            
+            # Draw figure and convert to RGB array
             fig.canvas.draw()
-            image = np.array(fig.canvas.renderer.buffer_rgba())
-            plt.close(fig)
-            return image
-    
+            rgb_array = np.array(fig.canvas.renderer.buffer_rgba())
+            plt.close(fig)  # Close the plot to avoid display
+            
+            return rgb_array
+        else:
+            # If render_mode is None or unsupported
+            return None  # Or raise an error if preferred
+
     def close(self):
         """Clean up resources."""
         plt.close()

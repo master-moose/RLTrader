@@ -13,7 +13,6 @@ It utilizes the refactored components within the 'rl_agent' package.
 
 import os
 import sys
-import argparse  # Keep argparse import for now, it's used in rl_agent.train
 import logging
 
 # Set project root to path to allow importing rl_agent
@@ -26,8 +25,8 @@ try:
     # Make sure rl_agent and its submodules are importable
     # Adjust based on your final structure if rl_agent is not directly
     # in project root
-    from rl_agent.train import parse_args, run_training
-    from rl_agent.utils import setup_logger, ensure_dir_exists
+    from rl_agent.train import main as run_agent_main
+    from rl_agent.utils import setup_logger
 except ImportError as e:
     print(f"Error importing rl_agent package: {e}")
     print(
@@ -46,25 +45,16 @@ logger = setup_logger(
 
 def main():
     """Main function to parse arguments and run the training process."""
-    # Parse command line arguments using the function from rl_agent.train
-    args = parse_args()
+    # Arguments are parsed within run_agent_main
+    logger.info("Starting main training/evaluation script...")
 
-    # Create necessary directories using the utility function
-    ensure_dir_exists(args.log_dir)
-    ensure_dir_exists(args.checkpoint_dir)
-    # Ensure monitor log dir exists
-    ensure_dir_exists(os.path.join(args.log_dir, "monitor"))
-
-    logger.info("Starting main training script...")
-    logger.info(f"Parsed arguments: {vars(args)}")
-
-    # Initiate the training process using the function from rl_agent.train
+    # Initiate the process using the main function from rl_agent.train
     try:
-        run_training(args)
-        logger.info("Main training script finished successfully.")
-    except Exception as e:
+        run_agent_main()
+        logger.info("Main script finished successfully.")
+                except Exception as e:
         logger.critical(
-            f"An unexpected error occurred in the main training script: {e}",
+            f"An unexpected error occurred in the main script: {e}",
             exc_info=True
         )
         sys.exit(1)

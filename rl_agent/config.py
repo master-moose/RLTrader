@@ -71,6 +71,15 @@ ENV_SETTINGS = {
     "consistency_reward": 0.01,  # Reward for maintaining consistent actions
 }
 
+# --- Constants from dqn_old.py / env_wrappers --- #
+# Define constants used by wrappers and environment logic
+# (These might be better organized or derived from ENV_SETTINGS eventually)
+HOLD_ACTION = 1  # Assuming 0: Sell, 1: Hold, 2: Buy
+TRADE_COOLDOWN_PERIOD = 3 # Default cooldown period (added)
+OSCILLATION_PENALTY = 0.1 # Example penalty
+SAME_PRICE_TRADE_PENALTY = 0.05 # Example penalty
+MAX_TRADE_FREQUENCY = 10 # Example max trades in some window
+
 # Model settings
 MODEL_SETTINGS = {
     # Network architecture
@@ -154,7 +163,9 @@ TENSORBOARD_SETTINGS = {
 }
 
 # Enable GPU if available
-if torch := sys.modules.get("torch"):
+# Corrected torch check
+if "torch" in sys.modules:
+    import torch  # Import torch here
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {DEVICE}")
     if DEVICE == "cuda":

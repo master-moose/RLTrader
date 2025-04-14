@@ -16,6 +16,7 @@ import logging
 import psutil
 import numpy as np
 from typing import Dict, Any, List, Optional, Union, Tuple
+import random
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -559,3 +560,22 @@ def execute_with_retry(
             
             time.sleep(delay)
             delay *= backoff_factor 
+
+
+def set_seeds(seed: int) -> None:
+    """
+    Set random seeds for reproducibility.
+
+    Args:
+        seed: The seed value to use.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    if TORCH_AVAILABLE:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+            # Potentially add these for full determinism (can impact performance)
+            # torch.backends.cudnn.deterministic = True
+            # torch.backends.cudnn.benchmark = False
+    logger.info(f"Set random seed to {seed}") 
