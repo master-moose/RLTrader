@@ -71,7 +71,7 @@ def process_historic_data(input_csv_path, output_dir='data/historic', config_pat
         test_ratio = config.get('test_ratio', 0.15)
         shuffle = config.get('shuffle', False)  # Default to chronological order
         resample = config.get('resample', True)  # Whether to create higher timeframes
-        primary_tf = config.get('primary_tf', '15m')  # Primary timeframe of the input data
+        input_tf = config.get('input_tf', '1m')  # Input timeframe of the data (now defaulting to 1m)
         
         logger.info(f"Processing historic data based on configuration")
     else:
@@ -81,7 +81,7 @@ def process_historic_data(input_csv_path, output_dir='data/historic', config_pat
         test_ratio = 0.15
         shuffle = False
         resample = True
-        primary_tf = '15m'
+        input_tf = '1m'  # Default to 1m timeframe input
         
         logger.info(f"Processing historic data with default settings")
     
@@ -104,7 +104,8 @@ def process_historic_data(input_csv_path, output_dir='data/historic', config_pat
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
             elif np.issubdtype(df['timestamp'].dtype, np.number):
                 # If timestamp is a number (Unix timestamp), convert to datetime
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                # For Unix timestamps in seconds (typical for crypto data)
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
         
         # Set timestamp as index
         df.set_index('timestamp', inplace=True)
@@ -112,65 +113,52 @@ def process_historic_data(input_csv_path, output_dir='data/historic', config_pat
         # Sort by index
         df.sort_index(inplace=True)
         
-        logger.info(f"Loaded data: {len(df)} rows")
+        logger.info(f"Loaded data: {len(df)} rows from {df.index.min()} to {df.index.max()}")
     except Exception as e:
         logger.error(f"Error loading CSV data: {str(e)}")
         sys.exit(1)
     
     # Create dictionary to hold dataframes for different timeframes
     dataset = {}
-    dataset[primary_tf] = df
     
-    # Create higher timeframes if requested
+    # Create all required timeframes through resampling
     if resample:
-        logger.info("Creating higher timeframes through resampling")
+        logger.info("Creating timeframes through resampling")
         
-        # Create 4h dataframe (resample from primary timeframe)
-        if primary_tf == '15m':
-            df_4h = df.resample('4h').agg({
+        # Define resampling function to handle all columns properly
+        def resample_ohlcv(df, timeframe):
+            """Resample OHLCV data to a larger timeframe."""
+            resampled = df.resample(timeframe).agg({
                 'open': 'first',
                 'high': 'max',
                 'low': 'min',
                 'close': 'last',
                 'volume': 'sum'
             })
-            dataset['4h'] = df_4h
             
-            # Create 1d dataframe (resample from primary timeframe)
-            df_1d = df.resample('1D').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            })
-            dataset['1d'] = df_1d
-            
-            logger.info(f"Created dataframes: {primary_tf} ({len(df)} rows), 4h ({len(df_4h)} rows), 1d ({len(df_1d)} rows)")
-        elif primary_tf == '1h':
-            df_4h = df.resample('4h').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            })
-            dataset['4h'] = df_4h
-            
-            # Create 1d dataframe (resample from primary timeframe)
-            df_1d = df.resample('1D').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            })
-            dataset['1d'] = df_1d
-            
-            logger.info(f"Created dataframes: {primary_tf} ({len(df)} rows), 4h ({len(df_4h)} rows), 1d ({len(df_1d)} rows)")
-        elif primary_tf == '1d':
-            logger.info(f"Using only daily timeframe: {primary_tf} ({len(df)} rows)")
-            dataset = {primary_tf: df}
+            # Handle 'trades' column if it exists
+            if 'trades' in df.columns:
+                resampled['trades'] = df['trades'].resample(timeframe).sum()
+                
+            return resampled
+        
+        # Create 15m dataframe (resample from 1m)
+        df_15m = resample_ohlcv(df, '15min')
+        dataset['15m'] = df_15m
+        
+        # Create 4h dataframe
+        df_4h = resample_ohlcv(df, '4h')
+        dataset['4h'] = df_4h
+        
+        # Create 1d dataframe
+        df_1d = resample_ohlcv(df, '1D')
+        dataset['1d'] = df_1d
+        
+        logger.info(f"Created dataframes: 15m ({len(df_15m)} rows), 4h ({len(df_4h)} rows), 1d ({len(df_1d)} rows)")
+    else:
+        # If no resampling, just use the input data with its original timeframe
+        logger.info(f"Using only input timeframe: {input_tf} ({len(df)} rows)")
+        dataset[input_tf] = df
     
     # Add comprehensive set of indicators
     if include_indicators:
@@ -260,45 +248,28 @@ def process_historic_data(input_csv_path, output_dir='data/historic', config_pat
         if len(dataset.keys()) > 1:  # Only if we have multiple timeframes
             logger.info("Calculating advanced multi-timeframe signals...")
             
-            # Create a dictionary of lookforward periods based on primary timeframe
-            if primary_tf == '15m':
-                lookforward_periods = {'15m': 16, '4h': 4, '1d': 1}
-            elif primary_tf == '1h':
-                lookforward_periods = {'1h': 4, '4h': 1, '1d': 1}
-            else:
-                lookforward_periods = {primary_tf: 1}
+            # For 1-minute data converted to higher timeframes, create lookforward periods
+            lookforward_periods = {'15m': 4, '4h': 1, '1d': 1}
                 
             multi_tf_signals = calculate_multi_timeframe_signal(
                 dataset,
-                primary_tf=primary_tf,
+                primary_tf='15m',  # Use 15m as primary timeframe for signals
                 threshold_pct=0.015,  # 1.5% threshold for significant moves
                 lookforward_periods=lookforward_periods
             )
             
             # Replace the price_direction in the primary timeframe with the enhanced version
-            dataset[primary_tf]['price_direction'] = multi_tf_signals
+            dataset['15m']['price_direction'] = multi_tf_signals
             
-            # Create versions for higher timeframes by downsampling
-            if primary_tf == '15m':
-                # 4-hour timeframe (1 4h candle = 16 15m candles)
-                df_4h_indices = list(range(0, len(dataset[primary_tf]), 16))
-                if len(df_4h_indices) <= len(dataset['4h']):
-                    dataset['4h']['price_direction'] = multi_tf_signals.iloc[df_4h_indices].values[:len(dataset['4h'])]
-                
-                # Daily timeframe (1 day candle = 96 15m candles)
-                df_1d_indices = list(range(0, len(dataset[primary_tf]), 96))
-                if len(df_1d_indices) <= len(dataset['1d']):
-                    dataset['1d']['price_direction'] = multi_tf_signals.iloc[df_1d_indices].values[:len(dataset['1d'])]
-            elif primary_tf == '1h':
-                # 4-hour timeframe (1 4h candle = 4 1h candles)
-                df_4h_indices = list(range(0, len(dataset[primary_tf]), 4))
-                if len(df_4h_indices) <= len(dataset['4h']):
-                    dataset['4h']['price_direction'] = multi_tf_signals.iloc[df_4h_indices].values[:len(dataset['4h'])]
-                
-                # Daily timeframe (1 day candle = 24 1h candles)
-                df_1d_indices = list(range(0, len(dataset[primary_tf]), 24))
-                if len(df_1d_indices) <= len(dataset['1d']):
-                    dataset['1d']['price_direction'] = multi_tf_signals.iloc[df_1d_indices].values[:len(dataset['1d'])]
+            # Add signal to 4h timeframe by resampling
+            df_4h_indices = list(range(0, len(multi_tf_signals), 16))  # 16 15-min periods in 4 hours
+            if len(df_4h_indices) <= len(dataset['4h']):
+                dataset['4h']['price_direction'] = multi_tf_signals.iloc[df_4h_indices].values[:len(dataset['4h'])]
+            
+            # Add signal to 1d timeframe by resampling
+            df_1d_indices = list(range(0, len(multi_tf_signals), 96))  # 96 15-min periods in 1 day
+            if len(df_1d_indices) <= len(dataset['1d']):
+                dataset['1d']['price_direction'] = multi_tf_signals.iloc[df_1d_indices].values[:len(dataset['1d'])]
             
             logger.info("Successfully updated price_direction with multi-timeframe signals")
         else:
@@ -392,8 +363,8 @@ def main():
     parser.add_argument("--output_dir", type=str, default="data/historic",
                       help="Directory where the data will be saved (default: data/historic)")
     parser.add_argument("--config", type=str, help="Path to configuration file")
-    parser.add_argument("--primary_tf", type=str, default="15m",
-                      help="Primary timeframe of the input data (default: 15m)")
+    parser.add_argument("--input_tf", type=str, default="1m",
+                      help="Timeframe of the input data (default: 1m)")
     
     args = parser.parse_args()
     
