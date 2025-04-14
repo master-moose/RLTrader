@@ -234,13 +234,13 @@ def process_historic_data(input_csv_path, output_dir='data/historic', config_pat
             df['cmf_20'] = money_flow_volume.rolling(20).sum() / df['volume'].rolling(20).sum()
 
             # Price-derived features (4 features)
-            df['return'] = df['close'].pct_change()
+            df['return'] = df['close'].pct_change(fill_method=None)
             df['log_return'] = np.log(df['close'] / df['close'].shift(1))
             df['high_low_range'] = (df['high'] - df['low']) / df['close']
             df['body_size'] = abs(df['open'] - df['close']) / df['close']
             
             # Clean up NaN values that resulted from rolling windows
-            df.fillna(method='bfill', inplace=True)
+            df.bfill(inplace=True)
             df.fillna(0, inplace=True)
     
     # Generate advanced trading signals using multi-timeframe approach

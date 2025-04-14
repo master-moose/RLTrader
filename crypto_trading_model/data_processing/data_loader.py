@@ -118,7 +118,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         logger.info(f"Missing values found: {missing_values}")
         
         # Forward fill for small gaps
-        df_clean = df_clean.fillna(method='ffill', limit=3)
+        df_clean = df_clean.ffill(limit=3)
         
         # Drop any remaining rows with NaN values
         df_clean = df_clean.dropna()
