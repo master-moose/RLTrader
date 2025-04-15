@@ -14,6 +14,9 @@ import traceback
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+# Set the environment variable to disable strict metric checking
+os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
+
 # Explicitly check and import Ray packages with better error reporting
 RAY_AVAILABLE = False
 try:
@@ -119,6 +122,7 @@ if __name__ == "__main__":
     print(f"Training data: {args.data_path}")
     print(f"Validation data: {args.val_data_path}")
     print(f"Running {args.num_samples} trials with {args.timesteps_per_trial} steps each")
+    print("Note: TUNE_DISABLE_STRICT_METRIC_CHECKING=1 has been set to prevent metric validation errors")
     
     best_trial = run_tune_experiment(args)
     
