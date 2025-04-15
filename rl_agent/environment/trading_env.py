@@ -60,6 +60,7 @@ class TradingEnvironment(Env):
         sharpe_window: int = 20,
         consistency_threshold: int = 3,
         idle_threshold: int = 5,
+        trade_penalty_weight: float = 0.0,
     ):
         """
         Initialize the trading environment.
@@ -97,6 +98,7 @@ class TradingEnvironment(Env):
             sharpe_window: Window size for Sharpe ratio calculation
             consistency_threshold: Minimum consecutive actions before flip is acceptable
             idle_threshold: Number of consecutive holds before applying idle penalty
+            trade_penalty_weight: Weight for trade penalty
         """
         super(TradingEnvironment, self).__init__()
         
@@ -132,6 +134,7 @@ class TradingEnvironment(Env):
         self.sharpe_window = sharpe_window
         self.consistency_threshold = consistency_threshold
         self.idle_threshold = idle_threshold
+        self.trade_penalty_weight = trade_penalty_weight
         
         # Data preprocessing
         for feature in self.features:
@@ -235,6 +238,7 @@ class TradingEnvironment(Env):
             'idle_penalty': 0.0,
             'profit_bonus': 0.0,
             'exploration_bonus': 0.0, # Ensure all potential keys are present
+            'trade_penalty': 0.0, # ADDED
         }
         # --- End cumulative reward component trackers ---
 
@@ -555,10 +559,11 @@ class TradingEnvironment(Env):
             'sharpe_reward': 0.0,
             'fee_penalty': 0.0,
             'benchmark_reward': 0.0,
-            'consistency_penalty': 0.0,
+            # 'consistency_penalty': 0.0, # REMOVED
             'idle_penalty': 0.0,
             'profit_bonus': 0.0,
             'exploration_bonus': 0.0,
+            'trade_penalty': 0.0, # ADDED
             'raw_total': 0.0, # Sum before scaling
             'total_reward': 0.0 # Final scaled reward
         }
@@ -597,14 +602,22 @@ class TradingEnvironment(Env):
         # 5. Benchmark Comparison Reward (Keep commented for now)
         # ... (code omitted)
 
-        # 6. Consistency Penalty (Re-enabled)
-        consistency_penalty = 0.0
-        if action != self.last_action: # Action changed
-             if action == 0 and self.consecutive_buys < self.consistency_threshold: 
-                 consistency_penalty = -1.0
-             elif action == 2 and self.consecutive_sells < self.consistency_threshold: 
-                 consistency_penalty = -1.0
-        reward_components['consistency_penalty'] = consistency_penalty * self.consistency_penalty_weight
+        # 6. Consistency Penalty (DISABLED)
+        # consistency_penalty = 0.0
+        # if action != self.last_action: # Action changed
+        #      if action == 0 and self.consecutive_buys < self.consistency_threshold: 
+        #          consistency_penalty = -1.0
+        #      elif action == 2 and self.consecutive_sells < self.consistency_threshold: 
+        #          consistency_penalty = -1.0
+        # reward_components['consistency_penalty'] = consistency_penalty * self.consistency_penalty_weight
+
+        # --- NEW: 6. Direct Trade Penalty --- #
+        trade_penalty = 0.0
+        # Apply penalty if a buy (2) or sell (0) occurred AND a fee was paid (indicating success)
+        if action in [0, 2] and fee_paid_this_step > 1e-9: 
+            trade_penalty = -1.0
+        reward_components['trade_penalty'] = trade_penalty * self.trade_penalty_weight
+        # --- END NEW --- #
 
         # 7. Idle Penalty (Re-enabled)
         idle_penalty = 0.0

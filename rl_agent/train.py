@@ -222,6 +222,10 @@ def parse_args():
         "--exploration_bonus_weight", type=float, default=0.1,
         help="Weight for exploration bonus (range: 0.0-1.0)"
     )
+    rewards.add_argument(
+        "--trade_penalty_weight", type=float, default=0.0,
+        help="Weight for direct penalty per trade (range: 0.0-10.0)"
+    )
     
     # --- Additional Reward Parameters --- #
     rewards.add_argument(
@@ -491,7 +495,7 @@ def create_env(
         "exploration_bonus_weight", "sharpe_window",
         "consistency_threshold", "idle_threshold",
         "exploration_start", "exploration_end",
-        "exploration_decay_rate"
+        "exploration_decay_rate", "trade_penalty_weight"
     ]
 
     # Add them to env_kwargs ONLY if they exist in the config dict
