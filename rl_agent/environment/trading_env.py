@@ -220,7 +220,8 @@ class TradingEnvironment(Env):
         self.last_action = 1 # Assume initial action is Hold (or None?) - Let's use 1 (Hold)
         self.exploration_bonus_value = self.exploration_start # Reset exploration bonus
         self.total_fees_paid = 0.0 # Reset total fees
-        
+        self.failed_buys = 0 # Initialize failed buy counter
+
         # Steps taken within the current episode
         self.episode_step = 0
         
@@ -273,6 +274,12 @@ class TradingEnvironment(Env):
             drawdown = (self.max_portfolio_value - self.portfolio_value) \
                        / self.max_portfolio_value
         self.max_drawdown = max(self.max_drawdown, drawdown)
+
+        # --- Add Early Stopping for High Drawdown ---
+        if self.max_drawdown > 0.90: # Terminate if drawdown exceeds 90%
+            terminated = True
+            logger.info(f"Episode terminated early due to drawdown > 90% ({self.max_drawdown:.2%})")
+        # --------------------------------------------
         
         # Store portfolio value history
         self.portfolio_values.append(self.portfolio_value)
@@ -327,14 +334,15 @@ class TradingEnvironment(Env):
         current_price = self.data['close'].iloc[self.current_step]
         fee_paid_this_step = 0.0 # Track fee for this specific action
         
-        # Record action counts (basic)
-        self.total_trades += (action != 1)  # Count non-hold actions as trades
+        # Record action counts (basic) - Adjust Buy/Trade count logic below
+        # self.total_trades += (action != 1)  # Count non-hold actions as trades
         if action == 0:
             self.total_sells += 1
+            self.total_trades += 1 # Increment trade count for successful sell
         elif action == 1:
             self.total_holds += 1
-        elif action == 2:
-            self.total_buys += 1
+        # elif action == 2: # Defer Buy/Trade count increment
+        #     self.total_buys += 1
         
         # Update consecutive action counts
         if action == self.last_action:
@@ -402,6 +410,11 @@ class TradingEnvironment(Env):
                 
                 # Ensure we don't try to buy zero shares (if balance is tiny)
                 if shares_to_buy > 1e-9: # Use a small threshold 
+                    # --- Buy Succeeded ---
+                    # Increment trade/buy counts here
+                    self.total_buys += 1
+                    self.total_trades += 1
+
                     # Buy shares
                     self.shares_held = shares_to_buy
                     buy_cost = self.shares_held * current_price
@@ -435,28 +448,24 @@ class TradingEnvironment(Env):
                                f"{current_price:.2f} for {buy_cost:.2f} "
                                f"(fee: {fee:.2f})")
                 else:
+                    # --- Buy Failed ---
+                    self.failed_buys += 1 # Increment failed buy counter
                     # Log if we tried to buy but couldn't afford it
                     logger.debug(f"Step {self.current_step}: Attempted buy with balance "
                                f"{self.balance:.2f}, but calculated shares {shares_to_buy:.8f} "
                                f"was too small. Holding instead.")
                     # Correct action tracking if buy fails
-                    if self.last_action == 2: # If we just logged a buy
-                        self.consecutive_buys -= 1 # Decrement buy
-                        if self.consecutive_buys == 0: # If that was the only buy
-                           # Revert to previous state (likely hold)
-                           # This part is tricky, maybe better to let the `_calculate_reward` handle penalties?
-                           # For now, just fix the consecutive counts and last_action
-                           pass # Let the Hold logic handle counts below
-                        # Set action to Hold for reward calculation purposes?
-                        # action = 1 # Let's NOT modify the action input, handle in reward
-                    # Update counts as if it was a hold
-                    self.last_action = 1 # Treat as hold
+                    # Update consecutive counts as if it was a hold action
+                    # Ensure last_action reflects the *attempted* action for consistency penalty etc.
+                    # but update consecutive counts based on the *outcome* (hold)
+                    if self.last_action == 2: # If the *previous* effective action was buy
+                       self.consecutive_buys = 0 # Reset buy streak as it failed
+                    self.last_action = 1 # Treat effective action as hold for next step's consistency check
                     self.consecutive_holds +=1
-                    self.consecutive_buys = 0
-                    self.consecutive_sells = 0
-                    self.total_buys -=1 # Correct total count
-                    self.total_holds +=1
-                    self.total_trades -=1 # Correct trade count
+                    # We didn't increment total_buys or total_trades, so no need to decrement here.
+                    # self.total_buys -=1 # Incorrect old logic
+                    # self.total_holds +=1 # Incorrect old logic - hold counter updated above
+                    # self.total_trades -=1 # Incorrect old logic
 
         elif action == 1: # Hold
              logger.debug(f"Step {self.current_step}: Holding. "
@@ -655,6 +664,7 @@ class TradingEnvironment(Env):
             'total_holds': self.total_holds,
             'max_drawdown': self.max_drawdown,
             'total_fees_paid': self.total_fees_paid, # Added total fees
+            'failed_buys': self.failed_buys, # Added failed buy counter
             'last_action': self.last_action, # Added last action
             'consecutive_holds': self.consecutive_holds, # Added consecutive holds
             'consecutive_buys': self.consecutive_buys,
