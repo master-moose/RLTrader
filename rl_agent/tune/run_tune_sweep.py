@@ -26,8 +26,8 @@ try:
     try:
         from ray import tune
         from ray.tune.schedulers import ASHAScheduler
-        from ray.tune.suggest.optuna import OptunaSearch
-        from ray.tune.suggest.hyperopt import HyperOptSearch
+        from ray.tune.search.optuna import OptunaSearch
+        from ray.tune.search.hyperopt import HyperOptSearch
         # Also try to import the RunConfig to catch errors early
         from ray.train import RunConfig, CheckpointConfig
         RAY_AVAILABLE = True
