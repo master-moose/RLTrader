@@ -598,13 +598,14 @@ def generate_realistic_ohlc(close_prices, volatilities, seed=None):
     
     return open_prices, high_prices, low_prices
 
-def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', config_path=None):
+def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', config_path=None, seed=None):
     """Generate synthetic data for training.
     
     Parameters:
     - num_samples: Number of 15-minute intervals to generate (default: 525600 for 15 years)
     - output_dir: Directory to save the HDF5 files
     - config_path: Optional path to a configuration file
+    - seed: Random seed for reproducibility
     """
     # Load config if provided
     if config_path:
@@ -619,7 +620,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
         val_ratio = config.get('val_ratio', 0.15)
         test_ratio = config.get('test_ratio', 0.15)
         shuffle = config.get('shuffle', False)  # Default to chronological order
-        seed = config.get('seed', None)
+        seed = config.get('seed', seed)
         
         logger.info(f"Generating {num_samples} samples based on configuration")
     else:
@@ -631,7 +632,7 @@ def generate_synthetic_data(num_samples=525600, output_dir='data/synthetic', con
         val_ratio = 0.15
         test_ratio = 0.15
         shuffle = False
-        seed = None
+        seed = seed
         
         logger.info(f"Generating {num_samples} samples with default settings")
     
