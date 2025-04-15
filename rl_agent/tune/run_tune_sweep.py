@@ -258,13 +258,13 @@ def run_tune_experiment(args):
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
-            metric="eval/mean_reward",
+            metric="rollout/ep_rew_mean",
             mode="max"
         )
         print("Using Optuna search algorithm")
     elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
-            metric="eval/mean_reward",
+            metric="rollout/ep_rew_mean",
             mode="max"
         )
         print("Using HyperOpt search algorithm")
@@ -275,7 +275,7 @@ def run_tune_experiment(args):
     # Configure scheduler for early stopping
     scheduler = ASHAScheduler(
         time_attr="timesteps",
-        metric="eval/mean_reward",
+        metric="rollout/ep_rew_mean",
         mode="max",
         max_t=args.timesteps_per_trial,
         grace_period=100000,  # Min steps before stopping a trial
@@ -306,11 +306,8 @@ def run_tune_experiment(args):
     best_trial = analysis.best_trial
     print("\n==== Best Trial Results ====")
     print(f"Trial ID: {best_trial.trial_id}")
-    print(f"Mean Reward: {best_trial.last_result['eval/mean_reward']}")
-    if 'eval/explained_variance' in best_trial.last_result:
-        print(f"Explained Variance: {best_trial.last_result['eval/explained_variance']}")
-    else:
-        print("Explained Variance: N/A")
+    best_reward = best_trial.last_result.get('rollout/ep_rew_mean', 'N/A')
+    print(f"Best Rollout Mean Reward: {best_reward}")
     print(f"Final Timesteps: {best_trial.last_result['timesteps']}")
     print("\nBest Hyperparameters:")
     for param_name in search_space.keys():

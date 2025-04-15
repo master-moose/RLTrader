@@ -8,6 +8,7 @@ This script provides a command-line interface for training and evaluating
 the LSTM-DQN reinforcement learning agent on financial time series data.
 """
 
+# --- Standard Library Imports --- #
 import argparse
 import json
 import logging
@@ -19,65 +20,63 @@ from typing import Any, Dict, List, Optional, Tuple
 # Add parent directory to path *before* attempting local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# --- Ray Tune Imports --- #
-try:
-    import ray
-    from ray import tune
-    from ray.tune.schedulers import ASHAScheduler
-    from ray.tune.search.optuna import OptunaSearch
-    from ray.tune.search.hyperopt import HyperOptSearch
-    RAY_AVAILABLE = True
-except ImportError:
-    RAY_AVAILABLE = False
-
-# --- Standard Library Imports --- #
-# (Already imported above: argparse, json, logging, os, sys, time, typing)
-
 # --- Third-Party Imports --- #
 import gymnasium as gym
 import numpy as np
 import pandas as pd
 import torch
+import ray
+from ray import tune
+# Unused imports removed: ASHAScheduler, OptunaSearch, HyperOptSearch
 
-# Import SB3 Contrib models
-from sb3_contrib import QRDQN, RecurrentPPO
-# QRDQNPolicy removed as it was unused
-# from sb3_contrib.qrdqn.policies import QRDQNPolicy
-
-# Import SB3 models
+# --- Stable Baselines3 Imports --- # 
 from stable_baselines3 import A2C, DQN, PPO, SAC
-# Import Base class and Monitor
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
-# Import Buffers
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-# Import Policies
-from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
-# Import VecEnv utils
-from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv,
-                                              VecNormalize)
+from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv, SubprocVecEnv, VecNormalize
+)
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy
+from stable_baselines3.common.callbacks import BaseCallback
+
+# --- SB3 Contrib Imports --- #
+from sb3_contrib import QRDQN, RecurrentPPO
+# QRDQNPolicy removed as it was unused
 
 # --- Local Module Imports --- #
-# These must come *after* sys.path modification
 from rl_agent.callbacks import get_callback_list
 from rl_agent.data.data_loader import DataLoader
 from rl_agent.environment import TradingEnvironment
 from rl_agent.models import LSTMFeatureExtractor
-from rl_agent.utils import (calculate_trading_metrics, check_resources,
-                            create_evaluation_plots, ensure_dir_exists,
-                            load_config, save_config, set_seeds, setup_logger,
-                            setup_sb3_logger)
+from rl_agent.utils import (
+    calculate_trading_metrics, check_resources,
+    create_evaluation_plots, ensure_dir_exists,
+    load_config, save_config, set_seeds, setup_logger,
+    setup_sb3_logger
+)
 
-# Initialize logger globally (will be configured in main/train/evaluate)
+
+# --- Global Settings --- # 
+
+# Ray availability check
+RAY_AVAILABLE = False
+try:
+    # Just check if ray exists, specific tune components imported above
+    import ray 
+    RAY_AVAILABLE = True
+except ImportError:
+    RAY_AVAILABLE = False
+
+# Initialize logger globally (will be configured later)
 logger = logging.getLogger(__name__)
 
-# --- Import BaseCallback --- #
-from stable_baselines3.common.callbacks import BaseCallback
 
 # --- Ray Tune Callback Class --- #
+
 class TuneReportCallback(BaseCallback):
     """
     Callback to report metrics to Ray Tune during training.
@@ -108,7 +107,7 @@ class TuneReportCallback(BaseCallback):
             True if the training should continue, False otherwise.
         """
         if not RAY_AVAILABLE:
-            return True # Continue training
+            return True  # Continue training
 
         # Get the model from the callback's model attribute
         # (set by BaseCallback)
@@ -116,7 +115,7 @@ class TuneReportCallback(BaseCallback):
 
         # Only report at specified frequency
         if model.num_timesteps - self.last_reported_step < self.report_freq:
-            return True # Continue training
+            return True  # Continue training
 
         self.last_reported_step = model.num_timesteps
         
@@ -133,10 +132,11 @@ class TuneReportCallback(BaseCallback):
         if metrics:
             tune.report(**metrics)
 
-        return True # Continue training
+        return True  # Continue training
 
 
 # --- Ray Tune Trainable Function --- #
+
 def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     """
     Ray Tune trainable function for training an RL agent.
@@ -303,8 +303,11 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     
     # --- Callbacks --- #
     # Create a list of callbacks, including the Ray Tune reporter
+    # --- Disable eval_env for now ---
+    eval_env = None 
+    # -------------------------------
     callbacks = get_callback_list(
-        eval_env=eval_env,
+        eval_env=eval_env, # Pass None to disable EvalCallback
         log_dir=log_dir,
         eval_freq=max(train_config.get("eval_freq", 10000), 5000),
         n_eval_episodes=train_config.get("n_eval_episodes", 5),
@@ -371,7 +374,6 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     if RAY_AVAILABLE:
         tune.report(
             timesteps=model.num_timesteps,
-            training_time=training_time,
             **metrics
         )
     
