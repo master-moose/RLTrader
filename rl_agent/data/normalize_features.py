@@ -86,6 +86,10 @@ def parse_args():
         help="Preserve features already marked with '_scaled' suffix"
     )
     parser.add_argument(
+        "--preserve_columns", type=str, default="close,open,high,low,volume",
+        help="Essential columns to preserve in original form (comma-separated)"
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Overwrite existing output files"
     )
@@ -176,7 +180,8 @@ def normalize_dataset(
     method: str = "minmax",
     features: Optional[List[str]] = None,
     preserve_scaled: bool = True,
-    keep_originals: bool = False
+    keep_originals: bool = False,
+    preserve_columns: Optional[List[str]] = None
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
     """
     Normalize a dataset.
@@ -187,12 +192,16 @@ def normalize_dataset(
         features: List of features to normalize (all if None)
         preserve_scaled: Whether to preserve features with '_scaled' suffix
         keep_originals: Whether to keep original features (don't remove them)
+        preserve_columns: Essential columns to preserve in original form
         
     Returns:
         Tuple of (normalized DataFrame, normalization parameters)
     """
     df = data.copy()
     normalization_params = {}
+    
+    # Set up preserve_columns as empty list if None
+    preserve_columns = preserve_columns or []
     
     # Determine which features to normalize
     numeric_columns = df.select_dtypes(include=np.number).columns.tolist()
@@ -235,11 +244,14 @@ def normalize_dataset(
         normalization_params[feature] = params
         
         # Mark original feature for removal if we created a new column
-        if new_name != feature and not keep_originals:
+        # BUT never remove preserved columns
+        if new_name != feature and not keep_originals and feature not in preserve_columns:
             original_features_to_remove.append(feature)
             logger.info(f"Created normalized feature: {new_name}")
+        elif feature in preserve_columns:
+            logger.info(f"Preserving essential column {feature} in original form")
     
-    # Remove original features if requested
+    # Remove original features if requested (except preserved columns)
     if len(original_features_to_remove) > 0:
         logger.info(f"Removing {len(original_features_to_remove)} original features")
         df = df.drop(columns=original_features_to_remove)
@@ -334,7 +346,8 @@ def process_file(
     features: Optional[List[str]] = None,
     preserve_scaled: bool = True,
     force: bool = False,
-    keep_originals: bool = False
+    keep_originals: bool = False,
+    preserve_columns: Optional[List[str]] = None
 ) -> bool:
     """
     Process a single file.
@@ -348,6 +361,7 @@ def process_file(
         preserve_scaled: Whether to preserve already scaled features
         force: Whether to overwrite existing output file
         keep_originals: Whether to keep original features
+        preserve_columns: Essential columns to preserve in original form
         
     Returns:
         True if successful, False otherwise
@@ -370,7 +384,8 @@ def process_file(
             method=method,
             features=features,
             preserve_scaled=preserve_scaled,
-            keep_originals=keep_originals
+            keep_originals=keep_originals,
+            preserve_columns=preserve_columns
         )
         
         # Save normalized data
@@ -401,7 +416,8 @@ def batch_process_directory(
     force: bool = False,
     keep_originals: bool = False,
     recursive: bool = False,
-    suffix: str = "_normalized"
+    suffix: str = "_normalized",
+    preserve_columns: Optional[List[str]] = None
 ) -> Tuple[int, int]:
     """
     Process all files in a directory.
@@ -418,6 +434,7 @@ def batch_process_directory(
         keep_originals: Whether to keep original features
         recursive: Whether to recursively search subdirectories
         suffix: Suffix to add to output filenames
+        preserve_columns: Essential columns to preserve in original form
         
     Returns:
         Tuple of (number of files processed, number of files with errors)
@@ -466,7 +483,8 @@ def batch_process_directory(
             features=features,
             preserve_scaled=preserve_scaled,
             force=force,
-            keep_originals=keep_originals
+            keep_originals=keep_originals,
+            preserve_columns=preserve_columns
         )
         
         if success:
@@ -517,6 +535,12 @@ def main():
         features = args.features.split(',')
         logger.info(f"Normalizing specific features: {features}")
     
+    # Process preserve_columns list
+    preserve_columns = None
+    if args.preserve_columns:
+        preserve_columns = args.preserve_columns.split(',')
+        logger.info(f"Preserving essential columns in original form: {preserve_columns}")
+    
     # Single file mode
     if args.data_path:
         process_file(
@@ -527,7 +551,8 @@ def main():
             features=features,
             preserve_scaled=args.preserve_scaled,
             force=args.force,
-            keep_originals=args.keep_originals
+            keep_originals=args.keep_originals,
+            preserve_columns=preserve_columns
         )
     
     # Directory mode
@@ -543,7 +568,8 @@ def main():
             force=args.force,
             keep_originals=args.keep_originals,
             recursive=args.recursive,
-            suffix=args.suffix
+            suffix=args.suffix,
+            preserve_columns=preserve_columns
         )
         
         logger.info(f"Batch processing complete. Processed {success_count} files successfully, {error_count} with errors.")
