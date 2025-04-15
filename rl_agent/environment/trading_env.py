@@ -431,6 +431,11 @@ class TradingEnvironment(Env):
                 
                 # Update balance and shares
                 self.balance += sell_amount - fee
+                # --- Log intermediate state --- #
+                logger.debug(f"_take_action (Sell): Post-update Balance={self.balance:.4f}, Shares=0, Fee={fee:.4f}")
+                if not np.isfinite(self.balance):
+                    logger.error(f"_take_action (Sell): Balance became non-finite! {self.balance}")
+                # --- End log --- #
                 
                 # Log sell
                 sell_info = {
@@ -503,6 +508,11 @@ class TradingEnvironment(Env):
                     # Ensure balance doesn't go negative due to float precision
                     self.balance = max(0, self.balance) 
                     self.asset_value = self.shares_held * current_price
+                    # --- Log intermediate state --- #
+                    logger.debug(f"_take_action (Buy): Post-update Balance={self.balance:.4f}, Shares={self.shares_held:.8f}, AssetVal={self.asset_value:.4f}, Fee={fee:.4f}")
+                    if not np.isfinite(self.balance) or not np.isfinite(self.shares_held) or not np.isfinite(self.asset_value):
+                        logger.error(f"_take_action (Buy): State became non-finite! Bal={self.balance}, Shares={self.shares_held}, AssetVal={self.asset_value}")
+                    # --- End log --- #
                     
                     # Record buy price
                     self.last_buy_price = current_price
@@ -539,6 +549,11 @@ class TradingEnvironment(Env):
         current_price = self.data['close'].iloc[self.current_step]
         self.asset_value = self.shares_held * current_price
         self.portfolio_value = self.balance + self.asset_value
+        # --- Log intermediate state --- #
+        logger.debug(f"_update_portfolio_value: Price={current_price:.4f}, Shares={self.shares_held:.8f} -> AssetVal={self.asset_value:.4f}, PortVal={self.portfolio_value:.4f}")
+        if not np.isfinite(self.asset_value) or not np.isfinite(self.portfolio_value):
+            logger.error(f"_update_portfolio_value: Values became non-finite! AssetVal={self.asset_value}, PortVal={self.portfolio_value}")
+        # --- End log --- #
     
     def _calculate_reward(self, action, prev_portfolio_value, fee_paid_this_step):
         """
