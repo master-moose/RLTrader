@@ -35,7 +35,7 @@ class TradingEnvironment(Env):
         features: List[str] = None,
         sequence_length: int = 60,
         initial_balance: float = 10000.0,
-        transaction_fee: float = 0.001,
+        transaction_fee: float = 0.00075,
         reward_scaling: float = 1.0,
         window_size: int = 20,
         max_position: float = 1.0,
@@ -451,6 +451,15 @@ class TradingEnvironment(Env):
 
                 # Calculate amount to invest based on max_position
                 invest_amount = self.balance * self.max_position
+                
+                # <<< ADDED CHECK: Minimum Trade Value >>>
+                min_trade_value = self.initial_balance * 0.005 # Minimum 0.5% of initial balance
+                if invest_amount < min_trade_value:
+                    self.failed_buys += 1
+                    logger.debug(f"Step {self.current_step}: Attempted Buy. Invest amount {invest_amount:.2f} < min trade value {min_trade_value:.2f}. Holding.")
+                    return # Treat as Hold
+                # <<< END ADDED CHECK >>>
+
                 # Calculate shares we can buy considering the fee
                 # Avoid division by zero/small price
                 if current_price * (1 + self.transaction_fee) > ZERO_THRESHOLD:
@@ -498,7 +507,7 @@ class TradingEnvironment(Env):
                                f"{current_price:.2f} (Cost: {buy_cost:.2f}, Fee: {fee:.2f}) -> "
                                f"Bal: {self.balance:.2f}")
                 else:
-                    # --- Buy Failed (Insufficient funds for meaningful amount) ---
+                    # --- Buy Failed (Insufficient funds for meaningful amount OR price too low) ---
                     self.failed_buys += 1 # Increment failed buy counter
                     logger.debug(f"Step {self.current_step}: Attempted Buy. Bal: {self.balance:.2f}, "
                                f"Price: {current_price:.2f}, MaxPos: {self.max_position:.2f}. "
