@@ -468,9 +468,9 @@ def create_env(
         "reward_scaling": config["reward_scaling"],
         # Optional args from TradingEnvironment (using defaults or config)
         "window_size": config.get("window_size", 20),
-        "max_position": config.get("max_position", 1.0),
+        "max_position": config.get("max_position", 1.0),  # <-- Make sure this line exists
         "max_steps": config.get("max_steps"),
-        "random_start": config.get("random_start", True),
+        "random_start": config.get("random_start", True), # <-- Make sure this line exists
     }
 
     # --- Conditionally add new reward parameters --- 
