@@ -451,7 +451,13 @@ class EpisodeInfoCallback(BaseCallback):
 
                 # Format values for logging
                 reward_str = f"{ep_reward:.2f}" if isinstance(ep_reward, (int, float)) else str(ep_reward)
-                return_str = f"{episode_return * 100:.2f}%" if isinstance(episode_return, (int, float)) else str(episode_return)
+                # --- SAFELY FORMAT RETURN --- #
+                return_val = info.get("episode_return", None)
+                if isinstance(return_val, (int, float)):
+                    return_str = f"{return_val * 100:.2f}%"
+                else:
+                    return_str = "N/A"
+                # --- END SAFE FORMAT --- #
                 sharpe_str = f"{sharpe_ratio:.2f}" if isinstance(sharpe_ratio, (int, float)) else str(sharpe_ratio)
                 trades_str = str(total_trades)
                 length_str = str(ep_length)
