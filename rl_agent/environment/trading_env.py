@@ -630,7 +630,7 @@ class TradingEnvironment(Env):
         if action == 0 and self.last_buy_price is not None: 
             sell_profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
             if sell_profit_pct > 0: 
-                profit_bonus = sell_profit_pct * 10 
+                profit_bonus = sell_profit_pct * 2 # Reduced multiplier from 10 to 2
                 self.last_buy_price = None 
         reward_components['profit_bonus'] = profit_bonus * self.profit_bonus_weight
 
