@@ -102,6 +102,12 @@ class TuneReportCallback(BaseCallback):
         Returns:
             A combined normalized score between -1 and 1
         """
+        # Handle None or non-numeric values
+        if reward is None or not isinstance(reward, (int, float, np.number)):
+            reward = 0.0
+        if explained_variance is None or not isinstance(explained_variance, (int, float, np.number)):
+            explained_variance = 0.0
+            
         # Use tanh to normalize reward to [-1, 1] range regardless of magnitude
         # Scale factor of 1000 helps with gradual scaling for typical reward ranges
         normalized_reward = np.tanh(reward / 1000.0)
@@ -146,18 +152,25 @@ class TuneReportCallback(BaseCallback):
             # Report this as both the original metric name AND the one expected by the scheduler
             metrics_to_report["rollout/ep_rew_mean"] = float(reward_value)
             metrics_to_report["eval/mean_reward"] = float(reward_value)  # Map to the metric name used by scheduler
+        else:
+            # Provide default value if not available
+            reward_value = 0.0
+            metrics_to_report["eval/mean_reward"] = 0.0
         
         # Include explained variance if available
         if "train/explained_variance" in sb3_logger.name_to_value:
             variance_value = sb3_logger.name_to_value["train/explained_variance"]
             metrics_to_report["train/explained_variance"] = float(variance_value)
             metrics_to_report["eval/explained_variance"] = float(variance_value)  # Map to the metric name used by scheduler
+        else:
+            # Provide default value if not available
+            variance_value = 0.0
+            metrics_to_report["eval/explained_variance"] = 0.0
         
-        # Calculate combined score if both metrics are available
-        if reward_value is not None and variance_value is not None:
-            combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
-            metrics_to_report["eval/combined_score"] = float(combined_score)
-            
+        # Always calculate combined score
+        combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
+        metrics_to_report["eval/combined_score"] = float(combined_score)
+        
         # Optionally add other important metrics if available and scalar
         other_metrics = ["rollout/ep_len_mean", "time/fps"]
         for key in other_metrics:
@@ -236,6 +249,22 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     ensure_dir_exists(checkpoint_dir)
     train_config["log_dir"] = log_dir
     train_config["checkpoint_dir"] = checkpoint_dir
+    
+    # Report initial metrics to ensure they exist
+    # This provides a default value for combined_score before any training happens
+    initial_metrics = {
+        "timesteps": 0,
+        "training_iteration": 0,
+        "eval/mean_reward": 0.0,
+        "eval/explained_variance": 0.0,
+        "eval/combined_score": 0.5  # Default middle value
+    }
+    
+    if RAY_AVAILABLE:
+        if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
+            ray.air.session.report(initial_metrics)
+        else:
+            tune.report(**initial_metrics)
     
     # Setup logger
     setup_logger(
