@@ -746,8 +746,24 @@ class TradingEnvironment(Env):
         # Calculate overall episode returns and Sharpe if possible
         # Note: self.step_returns holds individual step returns
         if len(self.portfolio_values) > 1:
-            # Overall episode return
-            episode_return = (self.portfolio_value - self.initial_balance) / self.initial_balance
+            # --- Debugging Return Calculation ---
+            initial_val_debug = self.initial_balance
+            current_val_debug = self.portfolio_value
+            logger.debug(f"_get_info: Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}")
+            if initial_val_debug <= ZERO_THRESHOLD:
+                logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is zero or less. Setting return to 0.")
+                episode_return = 0.0
+            else:
+                try:
+                    episode_return = (current_val_debug - initial_val_debug) / initial_val_debug
+                    if not np.isfinite(episode_return):
+                        logger.warning(f"_get_info: Calculated episode_return is non-finite ({episode_return}). Initial: {initial_val_debug}, Current: {current_val_debug}")
+                        # Optionally set to a default value like 0 or keep as non-finite depending on desired handling
+                        # episode_return = 0.0 # Example: default to 0
+                except Exception as e:
+                    logger.error(f"_get_info: Error calculating episode_return: {e}. Initial: {initial_val_debug}, Current: {current_val_debug}", exc_info=True)
+                    episode_return = 0.0 # Default on error
+            # --- End Debugging ---
             info['episode_return'] = episode_return
 
             # Calculate overall Sharpe from portfolio_values (less noisy than step_returns)
