@@ -750,6 +750,7 @@ class TradingEnvironment(Env):
             initial_val_debug = self.initial_balance
             current_val_debug = self.portfolio_value
             logger.debug(f"_get_info: Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}")
+            logger.info(f"_get_info: [INFO CHECK] Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}")
             if initial_val_debug <= ZERO_THRESHOLD:
                 logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is zero or less. Setting return to 0.")
                 episode_return = 0.0
