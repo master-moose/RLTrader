@@ -371,7 +371,6 @@ class TradingEnvironment(Env):
         # self.total_trades += (action != 1)  # Count non-hold actions as trades
         if action == 0:
             self.total_sells += 1
-            self.total_trades += 1 # Increment trade count for successful sell
         elif action == 1:
             self.total_holds += 1
         elif action == 2:
@@ -406,6 +405,7 @@ class TradingEnvironment(Env):
 
         if action == 0:  # Sell
             if self.shares_held > ZERO_THRESHOLD: # Check if shares held > 0
+                self.total_trades += 1 
                 # Calculate transaction fee
                 sell_amount = self.shares_held * current_price
                 fee = sell_amount * self.transaction_fee # Use fixed fee
