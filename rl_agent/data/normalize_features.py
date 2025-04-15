@@ -12,6 +12,7 @@ import argparse
 import logging
 import os
 import sys
+import glob
 import pandas as pd
 import numpy as np
 import h5py
@@ -36,18 +37,41 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    parser.add_argument(
-        "--data_path", type=str, required=True,
+    # Common file and directory options
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "--data_path", type=str,
         help="Path to input data file (CSV or HDF5)"
     )
-    parser.add_argument(
-        "--output_path", type=str, required=True,
+    input_group.add_argument(
+        "--input_dir", type=str,
+        help="Directory containing H5 files to process"
+    )
+    
+    output_group = parser.add_mutually_exclusive_group(required=True)
+    output_group.add_argument(
+        "--output_path", type=str,
         help="Path to save normalized data (CSV or HDF5)"
     )
+    output_group.add_argument(
+        "--output_dir", type=str,
+        help="Directory to save normalized data files"
+    )
+    
     parser.add_argument(
         "--data_key", type=str, default=None,
         help="Key for HDF5 file (e.g., '/15m' for 15-minute data)"
     )
+    parser.add_argument(
+        "--file_pattern", type=str, default="*.h5",
+        help="File pattern for batch processing (e.g., '*.h5', 'train_*.h5')"
+    )
+    parser.add_argument(
+        "--recursive", action="store_true",
+        help="Recursively search subdirectories for files (with --input_dir)"
+    )
+    
+    # Normalization options
     parser.add_argument(
         "--method", type=str, default="minmax",
         choices=["minmax", "zscore", "robust"],
@@ -63,7 +87,25 @@ def parse_args():
     )
     parser.add_argument(
         "--force", action="store_true",
-        help="Overwrite existing output file"
+        help="Overwrite existing output files"
+    )
+    parser.add_argument(
+        "--keep_originals", action="store_true",
+        help="Keep original features alongside normalized ones (don't remove them)"
+    )
+    parser.add_argument(
+        "--suffix", type=str, default="_normalized",
+        help="Suffix to add to output filenames when processing a directory"
+    )
+    
+    # Logging and display options
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Enable verbose logging"
+    )
+    parser.add_argument(
+        "--log_file", type=str, default=None,
+        help="Save logs to file"
     )
     
     return parser.parse_args()
@@ -133,7 +175,8 @@ def normalize_dataset(
     data: pd.DataFrame,
     method: str = "minmax",
     features: Optional[List[str]] = None,
-    preserve_scaled: bool = True
+    preserve_scaled: bool = True,
+    keep_originals: bool = False
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
     """
     Normalize a dataset.
@@ -143,6 +186,7 @@ def normalize_dataset(
         method: Normalization method ('minmax', 'zscore', or 'robust')
         features: List of features to normalize (all if None)
         preserve_scaled: Whether to preserve features with '_scaled' suffix
+        keep_originals: Whether to keep original features (don't remove them)
         
     Returns:
         Tuple of (normalized DataFrame, normalization parameters)
@@ -164,6 +208,8 @@ def normalize_dataset(
         target_features = numeric_columns
     
     # Process each feature
+    original_features_to_remove = []
+    
     for feature in target_features:
         # Skip already scaled features if requested
         if preserve_scaled and feature.endswith("_scaled"):
@@ -188,9 +234,15 @@ def normalize_dataset(
         # Store normalization parameters
         normalization_params[feature] = params
         
-        # Remove the original feature if we created a new column
-        if new_name != feature:
+        # Mark original feature for removal if we created a new column
+        if new_name != feature and not keep_originals:
+            original_features_to_remove.append(feature)
             logger.info(f"Created normalized feature: {new_name}")
+    
+    # Remove original features if requested
+    if len(original_features_to_remove) > 0:
+        logger.info(f"Removing {len(original_features_to_remove)} original features")
+        df = df.drop(columns=original_features_to_remove)
     
     return df, normalization_params
 
@@ -274,52 +326,227 @@ def save_dataset(
         logger.error(f"Unsupported file format: {file_extension}")
         sys.exit(1)
 
+def process_file(
+    input_path: str,
+    output_path: str,
+    data_key: Optional[str] = None,
+    method: str = "minmax",
+    features: Optional[List[str]] = None,
+    preserve_scaled: bool = True,
+    force: bool = False,
+    keep_originals: bool = False
+) -> bool:
+    """
+    Process a single file.
+    
+    Args:
+        input_path: Path to input file
+        output_path: Path to output file
+        data_key: Key for HDF5 file
+        method: Normalization method
+        features: List of features to normalize
+        preserve_scaled: Whether to preserve already scaled features
+        force: Whether to overwrite existing output file
+        keep_originals: Whether to keep original features
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Check if output file exists
+        if os.path.exists(output_path) and not force:
+            logger.warning(f"Output file already exists: {output_path}. Skipping. Use --force to overwrite.")
+            return False
+        
+        # Load data
+        logger.info(f"Loading data from: {input_path}")
+        data_loader = DataLoader(data_path=input_path, data_key=data_key)
+        data = data_loader.load_data()
+        
+        # Normalize data
+        logger.info(f"Normalizing data using method: {method}")
+        normalized_data, norm_params = normalize_dataset(
+            data,
+            method=method,
+            features=features,
+            preserve_scaled=preserve_scaled,
+            keep_originals=keep_originals
+        )
+        
+        # Save normalized data
+        save_dataset(
+            normalized_data,
+            output_path,
+            data_key,
+            norm_params
+        )
+        
+        logger.info(f"Normalization complete. Data saved to: {output_path}")
+        logger.info(f"Original data shape: {data.shape}")
+        logger.info(f"Normalized data shape: {normalized_data.shape}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error processing file {input_path}: {e}")
+        return False
+
+def batch_process_directory(
+    input_dir: str,
+    output_dir: str,
+    file_pattern: str = "*.h5",
+    data_key: Optional[str] = None,
+    method: str = "minmax",
+    features: Optional[List[str]] = None,
+    preserve_scaled: bool = True,
+    force: bool = False,
+    keep_originals: bool = False,
+    recursive: bool = False,
+    suffix: str = "_normalized"
+) -> Tuple[int, int]:
+    """
+    Process all files in a directory.
+    
+    Args:
+        input_dir: Input directory
+        output_dir: Output directory
+        file_pattern: File pattern to match
+        data_key: Key for HDF5 files
+        method: Normalization method
+        features: List of features to normalize
+        preserve_scaled: Whether to preserve already scaled features
+        force: Whether to overwrite existing output files
+        keep_originals: Whether to keep original features
+        recursive: Whether to recursively search subdirectories
+        suffix: Suffix to add to output filenames
+        
+    Returns:
+        Tuple of (number of files processed, number of files with errors)
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Find all files matching the pattern
+    if recursive:
+        search_pattern = os.path.join(input_dir, "**", file_pattern)
+        files = glob.glob(search_pattern, recursive=True)
+    else:
+        search_pattern = os.path.join(input_dir, file_pattern)
+        files = glob.glob(search_pattern)
+    
+    logger.info(f"Found {len(files)} files matching pattern '{search_pattern}'")
+    
+    success_count = 0
+    error_count = 0
+    
+    for input_file in files:
+        # Determine output path
+        rel_path = os.path.relpath(input_file, input_dir)
+        
+        # Add suffix to filename but preserve extension
+        filename = os.path.basename(rel_path)
+        name, ext = os.path.splitext(filename)
+        new_filename = f"{name}{suffix}{ext}"
+        
+        # Create output path, preserving directory structure for recursive mode
+        if recursive:
+            rel_dir = os.path.dirname(rel_path)
+            output_file = os.path.join(output_dir, rel_dir, new_filename)
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        else:
+            output_file = os.path.join(output_dir, new_filename)
+        
+        logger.info(f"Processing {input_file} -> {output_file}")
+        
+        # Process the file
+        success = process_file(
+            input_path=input_file,
+            output_path=output_file,
+            data_key=data_key,
+            method=method,
+            features=features,
+            preserve_scaled=preserve_scaled,
+            force=force,
+            keep_originals=keep_originals
+        )
+        
+        if success:
+            success_count += 1
+        else:
+            error_count += 1
+    
+    return success_count, error_count
+
+def configure_logging(verbose: bool, log_file: Optional[str] = None):
+    """Configure logging based on command line arguments."""
+    log_level = logging.DEBUG if verbose else logging.INFO
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Clear existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+    
+    # File handler if log_file is specified
+    if log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(log_level)
+        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        root_logger.addHandler(file_handler)
+
 def main():
     """Main function."""
     args = parse_args()
     
-    # Check if output file exists
-    if os.path.exists(args.output_path) and not args.force:
-        logger.error(f"Output file already exists: {args.output_path}. Use --force to overwrite.")
-        sys.exit(1)
+    # Configure logging
+    configure_logging(args.verbose, args.log_file)
     
-    # Load data
-    logger.info(f"Loading data from: {args.data_path}")
-    data_loader = DataLoader(data_path=args.data_path, data_key=args.data_key)
-    data = data_loader.load_data()
-    
-    # Parse features list
+    # Process features list
     features = None
     if args.features:
         features = args.features.split(',')
         logger.info(f"Normalizing specific features: {features}")
     
-    # Normalize data
-    logger.info(f"Normalizing using method: {args.method}")
-    normalized_data, norm_params = normalize_dataset(
-        data,
-        method=args.method,
-        features=features,
-        preserve_scaled=args.preserve_scaled
-    )
+    # Single file mode
+    if args.data_path:
+        process_file(
+            input_path=args.data_path,
+            output_path=args.output_path,
+            data_key=args.data_key,
+            method=args.method,
+            features=features,
+            preserve_scaled=args.preserve_scaled,
+            force=args.force,
+            keep_originals=args.keep_originals
+        )
     
-    # Save normalized data
-    save_dataset(
-        normalized_data,
-        args.output_path,
-        args.data_key,
-        norm_params
-    )
-    
-    logger.info(f"Normalization complete. Data saved to: {args.output_path}")
-    logger.info(f"Original data shape: {data.shape}")
-    logger.info(f"Normalized data shape: {normalized_data.shape}")
-    
-    # Show some samples of normalized features
-    scaled_features = [col for col in normalized_data.columns if col.endswith('_scaled')]
-    if scaled_features:
-        logger.info(f"Normalized features sample (first 5 rows):")
-        logger.info(normalized_data[scaled_features].head(5))
+    # Directory mode
+    else:
+        success_count, error_count = batch_process_directory(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            file_pattern=args.file_pattern,
+            data_key=args.data_key,
+            method=args.method,
+            features=features,
+            preserve_scaled=args.preserve_scaled,
+            force=args.force,
+            keep_originals=args.keep_originals,
+            recursive=args.recursive,
+            suffix=args.suffix
+        )
+        
+        logger.info(f"Batch processing complete. Processed {success_count} files successfully, {error_count} with errors.")
 
 if __name__ == "__main__":
     main() 
