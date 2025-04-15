@@ -191,6 +191,22 @@ def define_search_space() -> Dict[str, Any]:
         "gae_lambda": tune.choice([0.9, 0.95, 0.98, 0.99]), # GAE lambda
         "n_epochs": tune.choice([5, 10, 15, 20]),       # PPO epochs per update
         "max_grad_norm": tune.choice([0.5, 1.0, 2.0]), # Gradient clipping norm
+
+        # --- Reward Component Weights ---
+        # "portfolio_change_weight": 1.0, # Keep fixed as main objective for now
+        "drawdown_penalty_weight": tune.uniform(0.0, 2.0), # Explore penalties
+        # "sharpe_reward_weight": tune.uniform(0.0, 1.0), # Keep 0 for simplicity now
+        "fee_penalty_weight": tune.uniform(0.0, 5.0),    # Explore fee penalties (0 means no fee penalty)
+        "idle_penalty_weight": tune.uniform(0.0, 0.5),   # Explore small idle penalties
+        "profit_bonus_weight": tune.uniform(0.0, 2.0),   # Explore profit incentives
+        "trade_penalty_weight": tune.uniform(0.0, 1.0),  # Explore small penalties per trade
+        
+        # -- Parameters kept fixed (defined in DEFAULT_CONFIG or base_config) --
+        # "portfolio_change_weight": 1.0,
+        # "sharpe_reward_weight": 0.0,
+        # "benchmark_reward_weight": 0.0,
+        # "consistency_penalty_weight": 0.0,
+        # "exploration_bonus_weight": 0.0,
     }
     
     return search_space
