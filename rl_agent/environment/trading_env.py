@@ -564,6 +564,18 @@ class TradingEnvironment(Env):
         portfolio_change_pct = 0.0
         if prev_portfolio_value != 0: # Avoid division by zero
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
+        
+        # DEBUG LOGGING for portfolio change
+        logger.debug(
+            f"    Reward Calc: Step {self.current_step}, Action {action}\n"
+            f"      prev_portfolio_value: {prev_portfolio_value:.4f}\n"
+            f"      current_portfolio_value: {self.portfolio_value:.4f}\n"
+            f"      portfolio_change_pct: {portfolio_change_pct:.6f}\n"
+            f"      portfolio_change_weight: {self.portfolio_change_weight}\n"
+            f"      Resulting component: {portfolio_change_pct * 100 * self.portfolio_change_weight:.4f}"
+        )
+        # END DEBUG LOGGING
+
         # Scale by 100 to make it more comparable to other penalties/bonuses? Optional.
         reward_components['portfolio_change'] = portfolio_change_pct * 100 * self.portfolio_change_weight
 
