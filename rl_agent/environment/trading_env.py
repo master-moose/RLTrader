@@ -447,6 +447,18 @@ class TradingEnvironment(Env):
 
         elif action == 2:  # Buy
             if self.balance > ZERO_THRESHOLD: # Check if balance > 0
+                # <<< ADDED CHECK: Prevent buying if already holding shares >>>
+                if self.shares_held > ZERO_THRESHOLD:
+                    self.failed_buys += 1 # Increment failed buy counter
+                    logger.debug(f"Step {self.current_step}: Attempted Buy, but already holding {self.shares_held:.6f} shares. Holding.")
+                    # Correct action tracking if buy fails
+                    if self.last_action == 2: # If the *previous* effective action was buy
+                       self.consecutive_buys = 0 # Reset buy streak as it failed
+                    self.last_action = 1 # Treat effective action as hold for next step's consistency check
+                    self.consecutive_holds += 1
+                    return # Exit the function, action becomes Hold
+                # <<< END ADDED CHECK >>>
+
                 # Calculate amount to invest based on max_position
                 invest_amount = self.balance * self.max_position
                 # Calculate shares we can buy considering the fee
