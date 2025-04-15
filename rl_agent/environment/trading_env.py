@@ -572,28 +572,64 @@ class TradingEnvironment(Env):
 
         current_price = self.data['close'].iloc[self.current_step]
 
-        # --- SIMPLIFIED REWARD --- #
+        # --- RESTORED REWARD COMPONENTS (Except Exploration Bonus - Keep commented) --- #
         # 1. Portfolio Value Change Reward (Use Percentage Change)
         portfolio_change_pct = 0.0
         if prev_portfolio_value > ZERO_THRESHOLD: # Avoid division by zero
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
         
-        # DEBUG LOGGING for portfolio change
-        # logger.debug( # Keep this commented out for now to reduce noise
-        #     f"    Reward Calc: Step {self.current_step}, Action {action}\n"
-        #     f"      prev_portfolio_value: {prev_portfolio_value:.4f}\n"
-        #     f"      current_portfolio_value: {self.portfolio_value:.4f}\n"
-        #     f"      portfolio_change_pct: {portfolio_change_pct:.6f}\n"
-        #     f"      portfolio_change_weight: {self.portfolio_change_weight}\n"
-        #     f"      Resulting component: {portfolio_change_pct * 100 * self.portfolio_change_weight:.4f}"
-        # )
-        # END DEBUG LOGGING
-
         # Scale by 100 to make it more comparable to other penalties/bonuses? Optional.
         reward_components['portfolio_change'] = portfolio_change_pct * 100 * self.portfolio_change_weight
 
+        # 2. Drawdown Penalty (Re-enabled)
+        current_drawdown = 0.0
+        if self.max_portfolio_value > ZERO_THRESHOLD:
+            current_drawdown = (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value
+        reward_components['drawdown_penalty'] = -current_drawdown * self.drawdown_penalty_weight
+
+        # 3. Sharpe Ratio Reward (Re-enabled - using rolling window)
+        sharpe_ratio_rolling = 0.0
+        if len(self.step_returns) >= self.sharpe_window:
+            window_returns = np.array(self.step_returns[-self.sharpe_window:])
+            mean_return = np.mean(window_returns)
+            std_return = np.std(window_returns)
+            if std_return > ZERO_THRESHOLD:
+                 # Simple Sharpe (no risk-free rate)
+                 sharpe_ratio_rolling = mean_return / std_return
+        reward_components['sharpe_reward'] = sharpe_ratio_rolling * self.sharpe_reward_weight
+
         # 4. Fee Penalty (Re-enabled)
         reward_components['fee_penalty'] = -fee_paid_this_step * self.fee_penalty_weight
+
+        # 5. Benchmark Comparison Reward (Keep commented for now)
+        # ... (code omitted)
+
+        # 6. Consistency Penalty (Re-enabled)
+        consistency_penalty = 0.0
+        if action != self.last_action: # Action changed
+             if action == 0 and self.consecutive_buys < self.consistency_threshold: 
+                 consistency_penalty = -1.0
+             elif action == 2 and self.consecutive_sells < self.consistency_threshold: 
+                 consistency_penalty = -1.0
+        reward_components['consistency_penalty'] = consistency_penalty * self.consistency_penalty_weight
+
+        # 7. Idle Penalty (Re-enabled)
+        idle_penalty = 0.0
+        if action == 1 and self.consecutive_holds > self.idle_threshold:
+             idle_penalty = -1.0 
+        reward_components['idle_penalty'] = idle_penalty * self.idle_penalty_weight
+
+        # 8. Profit/Selling Bonus (Re-enabled)
+        profit_bonus = 0.0
+        if action == 0 and self.last_buy_price is not None: 
+            sell_profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
+            if sell_profit_pct > 0: 
+                profit_bonus = sell_profit_pct * 10 
+                self.last_buy_price = None 
+        reward_components['profit_bonus'] = profit_bonus * self.profit_bonus_weight
+
+        # 9. Exploration Bonus (Keep commented out for now)
+        # reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
 
         # 10. Invalid Action Penalty (Keep active, reduced penalty)
         invalid_penalty = 0.0
@@ -605,58 +641,16 @@ class TradingEnvironment(Env):
             invalid_penalty = -0.5 # Reduced penalty significantly
         reward_components['invalid_action_penalty'] = invalid_penalty # No weight needed
 
-        # --- COMMENT OUT OTHER COMPONENTS --- #
-        # 2. Drawdown Penalty 
-        # current_drawdown = 0.0
-        # if self.max_portfolio_value > ZERO_THRESHOLD:
-        #     current_drawdown = (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value
-        # reward_components['drawdown_penalty'] = -current_drawdown * self.drawdown_penalty_weight
+        # --- END RESTORED COMPONENTS --- #
 
-        # 3. Sharpe Ratio Reward 
-        # sharpe_ratio_rolling = 0.0
-        # if len(self.step_returns) >= self.sharpe_window:
-        #     window_returns = np.array(self.step_returns[-self.sharpe_window:])
-        #     mean_return = np.mean(window_returns)
-        #     std_return = np.std(window_returns)
-        #     if std_return > ZERO_THRESHOLD:
-        #          sharpe_ratio_rolling = mean_return / std_return
-        # reward_components['sharpe_reward'] = sharpe_ratio_rolling * self.sharpe_reward_weight
-
-        # 5. Benchmark Comparison Reward
-        # ... (code omitted)
-
-        # 6. Consistency Penalty
-        # consistency_penalty = 0.0
-        # if action != self.last_action: # Action changed
-        #      if action == 0 and self.consecutive_buys < self.consistency_threshold: 
-        #          consistency_penalty = -1.0
-        #      elif action == 2 and self.consecutive_sells < self.consistency_threshold: 
-        #          consistency_penalty = -1.0
-        # reward_components['consistency_penalty'] = consistency_penalty * self.consistency_penalty_weight
-
-        # 7. Idle Penalty
-        # idle_penalty = 0.0
-        # if action == 1 and self.consecutive_holds > self.idle_threshold:
-        #      idle_penalty = -1.0 
-        # reward_components['idle_penalty'] = idle_penalty * self.idle_penalty_weight
-
-        # 8. Profit/Selling Bonus 
-        # profit_bonus = 0.0
-        # if action == 0 and self.last_buy_price is not None: 
-        #     sell_profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
-        #     if sell_profit_pct > 0: 
-        #         profit_bonus = sell_profit_pct * 10 
-        #         self.last_buy_price = None 
-        # reward_components['profit_bonus'] = profit_bonus * self.profit_bonus_weight
-
-        # 9. Exploration Bonus 
-        # reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
-        # --- END COMMENTED OUT COMPONENTS --- #
-
-        # Sum only the active reward components
-        active_components = ['portfolio_change', 'fee_penalty', 'invalid_action_penalty']
-        raw_total = sum(reward_components[key] for key in active_components)
-        # raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # Old sum of all components
+        # Sum all active reward components (excluding exploration bonus for now)
+        # active_components = ['portfolio_change', 'fee_penalty', 'invalid_action_penalty']
+        # raw_total = sum(reward_components[key] for key in active_components)
+        raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # Original sum logic
+        # Adjust raw_total if exploration bonus is commented out
+        if self.exploration_bonus_weight == 0: # Or check if 'exploration_bonus' key should be excluded based on commenting
+             raw_total -= reward_components['exploration_bonus'] # Subtract the zeroed-out bonus 
+        
         reward_components['raw_total'] = raw_total
 
         # Apply reward scaling for the final reward
