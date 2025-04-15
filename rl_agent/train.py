@@ -78,56 +78,90 @@ logger = logging.getLogger(__name__)
 # --- Ray Tune Callback Class --- #
 
 class TuneReportCallback(BaseCallback):
-    """
-    Callback to report metrics to Ray Tune during training.
-    Works alongside the SB3 callback system.
-    """
-    
+    """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
     def __init__(self):
-        """
-        Initialize the callback.
-        """
-        super().__init__()
-    
+        super().__init__(verbose=0)
+        self.last_reported_timestep = -1 # Track last report
+
     def _on_init(self) -> None:
-        """Called when the training starts."""
-        # No specific initialization needed for this callback
-        pass
+        """Ensure the logger is available."""
+        # Use self.logger which is automatically set by BaseCallback
+        if self.logger is None:
+            # Use the logger instance configured elsewhere in the script
+            global_logger = logging.getLogger("rl_agent")
+            global_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
 
     def _on_step(self) -> bool:
-        """
-        Called by SB3 after each step. Reports metrics to Ray Tune.
+        """Report metrics to Ray Tune only when key metrics are available."""
+        # Access the SB3 logger via self.logger
+        sb3_logger = self.logger
+        if sb3_logger is None or not hasattr(sb3_logger, "name_to_value"):
+             # Use the logger instance configured elsewhere in the script
+            global_logger = logging.getLogger("rl_agent")
+            # Log only once to avoid spamming
+            if not hasattr(self, "_logged_missing_logger_warning"):
+                global_logger.warning("SB3 logger or name_to_value not found in TuneReportCallback. Cannot report metrics.")
+                self._logged_missing_logger_warning = True
+            return True # Cannot report if logger or values are missing
 
-        Returns:
-            True if the training should continue, False otherwise.
-        """
-        if not RAY_AVAILABLE:
-            return True  # Continue training
+        # --- Key metric required by the scheduler ---
+        # Ensure this matches the 'metric' argument in tune.run() scheduler setup
+        scheduler_metric = "rollout/ep_rew_mean"
 
-        # Get the model from the callback's model attribute
-        # (set by BaseCallback)
-        model = self.model
+        # Check if the scheduler metric *is currently available* in the logger's values
+        if scheduler_metric in sb3_logger.name_to_value:
+            # Avoid reporting the exact same timestep multiple times if _on_step is called rapidly
+            if self.num_timesteps > self.last_reported_timestep:
 
-        # --- Check if the required metric exists in SB3 logger --- 
-        metric_to_check = "rollout/ep_rew_mean" # Metric needed by scheduler
-        if hasattr(model, "logger") and model.logger is not None and \
-           hasattr(model.logger, "name_to_value") and \
-           metric_to_check in model.logger.name_to_value:
-            
-            # Get all available metrics from SB3 logger
-            metrics = model.logger.name_to_value.copy()
-            
-            # Add current timestep if not already present (good practice)
-            metrics.setdefault("timesteps", model.num_timesteps)
-            
-            # Report metrics to Ray Tune
-            tune.report(**metrics)
-            
-            # Optional: Clear the logger values after reporting? 
-            # SB3 usually handles this, but might be needed if reporting duplicates.
-            # model.logger.name_to_value.clear() 
+                metrics_to_report = {}
+                # Definitely include the scheduler metric
+                current_reward_mean = sb3_logger.name_to_value[scheduler_metric]
+                # Ensure the value is a standard float (sometimes it might be numpy float)
+                metrics_to_report[scheduler_metric] = float(current_reward_mean)
 
-        return True  # Continue training
+
+                # Optionally add other important metrics if available and scalar
+                other_metrics = ["rollout/ep_len_mean", "train/explained_variance", "time/fps"]
+                for key in other_metrics:
+                    if key in sb3_logger.name_to_value:
+                        value = sb3_logger.name_to_value[key]
+                        # Ensure value is scalar (int or float) before reporting
+                        if isinstance(value, (int, float, np.number)): # Added np.number check
+                            metrics_to_report[key] = float(value) # Convert to float
+
+                # Always include timestep info
+                metrics_to_report["timesteps"] = self.num_timesteps
+                # Use training_iteration for Tune's internal tracking if needed
+                metrics_to_report["training_iteration"] = self.num_timesteps # Aligning iteration with timesteps
+
+                # Report to Ray Tune
+                try:
+                    if RAY_AVAILABLE: # Check Ray availability
+                         # Use session.report for Ray >= 2.0 (preferred)
+                        if hasattr(ray, "air") and hasattr(ray.air, "session") \
+                           and ray.air.session.is_active():
+                            ray.air.session.report(metrics_to_report)
+                        else:
+                             # Fallback for older Ray or direct tune usage without AIR session
+                            tune.report(**metrics_to_report)
+
+                        self.last_reported_timestep = self.num_timesteps # Update only on successful report
+                    else:
+                        # Log warning if Ray is somehow unavailable here
+                        global_logger = logging.getLogger("rl_agent")
+                        global_logger.warning("Ray is not available during tune.report call.")
+
+
+                except Exception as e:
+                     global_logger = logging.getLogger("rl_agent")
+                     global_logger.error(f"Error during tune.report: {e}", exc_info=True)
+                     # Depending on the error, you might want to stop training
+                     # return False # Example: stop training if reporting fails
+
+        # --- Ensure final report at the end of training always happens ---
+        # This part is handled outside the callback, at the end of train_rl_agent_tune
+
+        return True # Continue training
 
 
 # --- Ray Tune Trainable Function --- #
