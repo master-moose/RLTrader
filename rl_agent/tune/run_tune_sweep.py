@@ -183,6 +183,14 @@ def define_search_space() -> Dict[str, Any]:
         
         # PPO n_steps (horizon length) values to try
         "n_steps": tune.choice([512, 1024, 2048, 4096, 8192]),
+
+        # --- Additional RecurrentPPO Parameters ---
+        "ent_coef": tune.loguniform(1e-4, 0.05),      # Entropy coefficient
+        "vf_coef": tune.uniform(0.3, 0.7),         # Value function coefficient
+        "clip_range": tune.choice([0.1, 0.2, 0.3]),  # PPO clip range
+        "gae_lambda": tune.choice([0.9, 0.95, 0.98, 0.99]), # GAE lambda
+        "n_epochs": tune.choice([5, 10, 15, 20]),       # PPO epochs per update
+        "max_grad_norm": tune.choice([0.5, 1.0, 2.0]), # Gradient clipping norm
     }
     
     return search_space
