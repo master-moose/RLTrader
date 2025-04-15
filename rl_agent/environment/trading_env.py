@@ -749,26 +749,60 @@ class TradingEnvironment(Env):
             # --- Debugging Return Calculation ---
             initial_val_debug = self.initial_balance
             current_val_debug = self.portfolio_value
-            logger.debug(f"_get_info: Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}")
-            logger.debug(f"_get_info: [DEBUG CHECK] Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}") # Now DEBUG only
-            if initial_val_debug <= ZERO_THRESHOLD:
-                logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is zero or less. Setting return to 0.")
-                episode_return = 0.0
-            else:
+            # logger.debug(f"_get_info: Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}") # Original Debug
+            # logger.debug(f"_get_info: [DEBUG CHECK] Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}") # Now DEBUG only
+
+            # --- ENHANCED ROBUSTNESS CHECK --- #
+            episode_return = 0.0 # Default value
+            inputs_valid = True
+
+            # 1. Check if inputs are finite
+            if not np.isfinite(initial_val_debug):
+                logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is non-finite. Setting return to 0.")
+                inputs_valid = False
+            if not np.isfinite(current_val_debug):
+                logger.warning(f"_get_info: Current portfolio value ({current_val_debug}) is non-finite. Setting return to 0.")
+                inputs_valid = False
+
+            # 2. Check if initial balance is near zero (if inputs were finite)
+            if inputs_valid and abs(initial_val_debug) <= ZERO_THRESHOLD:
+                logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is zero or near-zero. Setting return to 0.")
+                inputs_valid = False
+
+            # 3. Proceed with calculation only if all checks passed
+            if inputs_valid:
                 try:
                     calculated_return = (current_val_debug - initial_val_debug) / initial_val_debug
-                    # Explicitly check for non-finite results AFTER calculation
+                    # 4. Check if the *result* is finite
                     if not np.isfinite(calculated_return):
                         logger.warning(f"_get_info: Calculated episode_return is non-finite ({calculated_return}). Forcing to 0.0. Initial: {initial_val_debug}, Current: {current_val_debug}")
-                        episode_return = 0.0 # Force to 0 if NaN or Inf
+                        # episode_return remains 0.0 (default)
                     else:
                         episode_return = calculated_return # Use the valid, finite result
+                        logger.debug(f"_get_info: Successfully calculated episode_return={episode_return:.4f} (Initial: {initial_val_debug:.2f}, Current: {current_val_debug:.2f})") # Log success
                 except Exception as e:
-                    logger.error(f"_get_info: Error calculating episode_return: {e}. Initial: {initial_val_debug}, Current: {current_val_debug}", exc_info=True)
-                    episode_return = 0.0 # Default on error
-            # --- End Debugging ---
-            info['episode_return'] = episode_return
+                    logger.error(f"_get_info: Error during episode_return division: {e}. Initial: {initial_val_debug}, Current: {current_val_debug}", exc_info=True)
+                    # episode_return remains 0.0 (default)
+            # --- END ENHANCED CHECK --- #
 
+            # if initial_val_debug <= ZERO_THRESHOLD: # OLD CHECK - REMOVED
+            #     logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is zero or less. Setting return to 0.")
+            #     episode_return = 0.0
+            # else:
+            #     try:
+            #         calculated_return = (current_val_debug - initial_val_debug) / initial_val_debug
+            #         # Explicitly check for non-finite results AFTER calculation
+            #         if not np.isfinite(calculated_return):
+            #             logger.warning(f"_get_info: Calculated episode_return is non-finite ({calculated_return}). Forcing to 0.0. Initial: {initial_val_debug}, Current: {current_val_debug}")
+            #             episode_return = 0.0 # Force to 0 if NaN or Inf
+            #         else:
+            #             episode_return = calculated_return # Use the valid, finite result
+            #     except Exception as e:
+            #         logger.error(f"_get_info: Error calculating episode_return: {e}. Initial: {initial_val_debug}, Current: {current_val_debug}", exc_info=True)
+            #         episode_return = 0.0 # Default on error
+            # --- End Debugging --- # OLD BLOCK REMOVED
+            info['episode_return'] = episode_return
+            
             # Calculate overall Sharpe from portfolio_values (less noisy than step_returns)
             portfolio_returns = np.diff(self.portfolio_values) / np.array(self.portfolio_values[:-1])
             if len(portfolio_returns) > 1:
