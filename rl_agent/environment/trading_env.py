@@ -250,8 +250,12 @@ class TradingEnvironment(Env):
         self._take_action(action)
 
         # --- Update portfolio and check drawdown BEFORE incrementing step ---
+        # Log state BEFORE update
+        logger.info(f"PRE-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}")
         # Update portfolio value using price at the current step (t)
         self._update_portfolio_value() # Uses self.current_step
+        # Log state AFTER update
+        logger.info(f"POST-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, AssetValue={self.asset_value:.2f}, PV={self.portfolio_value:.2f}")
 
         # Update max portfolio value based on value at step t
         self.max_portfolio_value = max(self.max_portfolio_value, 
@@ -263,6 +267,8 @@ class TradingEnvironment(Env):
             drawdown = (self.max_portfolio_value - self.portfolio_value) \
                        / self.max_portfolio_value
         self.max_drawdown = max(self.max_drawdown, drawdown)
+        # Log drawdown calculation
+        logger.info(f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, Drawdown={drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}")
 
         # Check for early stopping based on drawdown at step t
         drawdown_terminated = False # Flag specific to drawdown termination
@@ -592,7 +598,7 @@ class TradingEnvironment(Env):
         # Always log for debugging purposes for now
         component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items() 
                                   if k not in ['raw_total', 'total_reward']])
-        logger.debug(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}")
+        logger.info(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}")
         # logger.debug(f"Total reward: {reward_components['total_reward']:.4f}")
 
         return reward_components
