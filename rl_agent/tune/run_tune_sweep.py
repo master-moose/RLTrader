@@ -216,7 +216,11 @@ def run_tune_experiment(args):
     
     # Set timesteps per trial
     base_config["total_timesteps"] = args.timesteps_per_trial
-    
+
+    # --- Add default for cpu_only if not present ---
+    base_config.setdefault("cpu_only", False)
+    # --------------------------------------------------
+
     # Calculate appropriate num_envs based on CPUs per trial
     # RecurrentPPO is limited by available CPU cores
     cpus_available = args.cpus_per_trial
