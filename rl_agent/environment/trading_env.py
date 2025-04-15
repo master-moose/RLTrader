@@ -248,59 +248,61 @@ class TradingEnvironment(Env):
         
         # Execute the action
         self._take_action(action)
-        
-        # Move to the next time step
-        self.current_step += 1
-        self.episode_step += 1 # Increment episode step counter
-        
-        # Check if the episode is done
-        is_end_of_data = self.current_step >= len(self.data) - 1
-        # Compare episode_step to max_steps, not current_step
-        is_max_steps_reached = self.max_steps is not None and \
-                               self.episode_step >= self.max_steps
-        terminated = is_end_of_data # Termination condition
-        truncated = is_max_steps_reached and not is_end_of_data # Truncation condition
-        
-        # Update portfolio value
-        self._update_portfolio_value()
-        
-        # Update max portfolio value for drawdown calculation
+
+        # --- Update portfolio and check drawdown BEFORE incrementing step ---
+        # Update portfolio value using price at the current step (t)
+        self._update_portfolio_value() # Uses self.current_step
+
+        # Update max portfolio value based on value at step t
         self.max_portfolio_value = max(self.max_portfolio_value, 
                                        self.portfolio_value)
-        
-        # Calculate drawdown
+
+        # Calculate drawdown based on value at step t
         drawdown = 0
         if self.max_portfolio_value > 0:
             drawdown = (self.max_portfolio_value - self.portfolio_value) \
                        / self.max_portfolio_value
         self.max_drawdown = max(self.max_drawdown, drawdown)
 
-        # --- Add Early Stopping for High Drawdown ---
+        # Check for early stopping based on drawdown at step t
+        drawdown_terminated = False # Flag specific to drawdown termination
         if self.max_drawdown > 0.90: # Terminate if drawdown exceeds 90%
-            terminated = True
-            logger.info(f"Episode terminated early due to drawdown > 90% ({self.max_drawdown:.2%})")
-        # --------------------------------------------
-        
-        # Store portfolio value history
+            drawdown_terminated = True
+            # logger.info(f"Episode terminated early due to drawdown > 90% ({self.max_drawdown:.2%})") # Silenced as requested
+        # --------------------------------------------------------------------
+
+        # Store portfolio value history for step t
         self.portfolio_values.append(self.portfolio_value)
-        
-        # Calculate step return for Sharpe ratio
+
+        # Calculate step return for Sharpe ratio (t vs t-1)
         if prev_portfolio_value != 0: # Avoid division by zero
             step_return = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
             self.step_returns.append(step_return)
         else:
             self.step_returns.append(0.0)
-        
-        # Calculate reward
+
+        # Calculate reward based on change from t-1 to t
         fee_paid_this_step = self.total_fees_paid - prev_fees_paid
         reward_info = self._calculate_reward(action, prev_portfolio_value, fee_paid_this_step)
         reward = reward_info['total_reward'] # Extract the final reward
         self.rewards.append(reward)
-        
+
+        # --- Now move to the next time step (t+1) ---
+        self.current_step += 1
+        self.episode_step += 1 # Increment episode step counter
+
+        # --- Check episode end conditions based on step t+1 ---
+        is_end_of_data = self.current_step >= len(self.data) - 1
+        is_max_steps_reached = self.max_steps is not None and \
+                               self.episode_step >= self.max_steps
+        # Update terminated/truncated flags 
+        terminated = drawdown_terminated or is_end_of_data # Terminate if drawdown OR end of data
+        truncated = is_max_steps_reached and not terminated # Truncate if max steps reached AND not already terminated
+        # ---------------------------------------------------
+
         # Decay exploration bonus for the next step
         if self.exploration_decay_rate > 0 and self.exploration_bonus_value > self.exploration_end:
             self.exploration_bonus_value -= self.exploration_decay_rate
-            self.exploration_bonus_value = max(self.exploration_end, self.exploration_bonus_value)
         
         # Get new observation
         observation = self._get_observation()
@@ -311,14 +313,14 @@ class TradingEnvironment(Env):
         info['reward_components'] = reward_info
         
         # --- DEBUG LOGGING --- 
-        if terminated or truncated:
-            # Changed to logger.info to ensure visibility regardless of level
-            logger.info(
-                f"DEBUG STEP: current_step={self.current_step}, "
-                f"episode_step={self.episode_step}, max_steps={self.max_steps}, "
-                f"action={action}, terminated={terminated}, truncated={truncated}, "
-                f"is_end_of_data={is_end_of_data}, is_max_steps_reached={is_max_steps_reached}"
-            )
+        # if terminated or truncated: # Silenced as requested
+        #     # Changed to logger.info to ensure visibility regardless of level
+        #     logger.info(
+        #         f"DEBUG STEP: current_step={self.current_step}, "
+        #         f"episode_step={self.episode_step}, max_steps={self.max_steps}, "
+        #         f"action={action}, terminated={terminated}, truncated={truncated}, "
+        #         f"is_end_of_data={is_end_of_data}, is_max_steps_reached={is_max_steps_reached}"
+        #     )
         # --- END DEBUG LOGGING ---
         
         # Gymnasium expects 5 return values: obs, reward, terminated, truncated, info
