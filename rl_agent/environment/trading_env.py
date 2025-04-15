@@ -750,17 +750,19 @@ class TradingEnvironment(Env):
             initial_val_debug = self.initial_balance
             current_val_debug = self.portfolio_value
             logger.debug(f"_get_info: Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}")
-            logger.info(f"_get_info: [INFO CHECK] Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}")
+            logger.debug(f"_get_info: [DEBUG CHECK] Calculating episode_return. Initial: {initial_val_debug}, Current: {current_val_debug}") # Now DEBUG only
             if initial_val_debug <= ZERO_THRESHOLD:
                 logger.warning(f"_get_info: Initial balance ({initial_val_debug}) is zero or less. Setting return to 0.")
                 episode_return = 0.0
             else:
                 try:
-                    episode_return = (current_val_debug - initial_val_debug) / initial_val_debug
-                    if not np.isfinite(episode_return):
-                        logger.warning(f"_get_info: Calculated episode_return is non-finite ({episode_return}). Initial: {initial_val_debug}, Current: {current_val_debug}")
-                        # Optionally set to a default value like 0 or keep as non-finite depending on desired handling
-                        # episode_return = 0.0 # Example: default to 0
+                    calculated_return = (current_val_debug - initial_val_debug) / initial_val_debug
+                    # Explicitly check for non-finite results AFTER calculation
+                    if not np.isfinite(calculated_return):
+                        logger.warning(f"_get_info: Calculated episode_return is non-finite ({calculated_return}). Forcing to 0.0. Initial: {initial_val_debug}, Current: {current_val_debug}")
+                        episode_return = 0.0 # Force to 0 if NaN or Inf
+                    else:
+                        episode_return = calculated_return # Use the valid, finite result
                 except Exception as e:
                     logger.error(f"_get_info: Error calculating episode_return: {e}. Initial: {initial_val_debug}, Current: {current_val_debug}", exc_info=True)
                     episode_return = 0.0 # Default on error
