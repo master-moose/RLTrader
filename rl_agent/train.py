@@ -24,7 +24,7 @@ import gymnasium as gym
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import SB3 models
-from stable_baselines3 import DQN, PPO, A2C, SAC  # Add A2C, PPO, SAC
+from stable_baselines3 import DQN, PPO, A2C, SAC
 # Import SB3 Contrib models
 from sb3_contrib import QRDQN, RecurrentPPO
 # Import SB3 VecEnv utils
@@ -32,9 +32,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 # Import Buffers
-from stable_baselines3.common.buffers import ReplayBuffer #, PrioritizedReplayBuffer
+from stable_baselines3.common.buffers import ReplayBuffer  # , PrioritizedReplayBuffer
 # Import Policies
-from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy #, CnnPolicy as DqnCnnPolicy
+from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy  # , CnnPolicy
 from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy  # For SAC
 # Import Base class and Monitor
@@ -45,7 +45,7 @@ from stable_baselines3.common.monitor import Monitor
 # Note: RecurrentPPO often uses strings like "MlpLstmPolicy" directly
 
 # Import local modules (now possible after sys.path modification)
-from rl_agent.callbacks import get_callback_list # Use this instead of individual imports below
+from rl_agent.callbacks import get_callback_list  # Use this instead of individual imports
 # Remove unused specific callback imports
 # from rl_agent.callback import TensorboardCallback, CheckpointCallback, ProgressBarManager
 from rl_agent.utils import (
@@ -387,8 +387,8 @@ def parse_args():
     )
     network.add_argument(
         "--shared_lstm", type=str, default="shared",
-        choices=["shared", "separate", "none"],
-        help="LSTM mode for RecurrentPPO (shared, separate, or none)"
+        choices=["shared", "seperate", "none"],
+        help="LSTM mode for RecurrentPPO (shared, seperate, or none)"
     )
     network.add_argument(
         "--fc_hidden_size", type=int, default=64,
@@ -481,9 +481,9 @@ def create_env(
         "reward_scaling": config["reward_scaling"],
         # Optional args from TradingEnvironment (using defaults or config)
         "window_size": config.get("window_size", 20),
-        "max_position": config.get("max_position", 1.0),  # <-- Make sure this line exists
+        "max_position": config.get("max_position", 1.0),  # Make sure this line exists
         "max_steps": config.get("max_steps"),
-        "random_start": config.get("random_start", True), # <-- Make sure this line exists
+        "random_start": config.get("random_start", True),  # Make sure this line exists
     }
 
     # --- Conditionally add new reward parameters --- 
@@ -714,18 +714,33 @@ def create_model(
         if "shared_lstm" in config:
             # Convert from string param to the proper format
             shared_lstm_mode = config["shared_lstm"]
-            # For RecurrentPPO, shared_lstm must be one of: 'shared', 'separate', or 'none'
-            if shared_lstm_mode not in ["shared", "separate", "none"]:
+            
+            # For RecurrentPPO, we need to convert the string to proper boolean parameters
+            # RecurrentPPO expects:
+            # - shared_lstm: bool - whether to share LSTM between actor and critic
+            # - enable_critic_lstm: bool - whether critic uses an LSTM
+            
+            if shared_lstm_mode == "shared":
+                policy_kwargs["shared_lstm"] = True
+                policy_kwargs["enable_critic_lstm"] = False
+            elif shared_lstm_mode == "seperate":
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = True
+            elif shared_lstm_mode == "none":
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = False
+            else:
                 logger.warning(f"Invalid shared_lstm value '{shared_lstm_mode}', defaulting to 'shared'")
-                shared_lstm_mode = "shared"
-            policy_kwargs["shared_lstm"] = shared_lstm_mode
+                policy_kwargs["shared_lstm"] = True
+                policy_kwargs["enable_critic_lstm"] = False
         
         # Set policy_kwargs in model_kwargs
         model_kwargs["policy_kwargs"] = policy_kwargs
         
         logger.info(f"RecurrentPPO LSTM config: hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
                     f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
-                    f"shared={policy_kwargs.get('shared_lstm', 'shared')}")
+                    f"shared_lstm={policy_kwargs.get('shared_lstm', False)}, "
+                    f"enable_critic_lstm={policy_kwargs.get('enable_critic_lstm', False)}")
 
         model = RecurrentPPO(**model_kwargs)
 
@@ -897,9 +912,9 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
     # Create VecEnv for evaluation (can use DummyVecEnv for simplicity)
     test_env = make_vec_env(
         env_id=make_single_env(rank=0, base_seed=base_seed_from_config),
-        n_envs=1, # Evaluate on a single env instance for clearer metrics
+        n_envs=1,  # Evaluate on a single env instance for clearer metrics
         seed=None,  # Seeding handled in make_single_env
-        vec_env_cls=DummyVecEnv, # Use DummyVecEnv for eval
+        vec_env_cls=DummyVecEnv,  # Use DummyVecEnv for eval
         env_kwargs=None
     )
 
@@ -1088,9 +1103,9 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 
         eval_env = make_vec_env(
             env_id=make_single_env(rank=0, base_seed=base_seed_from_config),
-            n_envs=1, # Use single env for validation
+            n_envs=1,  # Use single env for validation
             seed=None,
-            vec_env_cls=DummyVecEnv, # Use DummyVecEnv for validation
+            vec_env_cls=DummyVecEnv,  # Use DummyVecEnv for validation
             env_kwargs=None
         )
 
@@ -1275,7 +1290,7 @@ def main():
             print(f"Final model: {final_model_path}")
             print("\n--- Test Set Evaluation Results ---")
             for key, value in test_metrics.items():
-                 print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
+                print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
 
         else:
             final_model_path = os.path.join(
