@@ -28,8 +28,7 @@ try:
         from ray.tune.schedulers import ASHAScheduler
         from ray.tune.search.optuna import OptunaSearch
         from ray.tune.search.hyperopt import HyperOptSearch
-        # Also try to import the RunConfig to catch errors early
-        from ray.train import RunConfig, CheckpointConfig
+        # Remove RunConfig import since it's not available in Ray 2.5.1
         RAY_AVAILABLE = True
     except (ImportError, AttributeError) as e:
         print(f"ERROR importing Ray Tune modules: {e}")
@@ -266,40 +265,39 @@ def run_tune_experiment(args):
     )
     print(f"Using ASHA scheduler with {args.timesteps_per_trial} max timesteps")
     
-    # Create and run the tuner
-    tuner = tune.Tuner(
-        tune.with_resources(
-            tune.with_parameters(train_rl_agent_tune),
-            resources={"cpu": args.cpus_per_trial, "gpu": args.gpus_per_trial}
-        ),
-        tune_config=tune.TuneConfig(
-            metric="eval/mean_reward",
-            mode="max",
-            scheduler=scheduler,
-            search_alg=search_alg,
-            num_samples=args.num_samples,
-        ),
-        param_space=tune_config,
-        run_config=ray.train.RunConfig(
-            name=args.exp_name,
-            local_dir=args.local_dir,
-            checkpoint_config=ray.train.CheckpointConfig(
-                checkpoint_frequency=2,
-                num_to_keep=2
-            )
-        )
+    # Create and run the tuner - Updated for Ray 2.5.1
+    analysis = tune.run(
+        train_rl_agent_tune,
+        config=tune_config,
+        resources_per_trial={
+            "cpu": args.cpus_per_trial, 
+            "gpu": args.gpus_per_trial
+        },
+        num_samples=args.num_samples,
+        scheduler=scheduler,
+        search_alg=search_alg,
+        local_dir=args.local_dir,
+        name=args.exp_name,
+        checkpoint_freq=2,
+        checkpoint_at_end=True,
+        keep_checkpoints_num=2,
+        metric="eval/mean_reward",
+        mode="max",
+        verbose=1,
     )
     
-    print(f"Starting tuner with {args.num_samples} trials")
-    result = tuner.fit()
+    print(f"Tuning completed! Analyzed {analysis.trials} trials")
     
     # Get and print best result
-    best_trial = result.get_best_result("eval/mean_reward", "max")
+    best_trial = analysis.best_trial
     print("\n==== Best Trial Results ====")
-    print(f"Trial ID: {best_trial.metrics['trial_id']}")
-    print(f"Mean Reward: {best_trial.metrics['eval/mean_reward']}")
-    print(f"Explained Variance: {best_trial.metrics.get('eval/explained_variance', 'N/A')}")
-    print(f"Final Timesteps: {best_trial.metrics['timesteps']}")
+    print(f"Trial ID: {best_trial.trial_id}")
+    print(f"Mean Reward: {best_trial.last_result['eval/mean_reward']}")
+    if 'eval/explained_variance' in best_trial.last_result:
+        print(f"Explained Variance: {best_trial.last_result['eval/explained_variance']}")
+    else:
+        print("Explained Variance: N/A")
+    print(f"Final Timesteps: {best_trial.last_result['timesteps']}")
     print("\nBest Hyperparameters:")
     for param_name in search_space.keys():
         print(f"  {param_name}: {best_trial.config[param_name]}")
