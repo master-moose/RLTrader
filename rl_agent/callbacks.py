@@ -451,12 +451,14 @@ class EpisodeInfoCallback(BaseCallback):
 
                 # Format values for logging
                 reward_str = f"{ep_reward:.2f}" if isinstance(ep_reward, (int, float)) else str(ep_reward)
-                # --- SAFELY FORMAT RETURN --- #
+                # --- SAFELY FORMAT RETURN (Handling NaN/Inf) --- #
                 return_val = info.get("episode_return", None)
-                if isinstance(return_val, (int, float)):
+                # Check if it's a number AND finite before formatting
+                if isinstance(return_val, (int, float)) and np.isfinite(return_val):
                     return_str = f"{return_val * 100:.2f}%"
                 else:
-                    return_str = "N/A"
+                    # If not a number or if it's NaN/Infinity, show N/A
+                    return_str = "N/A" 
                 # --- END SAFE FORMAT --- #
                 sharpe_str = f"{sharpe_ratio:.2f}" if isinstance(sharpe_ratio, (int, float)) else str(sharpe_ratio)
                 trades_str = str(total_trades)
