@@ -195,8 +195,17 @@ def run_tune_experiment(args):
         print("Using default base configuration")
     
     # Add command line args to config
-    base_config["data_path"] = args.data_path
-    base_config["val_data_path"] = args.val_data_path
+    # Make sure paths are absolute for Ray workers
+    if args.data_path:
+        data_path = os.path.abspath(os.path.expanduser(args.data_path))
+        base_config["data_path"] = data_path
+        print(f"Using data path: {data_path}")
+    
+    if args.val_data_path:
+        val_data_path = os.path.abspath(os.path.expanduser(args.val_data_path))
+        base_config["val_data_path"] = val_data_path
+        print(f"Using validation data path: {val_data_path}")
+        
     if args.data_key:
         base_config["data_key"] = args.data_key
     

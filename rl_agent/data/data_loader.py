@@ -51,7 +51,7 @@ class DataLoader:
             crypto_base: Base currency for cryptocurrency data
             data_key: Key for HDF5 file group (e.g., '/15m')
         """
-        self.data_path = data_path
+        self.data_path = os.path.abspath(os.path.expanduser(data_path))
         self.timestamp_column = timestamp_column
         self.datetime_format = datetime_format
         self.price_column = price_column
@@ -62,8 +62,30 @@ class DataLoader:
         self.data_key = data_key
         
         # Check if data file exists
-        if not os.path.exists(data_path):
-            raise FileNotFoundError(f"Data file not found: {data_path}")
+        if not os.path.exists(self.data_path):
+            # Try alternate paths that might work in container environments
+            alt_paths = []
+            
+            # If path starts with /data, try with workspace prefix
+            if self.data_path.startswith('/data'):
+                alt_paths.append(os.path.join('/workspace', self.data_path[1:]))
+            
+            # If path starts with /workspace, try with data prefix
+            if self.data_path.startswith('/workspace'):
+                alt_paths.append(os.path.join('/data', self.data_path[10:]))
+            
+            # Try different path variations
+            found = False
+            for alt_path in alt_paths:
+                if os.path.exists(alt_path):
+                    logger.info(f"Original path {self.data_path} not found, using alternative: {alt_path}")
+                    self.data_path = alt_path
+                    found = True
+                    break
+            
+            if not found:
+                logger.error(f"Data file not found at {self.data_path} or any alternatives: {alt_paths}")
+                raise FileNotFoundError(f"Data file not found: {self.data_path}")
     
     def load_data(self) -> pd.DataFrame:
         """
