@@ -790,6 +790,17 @@ def create_env(
         "random_start": config.get("random_start", True),
     }
 
+    # --- Correct the features format if it's a string ---
+    if isinstance(env_kwargs["features"], str):
+        logger.debug(f"Splitting features string: {env_kwargs['features']}")
+        env_kwargs["features"] = [f.strip() for f in env_kwargs["features"].split(',') if f.strip()]
+        logger.debug(f"Converted features to list: {env_kwargs['features']}")
+    elif env_kwargs["features"] is None:
+        # Handle case where features might not be provided, although TradingEnv requires it
+        logger.warning("Features not provided in config, TradingEnvironment might fail.")
+        # You might want to raise an error here or provide a default list
+        env_kwargs["features"] = [] # Default to empty list or handle appropriately
+
     # --- Conditionally add new reward parameters ---
     # Define the keys for the new reward parameters
     reward_param_keys = [
