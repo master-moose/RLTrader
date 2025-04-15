@@ -515,6 +515,7 @@ class TradingEnvironment(Env):
             'idle_penalty': 0.0,
             'profit_bonus': 0.0,
             'exploration_bonus': 0.0,
+            'invalid_action_penalty': 0.0, # Add new penalty component
             'raw_total': 0.0, # Sum before scaling
             'total_reward': 0.0 # Final scaled reward
         }
@@ -589,7 +590,15 @@ class TradingEnvironment(Env):
             if action != 1:  # Not hold - applies to buys and sells
                 reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
 
+        # 10. Invalid Action Penalty (e.g., buying with no balance)
+        if action == 2 and self.balance <= 1e-6: # Check if balance is effectively zero
+            reward_components['invalid_action_penalty'] = -1.0 # Apply a fixed penalty (tune weight if needed)
+        # Could add penalty for selling with no shares, but _take_action already prevents it
+        # elif action == 0 and self.shares_held <= 1e-9:
+        #    reward_components['invalid_action_penalty'] = -1.0 
+
         # Sum all reward components for the raw total
+        # Ensure the new component is included in the sum
         raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward']
         reward_components['raw_total'] = raw_total
 
