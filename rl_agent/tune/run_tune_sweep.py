@@ -282,16 +282,16 @@ def run_tune_experiment(args):
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
-            metric="eval/mean_reward",
+            metric="eval/combined_score",
             mode="max"
         )
-        print("Using Optuna search algorithm optimizing for mean reward")
+        print("Using Optuna search algorithm optimizing for combined metric (normalized reward and explained variance)")
     elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
-            metric="eval/mean_reward",  # HyperOptSearch doesn't support multi-objective optimization
+            metric="eval/combined_score",  # Use the combined metric
             mode="max"
         )
-        print("Using HyperOpt search algorithm (note: only optimizes for eval/mean_reward)")
+        print("Using HyperOpt search algorithm optimizing for combined metric")
     else:  # "basic"
         search_alg = None
         print("Using basic random search algorithm")
@@ -299,7 +299,7 @@ def run_tune_experiment(args):
     # Configure scheduler for early stopping
     scheduler = ASHAScheduler(
         time_attr="timesteps",
-        metric="eval/mean_reward",  # Primary metric for early stopping
+        metric="eval/combined_score",  # Primary metric for early stopping
         mode="max",
         max_t=args.timesteps_per_trial,
         grace_period=100000,  # Min steps before stopping a trial

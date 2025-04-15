@@ -125,7 +125,7 @@ if __name__ == "__main__":
     print("Note: TUNE_DISABLE_STRICT_METRIC_CHECKING=1 has been set to prevent metric validation errors")
     
     if args.search_algo == "optuna":
-        print("Using Optuna search algorithm optimizing for mean reward")
+        print("Using Optuna search algorithm optimizing for combined metric (normalized reward and explained variance)")
     
     best_trial = run_tune_experiment(args)
     
@@ -135,6 +135,7 @@ if __name__ == "__main__":
     print("=====================================================")
     print(f"Best Mean Reward: {best_trial.metrics['eval/mean_reward']:.4f}")
     print(f"Best Explained Variance: {best_trial.metrics.get('eval/explained_variance', 'N/A')}")
+    print(f"Best Combined Score: {best_trial.metrics.get('eval/combined_score', 'N/A')}")
     
     # Print the stability parameter values
     print("\nBest Stability Parameters:")

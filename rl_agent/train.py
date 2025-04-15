@@ -91,6 +91,32 @@ class TuneReportCallback(BaseCallback):
             global_logger = logging.getLogger("rl_agent")
             global_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
 
+    def _normalize_and_combine_metrics(self, reward, explained_variance):
+        """
+        Create a normalized combined score that equally weights reward and explained variance.
+        
+        Args:
+            reward: The mean reward value, can be very large or small
+            explained_variance: The explained variance, typically between -1 and 1
+        
+        Returns:
+            A combined normalized score between -1 and 1
+        """
+        # Use tanh to normalize reward to [-1, 1] range regardless of magnitude
+        # Scale factor of 1000 helps with gradual scaling for typical reward ranges
+        normalized_reward = np.tanh(reward / 1000.0)
+        
+        # Explained variance is typically between -1 and 1 already
+        # Clip it just to be safe
+        normalized_variance = np.clip(explained_variance, -1.0, 1.0)
+        
+        # Calculate combined score (equal weight to both normalized metrics)
+        # We add 1 to each to get values in [0, 2] range, then divide by 2 to get [0, 1]
+        # This makes the combined score more intuitive (higher is better, range 0-1)
+        combined_score = ((normalized_reward + 1.0) + (normalized_variance + 1.0)) / 4.0
+        
+        return combined_score
+
     def _on_step(self) -> bool:
         """Report metrics to Ray Tune only when key metrics are available."""
         # Access the SB3 logger via self.logger
@@ -111,18 +137,26 @@ class TuneReportCallback(BaseCallback):
         # Use training_iteration for Tune's internal tracking
         metrics_to_report["training_iteration"] = self.num_timesteps # Aligning iteration with timesteps
         
+        reward_value = None
+        variance_value = None
+        
         # Include rollout metrics if available
         if "rollout/ep_rew_mean" in sb3_logger.name_to_value:
-            current_reward_mean = sb3_logger.name_to_value["rollout/ep_rew_mean"]
+            reward_value = sb3_logger.name_to_value["rollout/ep_rew_mean"]
             # Report this as both the original metric name AND the one expected by the scheduler
-            metrics_to_report["rollout/ep_rew_mean"] = float(current_reward_mean)
-            metrics_to_report["eval/mean_reward"] = float(current_reward_mean)  # Map to the metric name used by scheduler
+            metrics_to_report["rollout/ep_rew_mean"] = float(reward_value)
+            metrics_to_report["eval/mean_reward"] = float(reward_value)  # Map to the metric name used by scheduler
         
         # Include explained variance if available
         if "train/explained_variance" in sb3_logger.name_to_value:
-            explained_var = sb3_logger.name_to_value["train/explained_variance"]
-            metrics_to_report["train/explained_variance"] = float(explained_var)
-            metrics_to_report["eval/explained_variance"] = float(explained_var)  # Map to the metric name used by scheduler
+            variance_value = sb3_logger.name_to_value["train/explained_variance"]
+            metrics_to_report["train/explained_variance"] = float(variance_value)
+            metrics_to_report["eval/explained_variance"] = float(variance_value)  # Map to the metric name used by scheduler
+        
+        # Calculate combined score if both metrics are available
+        if reward_value is not None and variance_value is not None:
+            combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
+            metrics_to_report["eval/combined_score"] = float(combined_score)
             
         # Optionally add other important metrics if available and scalar
         other_metrics = ["rollout/ep_len_mean", "time/fps"]
@@ -399,13 +433,24 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         "training_time": training_time,
         "total_timesteps": model.num_timesteps,
         "model_type": train_config["model_type"],
-        "eval/mean_reward": model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0) if hasattr(model.logger, "name_to_value") else 0.0,
-        "eval/explained_variance": model.logger.name_to_value.get("train/explained_variance", 0.0) if hasattr(model.logger, "name_to_value") else 0.0
     }
+    
+    # Add the evaluation metrics if available
+    if hasattr(model.logger, "name_to_value"):
+        reward_value = model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0)
+        variance_value = model.logger.name_to_value.get("train/explained_variance", 0.0)
+        
+        metrics["eval/mean_reward"] = float(reward_value)
+        metrics["eval/explained_variance"] = float(variance_value)
+        
+        # Create a callback instance just to use the normalization method
+        callback = TuneReportCallback()
+        combined_score = callback._normalize_and_combine_metrics(reward_value, variance_value)
+        metrics["eval/combined_score"] = float(combined_score)
 
     # Final report to Ray Tune (basic completion info)
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary (now with the correct metric names)
+        # Pass the consolidated metrics dictionary with the correct metric names
         tune.report(**metrics)
     
     return model, metrics
@@ -1675,10 +1720,23 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         "eval/mean_reward": model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0) if hasattr(model.logger, "name_to_value") else 0.0,
         "eval/explained_variance": model.logger.name_to_value.get("train/explained_variance", 0.0) if hasattr(model.logger, "name_to_value") else 0.0
     }
+    
+    # Add the evaluation metrics if available
+    if hasattr(model.logger, "name_to_value"):
+        reward_value = model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0)
+        variance_value = model.logger.name_to_value.get("train/explained_variance", 0.0)
+        
+        metrics["eval/mean_reward"] = float(reward_value)
+        metrics["eval/explained_variance"] = float(variance_value)
+        
+        # Create a callback instance just to use the normalization method
+        callback = TuneReportCallback()
+        combined_score = callback._normalize_and_combine_metrics(reward_value, variance_value)
+        metrics["eval/combined_score"] = float(combined_score)
 
     # Final report to Ray Tune (basic completion info)
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary (now with the correct metric names)
+        # Pass the consolidated metrics dictionary with the correct metric names
         tune.report(**metrics)
     
     return model, metrics
