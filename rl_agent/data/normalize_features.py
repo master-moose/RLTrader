@@ -5,10 +5,11 @@
 Feature normalization utility script.
 
 This script provides utilities for normalizing features in a dataset,
-with options to handle already normalized features.
+with options to handle already normalized features and multi-key HDF5 files.
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -16,12 +17,13 @@ import glob
 import pandas as pd
 import numpy as np
 import h5py
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from rl_agent.data.data_loader import DataLoader
+# Import DataLoader only if needed for non-HDF5, or keep for potential future use
+# from rl_agent.data.data_loader import DataLoader
 
 # Setup logger
 logging.basicConfig(
@@ -33,7 +35,7 @@ logger = logging.getLogger("feature_normalizer")
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Normalize features in a dataset",
+        description="Normalize features in a dataset, supporting multi-key HDF5 files",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -58,10 +60,6 @@ def parse_args():
         help="Directory to save normalized data files"
     )
     
-    parser.add_argument(
-        "--data_key", type=str, default=None,
-        help="Key for HDF5 file (e.g., '/15m' for 15-minute data)"
-    )
     parser.add_argument(
         "--file_pattern", type=str, default="*.h5",
         help="File pattern for batch processing (e.g., '*.h5', 'train_*.h5')"
@@ -208,11 +206,14 @@ def normalize_dataset(
     
     if features is not None:
         # Filter to only include requested features that exist in the data
-        features = [f for f in features if f in numeric_columns]
-        if len(features) == 0:
-            logger.warning("None of the specified features found in data.")
+        features_in_data = [f for f in features if f in numeric_columns]
+        if len(features_in_data) == 0:
+            logger.warning(f"None of the specified features {features} found in data columns: {numeric_columns}. Skipping normalization for this dataset.")
             return df, normalization_params
-        target_features = features
+        target_features = features_in_data
+        missing_features = [f for f in features if f not in numeric_columns]
+        if missing_features:
+            logger.warning(f"Specified features not found in data and will be ignored: {missing_features}")
     else:
         target_features = numeric_columns
     
@@ -225,13 +226,18 @@ def normalize_dataset(
             logger.info(f"Skipping already normalized feature: {feature}")
             continue
         
-        # Skip non-numeric features
+        # Skip non-numeric features (should be filtered already, but double-check)
         if feature not in numeric_columns:
             logger.warning(f"Skipping non-numeric feature: {feature}")
             continue
         
+        # Skip features with all NaN values
+        if df[feature].isnull().all():
+            logger.warning(f"Skipping feature '{feature}' because all values are NaN.")
+            continue
+        
         # Normalize the feature
-        logger.info(f"Normalizing feature: {feature} using {method}")
+        logger.debug(f"Normalizing feature: {feature} using {method}")
         normalized_feature, params = normalize_feature(df[feature], method, feature)
         
         # Create new column name with '_scaled' suffix if it doesn't already have it
@@ -247,31 +253,33 @@ def normalize_dataset(
         # BUT never remove preserved columns
         if new_name != feature and not keep_originals and feature not in preserve_columns:
             original_features_to_remove.append(feature)
-            logger.info(f"Created normalized feature: {new_name}")
+            logger.debug(f"Created normalized feature: {new_name}")
         elif feature in preserve_columns:
-            logger.info(f"Preserving essential column {feature} in original form")
+            logger.debug(f"Preserving essential column {feature} in original form")
     
     # Remove original features if requested (except preserved columns)
-    if len(original_features_to_remove) > 0:
-        logger.info(f"Removing {len(original_features_to_remove)} original features")
-        df = df.drop(columns=original_features_to_remove)
+    unique_features_to_remove = list(set(original_features_to_remove))
+    if len(unique_features_to_remove) > 0:
+        logger.info(f"Removing {len(unique_features_to_remove)} original features: {unique_features_to_remove}")
+        df = df.drop(columns=unique_features_to_remove)
     
     return df, normalization_params
 
 def save_dataset(
-    data: pd.DataFrame,
-    output_path: str,
-    data_key: Optional[str] = None,
-    params: Optional[Dict[str, Dict[str, float]]] = None
+    normalized_data_dict: Dict[str, pd.DataFrame],
+    norm_params_dict: Dict[str, Dict[str, Dict[str, float]]],
+    output_path: str
 ):
     """
-    Save a dataset to disk.
+    Save multiple normalized datasets (timeframes) to a single HDF5 file.
     
     Args:
-        data: DataFrame to save
-        output_path: Path to save to
-        data_key: Key for HDF5 file
-        params: Normalization parameters to save alongside data
+        normalized_data_dict: Dictionary where keys are HDF5 keys (e.g., '/15m')
+                             and values are the normalized DataFrames.
+        norm_params_dict: Dictionary where keys are HDF5 keys (e.g., '/15m')
+                          and values are dictionaries of normalization parameters
+                          for that timeframe.
+        output_path: Path to save the HDF5 file.
     """
     # Ensure directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -279,69 +287,61 @@ def save_dataset(
     # Determine file format
     file_extension = os.path.splitext(output_path)[1].lower()
     
-    if file_extension == '.csv':
-        logger.info(f"Saving normalized data to CSV: {output_path}")
-        data.to_csv(output_path, index=True)
-        
-        # Save normalization parameters to a separate JSON file
-        if params:
-            params_path = os.path.splitext(output_path)[0] + "_norm_params.json"
-            import json
-            with open(params_path, 'w') as f:
-                # Convert any numpy types to Python types
-                clean_params = {}
-                for feature, feature_params in params.items():
-                    clean_params[feature] = {
-                        k: float(v) for k, v in feature_params.items()
-                    }
-                json.dump(clean_params, f, indent=2)
-            logger.info(f"Saved normalization parameters to: {params_path}")
+    if file_extension not in ['.h5', '.hdf5']:
+        logger.error(f"Unsupported file format for multi-key saving: {file_extension}. Use .h5 or .hdf5.")
+        # Attempt to save the first key to CSV as a fallback? Or just exit?
+        if normalized_data_dict:
+            first_key = next(iter(normalized_data_dict))
+            logger.warning(f"Attempting to save data for key '{first_key}' to CSV instead.")
+            csv_output_path = os.path.splitext(output_path)[0] + f"_{first_key.replace('/', '')}.csv"
+            normalized_data_dict[first_key].to_csv(csv_output_path, index=True)
+            # Save corresponding params
+            if first_key in norm_params_dict:
+                params_path = os.path.splitext(csv_output_path)[0] + "_norm_params.json"
+                with open(params_path, 'w') as f:
+                    clean_params = {feat: {k: float(v) for k, v in p.items()} for feat, p in norm_params_dict[first_key].items()}
+                    json.dump(clean_params, f, indent=2)
+                logger.info(f"Saved parameters for '{first_key}' to {params_path}")
+            return # Exit after attempting fallback or if no data
+    
+    logger.info(f"Saving multiple normalized datasets to HDF5: {output_path}")
+    
+    try:
+        # Use HDFStore for easier multi-key writing and metadata handling
+        with pd.HDFStore(output_path, mode='w', complevel=9, complib='blosc') as store:
+            # Save each normalized DataFrame under its original key
+            for key, df in normalized_data_dict.items():
+                logger.info(f"Saving normalized data for key: {key} ({df.shape})")
+                store.put(key, df, format='table', data_columns=True)
             
-    elif file_extension in ['.h5', '.hdf5']:
-        logger.info(f"Saving normalized data to HDF5: {output_path}")
-        
-        # Determine the key to use
-        key = data_key or '/data'
-        if not key.startswith('/'):
-            key = '/' + key
-            
-        data.to_hdf(output_path, key=key, mode='w')
-        
-        # Save normalization parameters inside the HDF5 file
-        if params:
-            try:
-                with h5py.File(output_path, 'a') as f:
-                    # Create a params group if it doesn't exist
-                    if '/norm_params' not in f:
-                        params_group = f.create_group('/norm_params')
-                    else:
-                        params_group = f['/norm_params']
-                    
-                    # Store parameters for each feature
-                    for feature, feature_params in params.items():
-                        # Create feature group
-                        if feature in params_group:
-                            feature_group = params_group[feature]
-                        else:
-                            feature_group = params_group.create_group(feature)
-                            
-                        # Store parameters
-                        for param_name, param_value in feature_params.items():
-                            if param_name in feature_group:
-                                del feature_group[param_name]
-                            feature_group.create_dataset(param_name, data=param_value)
+            # Save normalization parameters in a structured way within metadata
+            if norm_params_dict:
+                # Convert numpy types to standard Python types for JSON compatibility
+                serializable_params = {}
+                for key, params_for_key in norm_params_dict.items():
+                    serializable_params[key] = {}
+                    for feature, feature_params in params_for_key.items():
+                        serializable_params[key][feature] = {
+                            k: float(v) if isinstance(v, (np.floating, np.integer)) else v
+                            for k, v in feature_params.items()
+                        }
                 
-                logger.info(f"Saved normalization parameters to HDF5 group: /norm_params")
-            except Exception as e:
-                logger.error(f"Error saving normalization parameters: {e}")
-    else:
-        logger.error(f"Unsupported file format: {file_extension}")
-        sys.exit(1)
+                # Store the parameters dictionary as JSON string in metadata
+                store.get_storer(next(iter(normalized_data_dict.keys()))).attrs.metadata = {
+                    'normalization_parameters': json.dumps(serializable_params)
+                }
+                logger.info("Saved normalization parameters to HDF5 metadata.")
+    
+    except Exception as e:
+        logger.error(f"Error saving multi-key HDF5 file {output_path}: {e}")
+        # Clean up potentially corrupted file
+        if os.path.exists(output_path):
+            os.remove(output_path)
+            logger.info(f"Removed potentially corrupted file: {output_path}")
 
 def process_file(
     input_path: str,
     output_path: str,
-    data_key: Optional[str] = None,
     method: str = "minmax",
     features: Optional[List[str]] = None,
     preserve_scaled: bool = True,
@@ -350,12 +350,11 @@ def process_file(
     preserve_columns: Optional[List[str]] = None
 ) -> bool:
     """
-    Process a single file.
+    Process a single file, handling multiple keys if it's HDF5.
     
     Args:
-        input_path: Path to input file
-        output_path: Path to output file
-        data_key: Key for HDF5 file
+        input_path: Path to input file (CSV or HDF5)
+        output_path: Path to output file (CSV or HDF5)
         method: Normalization method
         features: List of features to normalize
         preserve_scaled: Whether to preserve already scaled features
@@ -369,47 +368,136 @@ def process_file(
     try:
         # Check if output file exists
         if os.path.exists(output_path) and not force:
-            logger.warning(f"Output file already exists: {output_path}. Skipping. Use --force to overwrite.")
+            logger.warning(f"Output file {output_path} already exists. Skipping. Use --force to overwrite.")
             return False
         
-        # Load data
-        logger.info(f"Loading data from: {input_path}")
-        data_loader = DataLoader(data_path=input_path, data_key=data_key)
-        data = data_loader.load_data()
+        file_extension = os.path.splitext(input_path)[1].lower()
+        normalized_data_dict = {}
+        norm_params_dict = {}
         
-        # Normalize data
-        logger.info(f"Normalizing data using method: {method}")
-        normalized_data, norm_params = normalize_dataset(
-            data,
-            method=method,
-            features=features,
-            preserve_scaled=preserve_scaled,
-            keep_originals=keep_originals,
-            preserve_columns=preserve_columns
-        )
+        if file_extension in ['.h5', '.hdf5']:
+            logger.info(f"Processing HDF5 file: {input_path}")
+            try:
+                with pd.HDFStore(input_path, mode='r') as store:
+                    keys = store.keys()
+                    if not keys:
+                        logger.warning(f"No keys found in HDF5 file: {input_path}. Skipping.")
+                        return False
+                    logger.info(f"Found keys: {keys}")
+                    
+                    for key in keys:
+                        logger.info(f"--- Processing key: {key} ---")
+                        data = store.get(key)
+                        
+                        if not isinstance(data, pd.DataFrame):
+                            logger.warning(f"Object at key '{key}' is not a DataFrame. Skipping.")
+                            continue
+                        
+                        logger.info(f"Normalizing data for key '{key}' using method: {method}")
+                        normalized_data, norm_params = normalize_dataset(
+                            data,
+                            method=method,
+                            features=features,
+                            preserve_scaled=preserve_scaled,
+                            keep_originals=keep_originals,
+                            preserve_columns=preserve_columns
+                        )
+                        normalized_data_dict[key] = normalized_data
+                        if norm_params: # Only add if normalization happened
+                            norm_params_dict[key] = norm_params
+                        
+                        logger.info(f"Finished key '{key}'. Original shape: {data.shape}, Normalized shape: {normalized_data.shape}")
+            
+            except Exception as e:
+                logger.error(f"Error reading HDF5 file {input_path}: {e}")
+                return False
         
-        # Save normalized data
-        save_dataset(
-            normalized_data,
-            output_path,
-            data_key,
-            norm_params
-        )
+        elif file_extension == '.csv':
+            logger.info(f"Processing CSV file: {input_path}")
+            try:
+                data = pd.read_csv(input_path, index_col=0, parse_dates=True) # Assuming index is date/time
+                logger.info(f"Normalizing data from CSV using method: {method}")
+                normalized_data, norm_params = normalize_dataset(
+                    data,
+                    method=method,
+                    features=features,
+                    preserve_scaled=preserve_scaled,
+                    keep_originals=keep_originals,
+                    preserve_columns=preserve_columns
+                )
+                # Use a default key for CSV output or handle differently?
+                # For consistency, maybe save CSVs with key in name if output is HDF5?
+                # Or save single key HDF5 if output is HDF5?
+                # Let's assume if input is CSV, output should also be CSV or single-key HDF5.
+                # Storing in dict with a default key '/data' for now.
+                default_key = '/data'
+                normalized_data_dict[default_key] = normalized_data
+                if norm_params:
+                    norm_params_dict[default_key] = norm_params
+            
+            except Exception as e:
+                logger.error(f"Error reading or processing CSV file {input_path}: {e}")
+                return False
+        else:
+            logger.error(f"Unsupported input file format: {file_extension}")
+            return False
         
-        logger.info(f"Normalization complete. Data saved to: {output_path}")
-        logger.info(f"Original data shape: {data.shape}")
-        logger.info(f"Normalized data shape: {normalized_data.shape}")
+        # Save the processed data
+        if not normalized_data_dict:
+            logger.warning(f"No data was normalized for file {input_path}. No output generated.")
+            return False
         
+        # Decide how to save based on output path extension
+        output_extension = os.path.splitext(output_path)[1].lower()
+        
+        if output_extension in ['.h5', '.hdf5']:
+            # Save all processed keys to the single HDF5 file
+            save_dataset(normalized_data_dict, norm_params_dict, output_path)
+        elif output_extension == '.csv':
+            if len(normalized_data_dict) > 1:
+                logger.warning(f"Output format is CSV, but multiple datasets (keys) were processed from HDF5 input {input_path}.")
+                logger.warning("Saving each dataset to a separate CSV file.")
+                base_output_path, _ = os.path.splitext(output_path)
+                for key, df in normalized_data_dict.items():
+                    key_suffix = key.replace('/', '_').strip('_') # Make key filename-safe
+                    specific_output_path = f"{base_output_path}_{key_suffix}.csv"
+                    logger.info(f"Saving dataset for key '{key}' to {specific_output_path}")
+                    df.to_csv(specific_output_path, index=True)
+                    # Save corresponding params
+                    if key in norm_params_dict:
+                        params_path = os.path.splitext(specific_output_path)[0] + "_norm_params.json"
+                        with open(params_path, 'w') as f:
+                            clean_params = {feat: {k: float(v) for k, v in p.items()} for feat, p in norm_params_dict[key].items()}
+                            json.dump(clean_params, f, indent=2)
+                        logger.info(f"Saved parameters for '{key}' to {params_path}")
+            
+            elif normalized_data_dict:
+                # Save the single processed dataset (from CSV input or single-key HDF5)
+                key = next(iter(normalized_data_dict))
+                logger.info(f"Saving normalized data to CSV: {output_path}")
+                normalized_data_dict[key].to_csv(output_path, index=True)
+                # Save corresponding params
+                if key in norm_params_dict:
+                    params_path = os.path.splitext(output_path)[0] + "_norm_params.json"
+                    with open(params_path, 'w') as f:
+                        clean_params = {feat: {k: float(v) for k, v in p.items()} for feat, p in norm_params_dict[key].items()}
+                        json.dump(clean_params, f, indent=2)
+                    logger.info(f"Saved normalization parameters to: {params_path}")
+        else:
+            logger.error(f"Unsupported output file format: {output_extension}")
+            return False
+        
+        logger.info(f"Normalization complete for {input_path}. Output saved.")
         return True
+    
     except Exception as e:
-        logger.error(f"Error processing file {input_path}: {e}")
+        logger.error(f"Unexpected error processing file {input_path}: {e}", exc_info=True)
         return False
 
 def batch_process_directory(
     input_dir: str,
     output_dir: str,
     file_pattern: str = "*.h5",
-    data_key: Optional[str] = None,
     method: str = "minmax",
     features: Optional[List[str]] = None,
     preserve_scaled: bool = True,
@@ -426,7 +514,6 @@ def batch_process_directory(
         input_dir: Input directory
         output_dir: Output directory
         file_pattern: File pattern to match
-        data_key: Key for HDF5 files
         method: Normalization method
         features: List of features to normalize
         preserve_scaled: Whether to preserve already scaled features
@@ -450,6 +537,9 @@ def batch_process_directory(
         search_pattern = os.path.join(input_dir, file_pattern)
         files = glob.glob(search_pattern)
     
+    # Filter out directories if pattern matches them
+    files = [f for f in files if os.path.isfile(f)]
+    
     logger.info(f"Found {len(files)} files matching pattern '{search_pattern}'")
     
     success_count = 0
@@ -465,10 +555,11 @@ def batch_process_directory(
         new_filename = f"{name}{suffix}{ext}"
         
         # Create output path, preserving directory structure for recursive mode
-        if recursive:
+        if recursive and os.path.dirname(rel_path): # Check if there is a relative dir
             rel_dir = os.path.dirname(rel_path)
-            output_file = os.path.join(output_dir, rel_dir, new_filename)
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            output_subdir = os.path.join(output_dir, rel_dir)
+            os.makedirs(output_subdir, exist_ok=True)
+            output_file = os.path.join(output_subdir, new_filename)
         else:
             output_file = os.path.join(output_dir, new_filename)
         
@@ -478,7 +569,6 @@ def batch_process_directory(
         success = process_file(
             input_path=input_file,
             output_path=output_file,
-            data_key=data_key,
             method=method,
             features=features,
             preserve_scaled=preserve_scaled,
@@ -491,6 +581,7 @@ def batch_process_directory(
             success_count += 1
         else:
             error_count += 1
+            logger.error(f"Failed to process: {input_file}")
     
     return success_count, error_count
 
@@ -533,7 +624,7 @@ def main():
     features = None
     if args.features:
         features = args.features.split(',')
-        logger.info(f"Normalizing specific features: {features}")
+        logger.info(f"Attempting to normalize specific features: {features}")
     
     # Process preserve_columns list
     preserve_columns = None
@@ -543,10 +634,10 @@ def main():
     
     # Single file mode
     if args.data_path:
+        logger.info("Running in single file mode.")
         process_file(
             input_path=args.data_path,
             output_path=args.output_path,
-            data_key=args.data_key,
             method=args.method,
             features=features,
             preserve_scaled=args.preserve_scaled,
@@ -556,12 +647,12 @@ def main():
         )
     
     # Directory mode
-    else:
+    else: # args.input_dir must be set
+        logger.info("Running in directory mode.")
         success_count, error_count = batch_process_directory(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
             file_pattern=args.file_pattern,
-            data_key=args.data_key,
             method=args.method,
             features=features,
             preserve_scaled=args.preserve_scaled,

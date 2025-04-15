@@ -438,11 +438,6 @@ class TradingEnvironment(Env):
                 # Log failed sell attempt
                 self.failed_sells += 1
                 logger.debug(f"Step {self.current_step}: Attempted Sell, but no shares held.")
-                # Correct action tracking if sell fails
-                if self.last_action == 0: # If the *previous* effective action was sell
-                   self.consecutive_sells = 0 # Reset sell streak as it failed
-                self.last_action = 1 # Treat effective action as hold for next step's consistency check
-                self.consecutive_holds +=1
                 # We didn't increment total_sells or total_trades, so no need to decrement.
 
         elif action == 2:  # Buy
@@ -451,12 +446,7 @@ class TradingEnvironment(Env):
                 if self.shares_held > ZERO_THRESHOLD:
                     self.failed_buys += 1 # Increment failed buy counter
                     logger.debug(f"Step {self.current_step}: Attempted Buy, but already holding {self.shares_held:.6f} shares. Holding.")
-                    # Correct action tracking if buy fails
-                    if self.last_action == 2: # If the *previous* effective action was buy
-                       self.consecutive_buys = 0 # Reset buy streak as it failed
-                    self.last_action = 1 # Treat effective action as hold for next step's consistency check
-                    self.consecutive_holds += 1
-                    return # Exit the function, action becomes Hold
+                    return # Exit the function, action becomes Hold # Keep return to prevent execution
                 # <<< END ADDED CHECK >>>
 
                 # Calculate amount to invest based on max_position
@@ -513,28 +503,10 @@ class TradingEnvironment(Env):
                     logger.debug(f"Step {self.current_step}: Attempted Buy. Bal: {self.balance:.2f}, "
                                f"Price: {current_price:.2f}, MaxPos: {self.max_position:.2f}. "
                                f"Calculated shares {shares_to_buy:.8f} <= threshold. Holding.")
-                    # Correct action tracking if buy fails
-                    if self.last_action == 2: # If the *previous* effective action was buy
-                       self.consecutive_buys = 0 # Reset buy streak as it failed
-                    self.last_action = 1 # Treat effective action as hold for next step's consistency check
-                    self.consecutive_holds +=1
             else:
                 # --- Buy Failed (Zero balance) ---
                 self.failed_buys += 1 # Increment failed buy counter
                 logger.debug(f"Step {self.current_step}: Attempted Buy, but balance is {self.balance:.2f}. Holding.")
-                # Correct action tracking if buy fails
-                if self.last_action == 2:
-                    self.consecutive_buys = 0
-                self.last_action = 1
-                self.consecutive_holds += 1
-
-        elif action == 1: # Hold
-             logger.debug(f"Step {self.current_step}: Holding. "
-                          f"Shares: {self.shares_held:.4f}, Balance: {self.balance:.2f}")
-
-        # Return fee paid in this step for potential use in reward calculation
-        # Although we track total_fees_paid, having the per-step fee might be useful
-        # return fee_paid_this_step # Let's not return it, use self.total_fees_paid delta
     
     def _update_portfolio_value(self):
         """Update the portfolio value based on current balance and asset prices."""
@@ -565,7 +537,6 @@ class TradingEnvironment(Env):
             'idle_penalty': 0.0,
             'profit_bonus': 0.0,
             'exploration_bonus': 0.0,
-            'invalid_action_penalty': 0.0, # Keep this penalty
             'raw_total': 0.0, # Sum before scaling
             'total_reward': 0.0 # Final scaled reward
         }
@@ -631,25 +602,14 @@ class TradingEnvironment(Env):
         # 9. Exploration Bonus (Keep commented out for now)
         # reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
 
-        # 10. Invalid Action Penalty (Keep active, reduced penalty)
-        invalid_penalty = 0.0
-        if action == 2 and self.shares_held > ZERO_THRESHOLD: # Buying when holding shares
-            invalid_penalty = -0.5 # Reduced penalty significantly
-        elif action == 2 and self.balance <= ZERO_THRESHOLD: # Buying with no balance
-            invalid_penalty = -0.5 # Reduced penalty significantly
-        elif action == 0 and self.shares_held <= ZERO_THRESHOLD: # Selling with no shares
-            invalid_penalty = -0.5 # Reduced penalty significantly
-        reward_components['invalid_action_penalty'] = invalid_penalty # No weight needed
-
         # --- END RESTORED COMPONENTS --- #
 
         # Sum all active reward components (excluding exploration bonus for now)
-        # active_components = ['portfolio_change', 'fee_penalty', 'invalid_action_penalty']
-        # raw_total = sum(reward_components[key] for key in active_components)
-        raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # Original sum logic
-        # Adjust raw_total if exploration bonus is commented out
-        if self.exploration_bonus_weight == 0: # Or check if 'exploration_bonus' key should be excluded based on commenting
-             raw_total -= reward_components['exploration_bonus'] # Subtract the zeroed-out bonus 
+        components_to_sum = [
+            k for k in reward_components 
+            if k not in ['raw_total', 'total_reward'] # Exclude invalid penalty
+        ]
+        raw_total = sum(reward_components[key] for key in components_to_sum)
         
         reward_components['raw_total'] = raw_total
 
