@@ -460,8 +460,8 @@ class EpisodeInfoCallback(BaseCallback):
                 cumulative_components_str = ""
                 if 'cumulative_reward_components' in info:
                     cumulative_components = info['cumulative_reward_components']
-                    # Filter out zero components for brevity
-                    components_to_log = {k: v for k, v in cumulative_components.items() if abs(v) > 1e-6}
+                    # Filter out zero components for brevity - REMOVED FILTER
+                    components_to_log = {k: v for k, v in cumulative_components.items() } # REMOVED: if abs(v) > 1e-6
                     if components_to_log:
                         # Format components as a string
                         components_str = ', '.join([f"{k}: {v:.4f}" for k, v in components_to_log.items()])
