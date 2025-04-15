@@ -24,8 +24,8 @@ try:
     import ray
     from ray import tune
     from ray.tune.schedulers import ASHAScheduler
-    from ray.tune.suggest.optuna import OptunaSearch
-    from ray.tune.suggest.hyperopt import HyperOptSearch
+    from ray.tune.search.optuna import OptunaSearch
+    from ray.tune.search.hyperopt import HyperOptSearch
     RAY_AVAILABLE = True
 except ImportError:
     RAY_AVAILABLE = False
