@@ -559,7 +559,7 @@ class TradingEnvironment(Env):
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
         
         # Scale by 100 to make it more comparable to other penalties/bonuses? Optional.
-        reward_components['portfolio_change'] = portfolio_change_pct * 100 * self.portfolio_change_weight
+        reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight
 
         # 2. Drawdown Penalty (Re-enabled)
         current_drawdown = 0.0
