@@ -708,7 +708,17 @@ def create_model(
                     f"defaulting to 'shared'"
                 )
                 shared_lstm_mode = "shared"
-            policy_kwargs["shared_lstm"] = shared_lstm_mode
+            # --- Correctly set boolean flags ---
+            if shared_lstm_mode == "shared":
+                policy_kwargs["shared_lstm"] = True
+                policy_kwargs["enable_critic_lstm"] = False
+            elif shared_lstm_mode == "seperate":
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = True
+            else: # shared_lstm_mode == "none"
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = False
+            # ----------------------------------
         
         # Set policy_kwargs in model_kwargs
         model_kwargs["policy_kwargs"] = policy_kwargs
