@@ -19,6 +19,17 @@ from typing import Any, Dict, List, Optional, Tuple
 # Add parent directory to path *before* attempting local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# --- Ray Tune Imports --- #
+try:
+    import ray
+    from ray import tune
+    from ray.tune.schedulers import ASHAScheduler
+    from ray.tune.suggest.optuna import OptunaSearch
+    from ray.tune.suggest.hyperopt import HyperOptSearch
+    RAY_AVAILABLE = True
+except ImportError:
+    RAY_AVAILABLE = False
+
 # --- Standard Library Imports --- #
 # (Already imported above: argparse, json, logging, os, sys, time, typing)
 
@@ -62,6 +73,300 @@ from rl_agent.utils import (calculate_trading_metrics, check_resources,
 
 # Initialize logger globally (will be configured in main/train/evaluate)
 logger = logging.getLogger(__name__)
+
+# --- Ray Tune Callback Class --- #
+class TuneReportCallback:
+    """
+    Callback to report metrics to Ray Tune during training.
+    Works alongside the SB3 callback system.
+    """
+    
+    def __init__(self, report_freq: int = 1000):
+        """
+        Initialize the callback.
+        
+        Args:
+            report_freq: How often to report metrics to Ray Tune (in timesteps)
+        """
+        self.report_freq = report_freq
+        self.last_reported_step = 0
+    
+    def __call__(self, locals_dict: Dict[str, Any], globals_dict: Dict[str, Any]) -> None:
+        """
+        Called by SB3 during training. Reports metrics to Ray Tune.
+        
+        Args:
+            locals_dict: Local variables in the scope of the learn function
+            globals_dict: Global variables
+        """
+        if not RAY_AVAILABLE:
+            return
+            
+        # Get the model from locals
+        model = locals_dict.get("self")
+        if model is None:
+            return
+            
+        # Only report at specified frequency
+        if model.num_timesteps - self.last_reported_step < self.report_freq:
+            return
+            
+        self.last_reported_step = model.num_timesteps
+        
+        # Get metrics from model logger
+        metrics = {}
+        if hasattr(model, "logger") and model.logger is not None:
+            if hasattr(model.logger, "name_to_value"):
+                metrics.update(model.logger.name_to_value)
+        
+        # Add current timestep
+        metrics["timesteps"] = model.num_timesteps
+        
+        # Report metrics to Ray Tune
+        if metrics:
+            tune.report(**metrics)
+
+
+# --- Ray Tune Trainable Function --- #
+def train_rl_agent_tune(config: Dict[str, Any]) -> None:
+    """
+    Ray Tune trainable function for training an RL agent.
+    
+    Args:
+        config: Dictionary of hyperparameters from Ray Tune
+    """
+    # Ensure Ray is available
+    if not RAY_AVAILABLE:
+        raise ImportError("Ray Tune not found. Install with 'pip install ray[tune]'")
+    
+    # Create a copy of the config to avoid modifying the original
+    train_config = config.copy()
+    
+    # Set up some defaults if not provided
+    train_config.setdefault("model_type", "recurrentppo")
+    train_config.setdefault("verbose", 1)
+    
+    # Generate a consistent name for this trial
+    if "trial_id" in config:
+        trial_id = config["trial_id"]
+    else:
+        trial_id = tune.get_trial_id()
+    
+    model_name = f"{train_config['model_type']}_{trial_id}"
+    train_config["model_name"] = model_name
+    
+    # Set up directories
+    log_dir = os.path.join(train_config.get("log_dir", "./logs"), model_name)
+    checkpoint_dir = os.path.join(train_config.get("checkpoint_dir", "./checkpoints"), model_name)
+    ensure_dir_exists(log_dir)
+    ensure_dir_exists(checkpoint_dir)
+    train_config["log_dir"] = log_dir
+    train_config["checkpoint_dir"] = checkpoint_dir
+    
+    # Setup logger
+    setup_logger(
+        log_dir=log_dir,
+        log_level=logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO
+    )
+    
+    # Setup seed - important for reproducible results across trials
+    seed = train_config.get("seed")
+    if seed is None:
+        # If no seed provided, derive one from trial_id to ensure consistency
+        seed = abs(hash(trial_id)) % (2**32)
+        train_config["seed"] = seed
+    
+    set_seeds(seed)
+    
+    # Log the configuration
+    logger.info(f"Starting Ray Tune trial with ID: {trial_id}")
+    logger.info("Configuration:")
+    for key, value in train_config.items():
+        logger.info(f"  {key}: {value}")
+    
+    # Setup SB3 logger
+    sb3_logger_instance = setup_sb3_logger(log_dir=log_dir)
+    
+    # --- Calculate dependent parameters if needed --- #
+    
+    # Ensure n_steps and batch_size are set appropriately
+    # batch_size should typically be n_steps * num_envs or a divisor of that
+    num_envs = train_config.get("num_envs", 8)
+    n_steps = train_config.get("n_steps", 2048)
+    
+    # Ensure batch_size is a divisor of n_steps * num_envs
+    total_steps = n_steps * num_envs
+    if "batch_size" not in train_config:
+        train_config["batch_size"] = min(total_steps, 2048)  # Default that works well
+        logger.info(f"Setting batch_size to {train_config['batch_size']} based on n_steps={n_steps} and num_envs={num_envs}")
+    
+    # --- Environment Creation --- #
+    logger.info(f"Creating {num_envs} parallel environment(s)...")
+    
+    # Function to create a single env instance
+    def make_single_env(rank: int, base_seed: Optional[int]):
+        def _init():
+            # Setup logger inside subprocess
+            process_log_path = os.path.join(log_dir)
+            setup_logger(
+                log_dir=process_log_path,
+                log_level=logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO,
+                console_level=logging.INFO,  # Avoid console spam
+                log_filename=f"rl_agent_{rank}.log"  # Use different log files per process
+            )
+            
+            env_config = train_config.copy()
+            instance_seed = base_seed + rank if base_seed is not None else None
+            env_config["seed"] = instance_seed
+            env = create_env(config=env_config, is_eval=False)
+            
+            # Use a different Monitor file per process
+            monitor_log_path = os.path.join(log_dir, f'monitor_{rank}.csv')
+            os.makedirs(os.path.dirname(monitor_log_path), exist_ok=True)
+            env = Monitor(env, filename=monitor_log_path)
+            return env
+        return _init
+    
+    # Create vectorized environment
+    vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
+    train_env = make_vec_env(
+        env_id=make_single_env(rank=0, base_seed=seed),
+        n_envs=num_envs,
+        seed=None,  # Seeding handled in make_single_env
+        vec_env_cls=vec_env_cls,
+        env_kwargs=None
+    )
+    
+    # Apply VecNormalize
+    norm_obs_setting = train_config.get("norm_obs", "auto").lower()
+    if norm_obs_setting == "auto":
+        # Auto-detect if features are already scaled
+        features = train_config.get("features", [])
+        if isinstance(features, str):
+            features = features.split(",")
+        
+        # Check if features contain _scaled suffix
+        has_scaled_features = any("_scaled" in feature for feature in features)
+        should_norm_obs = not has_scaled_features
+        logger.info(f"Auto-detected {'pre-scaled' if has_scaled_features else 'raw'} features. Setting norm_obs={should_norm_obs}")
+    else:
+        should_norm_obs = norm_obs_setting == "true"
+        logger.info(f"Using explicit norm_obs={should_norm_obs} from config")
+    
+    train_env = VecNormalize(
+        train_env,
+        norm_obs=should_norm_obs,
+        norm_reward=False,
+        clip_obs=10.,
+        gamma=train_config["gamma"]
+    )
+    
+    # Create validation environment if specified
+    eval_env = None
+    if train_config.get("val_data_path"):
+        logger.info(f"Creating validation env: {train_config['val_data_path']}")
+        eval_env_config = train_config.copy()
+        
+        eval_env = make_vec_env(
+            env_id=make_single_env(rank=0, base_seed=seed),
+            n_envs=1,  # Use single env for validation
+            seed=None,
+            vec_env_cls=DummyVecEnv,
+            env_kwargs=None
+        )
+        
+        # Apply VecNormalize to eval_env
+        eval_env = VecNormalize(
+            eval_env,
+            norm_obs=should_norm_obs,
+            norm_reward=False,
+            clip_obs=10.,
+            gamma=train_config["gamma"],
+            training=False
+        )
+    
+    # --- Model Creation --- #
+    logger.info(f"Creating new {train_config['model_type']} model")
+    model = create_model(env=train_env, config=train_config)
+    
+    # Set logger for the model
+    model.set_logger(sb3_logger_instance)
+    
+    # --- Callbacks --- #
+    # Create a list of callbacks, including the Ray Tune reporter
+    callbacks = get_callback_list(
+        eval_env=eval_env,
+        log_dir=log_dir,
+        eval_freq=max(train_config.get("eval_freq", 10000), 5000),
+        n_eval_episodes=train_config.get("n_eval_episodes", 5),
+        save_freq=train_config.get("save_freq", 50000),
+        keep_checkpoints=train_config.get("keep_checkpoints", 3),
+        resource_check_freq=train_config.get("resource_check_freq", 5000),
+        metrics_log_freq=train_config.get("metrics_log_freq", 1000),
+        early_stopping_patience=max(20, train_config.get("early_stopping_patience", 10)),
+        checkpoint_save_path=checkpoint_dir,
+        model_name=train_config["model_type"],
+        custom_callbacks=[TuneReportCallback(report_freq=train_config.get("metrics_log_freq", 1000))]
+    )
+    
+    # --- Training --- #
+    logger.info(f"Starting training: {train_config['total_timesteps']} timesteps...")
+    training_start_time = time.time()
+    try:
+        model.learn(
+            total_timesteps=train_config["total_timesteps"],
+            callback=callbacks,
+            log_interval=1,
+            reset_num_timesteps=not train_config.get("load_model", False)
+        )
+    except Exception as e:
+        logger.critical(f"Training failed: {e}", exc_info=True)
+        error_save_path = os.path.join(log_dir, "model_on_error.zip")
+        try:
+            model.save(error_save_path)
+            logger.info(f"Model state saved to {error_save_path}.")
+        except Exception as save_e:
+            logger.error(f"Could not save model after error: {save_e}")
+        # Report failure to Ray Tune
+        if RAY_AVAILABLE:
+            tune.report(training_iteration=model.num_timesteps, training_failure=True)
+        raise
+    finally:
+        # Close environments
+        if 'train_env' in locals() and hasattr(train_env, 'close'):
+            train_env.close()
+        if 'eval_env' in locals() and eval_env is not None and hasattr(eval_env, 'close'):
+            eval_env.close()
+    
+    training_time = time.time() - training_start_time
+    logger.info(f"Training finished in {training_time:.2f} seconds.")
+    
+    # Save final model
+    final_model_path = os.path.join(log_dir, "final_model.zip")
+    model.save(final_model_path)
+    logger.info(f"Final model saved to {final_model_path}")
+    
+    # Save VecNormalize stats
+    if isinstance(train_env, VecNormalize):
+        stats_path = final_model_path.replace(".zip", "_vecnormalize.pkl")
+        train_env.save(stats_path)
+        logger.info(f"VecNorm stats saved to {stats_path}")
+    
+    metrics = {
+        "training_time": training_time,
+        "total_timesteps": model.num_timesteps,
+        "model_type": train_config["model_type"],
+    }
+    
+    # Final report to Ray Tune
+    if RAY_AVAILABLE:
+        tune.report(
+            timesteps=model.num_timesteps,
+            training_time=training_time,
+            **metrics
+        )
+    
+    return model, metrics
 
 # --- Argument Parsing --- #
 
