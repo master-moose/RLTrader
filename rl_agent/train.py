@@ -896,14 +896,28 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
     # Function to create a single env instance
     def make_single_env(rank: int, base_seed: Optional[int]):
         def _init():
-            env_config = test_env_config.copy()
+            # --- ADD LOGGER SETUP INSIDE SUBPROCESS ---
+            # Use the same log path and verbosity level from the main config
+            # Important: Use a unique log filename per process OR ensure FileHandler is process-safe
+            # For simplicity here, let's log to the same file (FileHandler is generally process-safe)
+            process_log_path = os.path.join(config["log_dir"], config["model_name"])
+            setup_logger(
+                log_dir=process_log_path,
+                log_level=logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO,
+                # Keep console level INFO to avoid spamming main console from subprocesses
+                console_level=logging.INFO, 
+                log_filename="rl_agent.log" # Log to the same main file
+            )
+            # --- END LOGGER SETUP ---
+
+            env_config = config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
-            env = create_env(config=env_config, is_eval=True)
-            monitor_log_path_eval = os.path.join(
-                log_path, f'monitor_eval_{rank}.csv'
-            )
-            env = Monitor(env, filename=monitor_log_path_eval)
+            env = create_env(config=env_config, is_eval=False)
+            # Use a different Monitor file per process to avoid conflicts
+            monitor_log_path = os.path.join(log_path, f'monitor_{rank}.csv') 
+            os.makedirs(os.path.dirname(monitor_log_path), exist_ok=True)
+            env = Monitor(env, filename=monitor_log_path)
             return env
         return _init
 
@@ -1081,11 +1095,26 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     # Function to create a single env instance
     def make_single_env(rank: int, base_seed: Optional[int]):
         def _init():
+            # --- ADD LOGGER SETUP INSIDE SUBPROCESS ---
+            # Use the same log path and verbosity level from the main config
+            # Important: Use a unique log filename per process OR ensure FileHandler is process-safe
+            # For simplicity here, let's log to the same file (FileHandler is generally process-safe)
+            process_log_path = os.path.join(config["log_dir"], config["model_name"])
+            setup_logger(
+                log_dir=process_log_path,
+                log_level=logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO,
+                # Keep console level INFO to avoid spamming main console from subprocesses
+                console_level=logging.INFO, 
+                log_filename="rl_agent.log" # Log to the same main file
+            )
+            # --- END LOGGER SETUP ---
+
             env_config = config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
             env = create_env(config=env_config, is_eval=False)
-            monitor_log_path = os.path.join(log_path, f'monitor_{rank}.csv')
+            # Use a different Monitor file per process to avoid conflicts
+            monitor_log_path = os.path.join(log_path, f'monitor_{rank}.csv') 
             os.makedirs(os.path.dirname(monitor_log_path), exist_ok=True)
             env = Monitor(env, filename=monitor_log_path)
             return env
