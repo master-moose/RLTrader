@@ -386,8 +386,9 @@ def parse_args():
         help="Number of LSTM layers for RecurrentPPO (range: 1-3)"
     )
     network.add_argument(
-        "--shared_lstm", type=bool, default=True,
-        help="Whether to share LSTM between actor and critic in RecurrentPPO"
+        "--shared_lstm", type=str, default="shared",
+        choices=["shared", "separate", "none"],
+        help="LSTM mode for RecurrentPPO (shared, separate, or none)"
     )
     network.add_argument(
         "--fc_hidden_size", type=int, default=64,
@@ -711,14 +712,20 @@ def create_model(
         if "n_lstm_layers" in config:
             policy_kwargs["n_lstm_layers"] = config["n_lstm_layers"]
         if "shared_lstm" in config:
-            policy_kwargs["shared_lstm"] = config["shared_lstm"]
+            # Convert from string param to the proper format
+            shared_lstm_mode = config["shared_lstm"]
+            # For RecurrentPPO, shared_lstm must be one of: 'shared', 'separate', or 'none'
+            if shared_lstm_mode not in ["shared", "separate", "none"]:
+                logger.warning(f"Invalid shared_lstm value '{shared_lstm_mode}', defaulting to 'shared'")
+                shared_lstm_mode = "shared"
+            policy_kwargs["shared_lstm"] = shared_lstm_mode
         
         # Set policy_kwargs in model_kwargs
         model_kwargs["policy_kwargs"] = policy_kwargs
         
         logger.info(f"RecurrentPPO LSTM config: hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
                     f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
-                    f"shared={policy_kwargs.get('shared_lstm', True)}")
+                    f"shared={policy_kwargs.get('shared_lstm', 'shared')}")
 
         model = RecurrentPPO(**model_kwargs)
 
