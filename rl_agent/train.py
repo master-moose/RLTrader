@@ -83,16 +83,11 @@ class TuneReportCallback(BaseCallback):
     Works alongside the SB3 callback system.
     """
     
-    def __init__(self, report_freq: int = 1000):
+    def __init__(self):
         """
         Initialize the callback.
-        
-        Args:
-            report_freq: How often to report metrics to Ray Tune (in timesteps)
         """
         super().__init__()
-        self.report_freq = report_freq
-        self.last_reported_step = 0
     
     def _on_init(self) -> None:
         """Called when the training starts."""
@@ -113,24 +108,24 @@ class TuneReportCallback(BaseCallback):
         # (set by BaseCallback)
         model = self.model
 
-        # Only report at specified frequency
-        if model.num_timesteps - self.last_reported_step < self.report_freq:
-            return True  # Continue training
-
-        self.last_reported_step = model.num_timesteps
-        
-        # Get metrics from model logger
-        metrics = {}
-        if hasattr(model, "logger") and model.logger is not None:
-            if hasattr(model.logger, "name_to_value"):
-                metrics.update(model.logger.name_to_value)
-        
-        # Add current timestep
-        metrics["timesteps"] = model.num_timesteps
-        
-        # Report metrics to Ray Tune
-        if metrics:
+        # --- Check if the required metric exists in SB3 logger --- 
+        metric_to_check = "rollout/ep_rew_mean" # Metric needed by scheduler
+        if hasattr(model, "logger") and model.logger is not None and \
+           hasattr(model.logger, "name_to_value") and \
+           metric_to_check in model.logger.name_to_value:
+            
+            # Get all available metrics from SB3 logger
+            metrics = model.logger.name_to_value.copy()
+            
+            # Add current timestep if not already present (good practice)
+            metrics.setdefault("timesteps", model.num_timesteps)
+            
+            # Report metrics to Ray Tune
             tune.report(**metrics)
+            
+            # Optional: Clear the logger values after reporting? 
+            # SB3 usually handles this, but might be needed if reporting duplicates.
+            # model.logger.name_to_value.clear() 
 
         return True  # Continue training
 
@@ -318,7 +313,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         early_stopping_patience=max(20, train_config.get("early_stopping_patience", 10)),
         checkpoint_save_path=checkpoint_dir,
         model_name=train_config["model_type"],
-        custom_callbacks=[TuneReportCallback(report_freq=train_config.get("metrics_log_freq", 1000))]
+        custom_callbacks=[TuneReportCallback()]
     )
     
     # --- Training --- #
