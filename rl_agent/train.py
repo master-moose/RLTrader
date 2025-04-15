@@ -187,8 +187,13 @@ class TuneReportCallback(BaseCallback):
         
         # Fallback if all methods fail
         if reward_value is None:
-            reward_value = 0.0
-            global_logger.warning("No reward metric found from any source, using default 0.0")
+            # Check if we're in early training (first 1000 steps)
+            if self.num_timesteps < 1000:
+                reward_value = 0.0  # Silent default for early training
+                global_logger.debug("Early training phase (no episodes completed yet), using default reward")
+            else:
+                reward_value = 0.0
+                global_logger.warning("No reward metric found from any source, using default 0.0")
         
         return float(reward_value)
 
@@ -198,6 +203,9 @@ class TuneReportCallback(BaseCallback):
         metrics_to_report = {}
         metrics_to_report["timesteps"] = self.num_timesteps
         metrics_to_report["training_iteration"] = self.num_timesteps  # Aligning iteration with timesteps
+        
+        # Early in training, don't bother with extensive reporting as no episodes have completed
+        early_training = self.num_timesteps < 1000 and not self.episode_rewards
         
         # Get reward metrics using our robust method
         reward_value = self._get_current_reward_metrics()
@@ -215,8 +223,8 @@ class TuneReportCallback(BaseCallback):
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
         metrics_to_report["eval/combined_score"] = float(combined_score)
         
-        # Optionally add other important metrics if available and scalar
-        if self.logger and hasattr(self.logger, "name_to_value"):
+        # Only add other metrics if not in early training to avoid logging noise
+        if not early_training and self.logger and hasattr(self.logger, "name_to_value"):
             other_metrics = ["rollout/ep_len_mean", "time/fps"]
             for key in other_metrics:
                 if key in self.logger.name_to_value:
@@ -225,9 +233,10 @@ class TuneReportCallback(BaseCallback):
                     if isinstance(value, (int, float, np.number)):
                         metrics_to_report[key] = float(value)
         
-        # Log the metrics we're reporting for debugging
+        # Log the metrics we're reporting (but avoid verbose logging in early training)
         global_logger = logging.getLogger("rl_agent")
-        global_logger.debug(f"Metrics to report: reward={reward_value}, variance={variance_value}, combined={combined_score}")
+        if not early_training or self.num_timesteps % 200 == 0:  # Reduce logging frequency in early training
+            global_logger.debug(f"Metrics to report: reward={reward_value}, variance={variance_value}, combined={combined_score}")
         
         # Only report if we're at a new timestep
         if self.num_timesteps > self.last_reported_timestep:
@@ -243,7 +252,8 @@ class TuneReportCallback(BaseCallback):
                         tune.report(**metrics_to_report)
 
                     self.last_reported_timestep = self.num_timesteps  # Update only on successful report
-                    global_logger.debug(f"Reported metrics to Ray Tune at timestep {self.num_timesteps}")
+                    if not early_training or self.num_timesteps % 1000 == 0:  # Reduce logging frequency
+                        global_logger.debug(f"Reported metrics to Ray Tune at timestep {self.num_timesteps}")
                 else:
                     # Log warning if Ray is somehow unavailable here
                     global_logger.warning("Ray is not available during tune.report call.")
@@ -299,10 +309,12 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         "training_iteration": 0,
         "eval/mean_reward": 0.0,
         "eval/explained_variance": 0.0,
-        "eval/combined_score": 0.5  # Default middle value
+        "eval/combined_score": 0.5,  # Default middle value
+        "early_training": True       # Flag to indicate this is pre-training data
     }
     
     if RAY_AVAILABLE:
+        logger.info("Reporting initial metrics to Ray Tune")
         if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
             ray.air.session.report(initial_metrics)
         else:
