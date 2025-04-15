@@ -14,8 +14,8 @@ import traceback
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# Set the environment variable to disable strict metric checking
-os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
+# Note: Environment variables are now set in run_tune_sweep.py
+# Both TUNE_DISABLE_STRICT_METRIC_CHECKING and RAY_AIR_LOCAL_CACHE_DIR
 
 # Explicitly check and import Ray packages with better error reporting
 RAY_AVAILABLE = False
@@ -122,7 +122,8 @@ if __name__ == "__main__":
     print(f"Training data: {args.data_path}")
     print(f"Validation data: {args.val_data_path}")
     print(f"Running {args.num_samples} trials with {args.timesteps_per_trial} steps each")
-    print("Note: TUNE_DISABLE_STRICT_METRIC_CHECKING=1 has been set to prevent metric validation errors")
+    print("Note: Ray environment variables are now set in run_tune_sweep.py")
+    print("Note: Some deprecation warnings may still appear from Optuna but are safely handled")
     
     if args.search_algo == "optuna":
         print("Using Optuna search algorithm optimizing for combined metric (normalized reward and explained variance)")

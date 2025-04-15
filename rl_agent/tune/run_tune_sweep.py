@@ -18,6 +18,11 @@ from typing import Dict, Any
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+# Set environment variables for Ray
+os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
+# Set default cache location for Ray Air
+os.environ["RAY_AIR_LOCAL_CACHE_DIR"] = os.path.abspath("./ray_results")
+
 # Ray Tune imports with improved error handling
 RAY_AVAILABLE = False
 try:
@@ -176,6 +181,7 @@ def define_search_space() -> Dict[str, Any]:
     # Focus on stability parameters as requested in requirements
     search_space = {
         # Learning rates to try (log scale from 1e-5 to 1e-3)
+        # Use tune.loguniform for Ray's internal handling, the Optuna conversion happens internally
         "learning_rate": tune.loguniform(1e-5, 1e-3),
         
         # Discount factors to try
@@ -185,7 +191,9 @@ def define_search_space() -> Dict[str, Any]:
         "n_steps": tune.choice([512, 1024, 2048, 4096, 8192]),
 
         # --- Additional RecurrentPPO Parameters ---
+        # Use tune.loguniform for Ray's internal handling, the Optuna conversion happens internally
         "ent_coef": tune.loguniform(1e-4, 0.05),      # Entropy coefficient
+        # Use tune.uniform for Ray's internal handling, the Optuna conversion happens internally
         "vf_coef": tune.uniform(0.3, 0.7),         # Value function coefficient
         "clip_range": tune.choice([0.1, 0.2, 0.3]),  # PPO clip range
         "gae_lambda": tune.choice([0.9, 0.95, 0.98, 0.99]), # GAE lambda
@@ -193,20 +201,12 @@ def define_search_space() -> Dict[str, Any]:
         "max_grad_norm": tune.choice([0.5, 1.0, 2.0]), # Gradient clipping norm
 
         # --- Reward Component Weights ---
-        # "portfolio_change_weight": 1.0, # Keep fixed as main objective for now
+        # Use tune.uniform for Ray's internal handling, the Optuna conversion happens internally
         "drawdown_penalty_weight": tune.uniform(0.0, 2.0), # Explore penalties
-        # "sharpe_reward_weight": tune.uniform(0.0, 1.0), # Keep 0 for simplicity now
         "fee_penalty_weight": tune.uniform(0.0, 5.0),    # Explore fee penalties (0 means no fee penalty)
         "idle_penalty_weight": tune.uniform(0.0, 0.5),   # Explore small idle penalties
         "profit_bonus_weight": tune.uniform(0.0, 2.0),   # Explore profit incentives
         "trade_penalty_weight": tune.uniform(0.0, 1.0),  # Explore small penalties per trade
-        
-        # -- Parameters kept fixed (defined in DEFAULT_CONFIG or base_config) --
-        # "portfolio_change_weight": 1.0,
-        # "sharpe_reward_weight": 0.0,
-        # "benchmark_reward_weight": 0.0,
-        # "consistency_penalty_weight": 0.0,
-        # "exploration_bonus_weight": 0.0,
     }
     
     return search_space
@@ -318,7 +318,7 @@ def run_tune_experiment(args):
         num_samples=args.num_samples,
         scheduler=scheduler,
         search_alg=search_alg,
-        local_dir=args.local_dir,
+        storage_path=args.local_dir,
         name=args.exp_name,
         keep_checkpoints_num=2,
         verbose=1,
