@@ -12,22 +12,37 @@ import argparse
 import json
 import os
 import sys
+import traceback
 from typing import Dict, Any
 
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# Ray Tune imports
+# Ray Tune imports with improved error handling
+RAY_AVAILABLE = False
 try:
     import ray
-    from ray import tune
-    from ray.tune.schedulers import ASHAScheduler
-    from ray.tune.suggest.optuna import OptunaSearch
-    from ray.tune.suggest.hyperopt import HyperOptSearch
-    RAY_AVAILABLE = True
-except ImportError:
-    RAY_AVAILABLE = False
-    print("ERROR: Ray Tune not available. Install with 'pip install ray[tune] hyperopt optuna'")
+    print(f"Ray version: {ray.__version__}")
+    try:
+        from ray import tune
+        from ray.tune.schedulers import ASHAScheduler
+        from ray.tune.suggest.optuna import OptunaSearch
+        from ray.tune.suggest.hyperopt import HyperOptSearch
+        # Also try to import the RunConfig to catch errors early
+        from ray.train import RunConfig, CheckpointConfig
+        RAY_AVAILABLE = True
+    except (ImportError, AttributeError) as e:
+        print(f"ERROR importing Ray Tune modules: {e}")
+        traceback.print_exc()
+        print("\nRay was imported but Ray Tune components could not be imported.")
+        print("This might be due to a version mismatch or an incomplete Ray installation.")
+except ImportError as e:
+    print(f"ERROR importing Ray base package: {e}")
+    print("Ray base package could not be imported.")
+
+if not RAY_AVAILABLE:
+    print("ERROR: Ray Tune not available. Please ensure you have the correct versions installed:")
+    print("pip install 'ray[tune]>=2.0.0' hyperopt>=0.2.7 optuna>=3.0.0")
     sys.exit(1)
 
 # Import the trainable function from train.py

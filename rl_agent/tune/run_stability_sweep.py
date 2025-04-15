@@ -9,11 +9,38 @@ for the RecurrentPPO agent using Ray Tune.
 import argparse
 import os
 import sys
+import traceback
 
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from rl_agent.tune.run_tune_sweep import run_tune_experiment
+# Explicitly check and import Ray packages with better error reporting
+RAY_AVAILABLE = False
+try:
+    import ray
+    print(f"Ray version: {ray.__version__}")
+    try:
+        from ray import tune
+        from ray.tune.schedulers import ASHAScheduler
+        from ray.tune.suggest.optuna import OptunaSearch
+        from ray.tune.suggest.hyperopt import HyperOptSearch
+        RAY_AVAILABLE = True
+    except (ImportError, AttributeError) as e:
+        print(f"ERROR importing Ray Tune modules: {e}")
+        traceback.print_exc()
+        print("\nRay was imported but Ray Tune could not be imported.")
+        print("This might be due to a version mismatch or an incomplete Ray installation.")
+except ImportError as e:
+    print(f"ERROR importing Ray base package: {e}")
+    print("Ray base package could not be imported.")
+
+# Only import if Ray is available
+if RAY_AVAILABLE:
+    from rl_agent.tune.run_tune_sweep import run_tune_experiment
+else:
+    print("ERROR: Ray Tune not available. Please ensure you have the correct versions installed:")
+    print("pip install 'ray[tune]>=2.0.0' hyperopt>=0.2.7 optuna>=3.0.0")
+    sys.exit(1)
 
 def parse_args():
     """Parse command line arguments with preset values for stability sweep"""
