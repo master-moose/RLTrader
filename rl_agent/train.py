@@ -16,6 +16,7 @@ import os
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import traceback
 
 # Add parent directory to path *before* attempting local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -81,8 +82,10 @@ class TuneReportCallback(BaseCallback):
     """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
     def __init__(self):
         super().__init__(verbose=0)
-        self.last_reported_timestep = -1 # Track last report
-
+        self.last_reported_timestep = -1  # Track last report
+        self.episode_rewards = []  # Track episode rewards explicitly
+        self.last_episode_rewards = []  # For calculating deltas
+        
     def _on_init(self) -> None:
         """Ensure the logger is available."""
         # Use self.logger which is automatically set by BaseCallback
@@ -90,6 +93,10 @@ class TuneReportCallback(BaseCallback):
             # Use the logger instance configured elsewhere in the script
             global_logger = logging.getLogger("rl_agent")
             global_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
+        
+        # Set up initial logging
+        global_logger = logging.getLogger("rl_agent")
+        global_logger.info("TuneReportCallback initialized - will track episode rewards directly")
 
     def _normalize_and_combine_metrics(self, reward, explained_variance):
         """
@@ -123,94 +130,129 @@ class TuneReportCallback(BaseCallback):
         
         return combined_score
 
+    def _on_rollout_end(self) -> None:
+        """
+        Capture episode rewards at the end of each rollout.
+        This ensures we have the latest episode rewards.
+        """
+        if self.model and hasattr(self.model, "env") and hasattr(self.model.env, "buf_rews"):
+            # Try to get episode rewards directly from the VecEnv buffer
+            try:
+                rewards = self.model.env.get_episode_rewards()
+                if rewards and len(rewards) > len(self.last_episode_rewards):
+                    new_rewards = rewards[len(self.last_episode_rewards):]
+                    self.episode_rewards.extend(new_rewards)
+                    self.last_episode_rewards = rewards.copy()
+            except (AttributeError, IndexError) as e:
+                # If we can't get rewards from the env buffer, log the issue
+                global_logger = logging.getLogger("rl_agent")
+                global_logger.debug(f"Could not get rewards from env: {e}")
+        
+        # Also capture data from SB3 logger as a backup
+        if hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
+            if "rollout/ep_rew_mean" in self.model.logger.name_to_value:
+                mean_reward = self.model.logger.name_to_value["rollout/ep_rew_mean"]
+                global_logger = logging.getLogger("rl_agent")
+                global_logger.debug(f"SB3 logger ep_rew_mean: {mean_reward}")
+
+    def _get_current_reward_metrics(self):
+        """
+        Get the current reward metrics using multiple fallback methods.
+        """
+        global_logger = logging.getLogger("rl_agent")
+        reward_value = None
+        
+        # Method 1: Try to get reward from captured episode rewards
+        if self.episode_rewards:
+            reward_value = np.mean(self.episode_rewards[-10:])  # Average of last 10 episodes
+            global_logger.debug(f"Using captured rewards: {reward_value}")
+        
+        # Method 2: Try to get from SB3 logger
+        if reward_value is None and hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
+            if "rollout/ep_rew_mean" in self.model.logger.name_to_value:
+                reward_value = self.model.logger.name_to_value["rollout/ep_rew_mean"]
+                global_logger.debug(f"Using SB3 logger rewards: {reward_value}")
+        
+        # Method 3: Try to get directly from environment if available
+        if reward_value is None and hasattr(self.model, "env"):
+            try:
+                # Try to access VecEnv's episode rewards
+                if hasattr(self.model.env, "get_episode_rewards"):
+                    rewards = self.model.env.get_episode_rewards()
+                    if rewards:
+                        reward_value = np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards)
+                        global_logger.debug(f"Using env episode rewards: {reward_value}")
+            except (AttributeError, IndexError) as e:
+                global_logger.debug(f"Could not get rewards from env directly: {e}")
+        
+        # Fallback if all methods fail
+        if reward_value is None:
+            reward_value = 0.0
+            global_logger.warning("No reward metric found from any source, using default 0.0")
+        
+        return float(reward_value)
+
     def _on_step(self) -> bool:
         """Report metrics to Ray Tune only when key metrics are available."""
         # Access the SB3 logger via self.logger
-        sb3_logger = self.logger
-        if sb3_logger is None or not hasattr(sb3_logger, "name_to_value"):
-             # Use the logger instance configured elsewhere in the script
-            global_logger = logging.getLogger("rl_agent")
-            # Log only once to avoid spamming
-            if not hasattr(self, "_logged_missing_logger_warning"):
-                global_logger.warning("SB3 logger or name_to_value not found in TuneReportCallback. Cannot report metrics.")
-                self._logged_missing_logger_warning = True
-            return True # Cannot report if logger or values are missing
-
-        # --- Key metrics required by the scheduler ---
-        # Ensure these match the 'metrics' argument in OptunaSearch setup
         metrics_to_report = {}
         metrics_to_report["timesteps"] = self.num_timesteps
-        # Use training_iteration for Tune's internal tracking
-        metrics_to_report["training_iteration"] = self.num_timesteps # Aligning iteration with timesteps
+        metrics_to_report["training_iteration"] = self.num_timesteps  # Aligning iteration with timesteps
         
-        reward_value = None
-        variance_value = None
+        # Get reward metrics using our robust method
+        reward_value = self._get_current_reward_metrics()
+        metrics_to_report["eval/mean_reward"] = float(reward_value)
         
-        # Include rollout metrics if available
-        if "rollout/ep_rew_mean" in sb3_logger.name_to_value:
-            reward_value = sb3_logger.name_to_value["rollout/ep_rew_mean"]
-            # Report this as both the original metric name AND the one expected by the scheduler
-            metrics_to_report["rollout/ep_rew_mean"] = float(reward_value)
-            metrics_to_report["eval/mean_reward"] = float(reward_value)  # Map to the metric name used by scheduler
-        else:
-            # Provide default value if not available
-            reward_value = 0.0
-            metrics_to_report["eval/mean_reward"] = 0.0
+        # Get variance metrics from logger if available
+        variance_value = 0.0
+        if self.logger and hasattr(self.logger, "name_to_value"):
+            if "train/explained_variance" in self.logger.name_to_value:
+                variance_value = self.logger.name_to_value["train/explained_variance"]
         
-        # Include explained variance if available
-        if "train/explained_variance" in sb3_logger.name_to_value:
-            variance_value = sb3_logger.name_to_value["train/explained_variance"]
-            metrics_to_report["train/explained_variance"] = float(variance_value)
-            metrics_to_report["eval/explained_variance"] = float(variance_value)  # Map to the metric name used by scheduler
-        else:
-            # Provide default value if not available
-            variance_value = 0.0
-            metrics_to_report["eval/explained_variance"] = 0.0
+        metrics_to_report["eval/explained_variance"] = float(variance_value)
         
         # Always calculate combined score
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
         metrics_to_report["eval/combined_score"] = float(combined_score)
         
         # Optionally add other important metrics if available and scalar
-        other_metrics = ["rollout/ep_len_mean", "time/fps"]
-        for key in other_metrics:
-            if key in sb3_logger.name_to_value:
-                value = sb3_logger.name_to_value[key]
-                # Ensure value is scalar (int or float) before reporting
-                if isinstance(value, (int, float, np.number)): # Added np.number check
-                    metrics_to_report[key] = float(value) # Convert to float
+        if self.logger and hasattr(self.logger, "name_to_value"):
+            other_metrics = ["rollout/ep_len_mean", "time/fps"]
+            for key in other_metrics:
+                if key in self.logger.name_to_value:
+                    value = self.logger.name_to_value[key]
+                    # Ensure value is scalar (int or float) before reporting
+                    if isinstance(value, (int, float, np.number)):
+                        metrics_to_report[key] = float(value)
         
-        # Only report if we have at least one metric to report
-        if len(metrics_to_report) > 2:  # More than just timesteps and training_iteration
-            # Avoid reporting the exact same timestep multiple times if _on_step is called rapidly
-            if self.num_timesteps > self.last_reported_timestep:
-                # Report to Ray Tune
-                try:
-                    if RAY_AVAILABLE: # Check Ray availability
-                         # Use session.report for Ray >= 2.0 (preferred)
-                        if hasattr(ray, "air") and hasattr(ray.air, "session") \
-                           and ray.air.session.is_active():
-                            ray.air.session.report(metrics_to_report)
-                        else:
-                             # Fallback for older Ray or direct tune usage without AIR session
-                            tune.report(**metrics_to_report)
-
-                        self.last_reported_timestep = self.num_timesteps # Update only on successful report
+        # Log the metrics we're reporting for debugging
+        global_logger = logging.getLogger("rl_agent")
+        global_logger.debug(f"Metrics to report: reward={reward_value}, variance={variance_value}, combined={combined_score}")
+        
+        # Only report if we're at a new timestep
+        if self.num_timesteps > self.last_reported_timestep:
+            # Report to Ray Tune
+            try:
+                if RAY_AVAILABLE:
+                    # Use session.report for Ray >= 2.0 (preferred)
+                    if hasattr(ray, "air") and hasattr(ray.air, "session") \
+                       and ray.air.session.is_active():
+                        ray.air.session.report(metrics_to_report)
                     else:
-                        # Log warning if Ray is somehow unavailable here
-                        global_logger = logging.getLogger("rl_agent")
-                        global_logger.warning("Ray is not available during tune.report call.")
+                        # Fallback for older Ray or direct tune usage without AIR session
+                        tune.report(**metrics_to_report)
 
-                except Exception as e:
-                     global_logger = logging.getLogger("rl_agent")
-                     global_logger.error(f"Error during tune.report: {e}", exc_info=True)
-                     # Depending on the error, you might want to stop training
-                     # return False # Example: stop training if reporting fails
+                    self.last_reported_timestep = self.num_timesteps  # Update only on successful report
+                    global_logger.debug(f"Reported metrics to Ray Tune at timestep {self.num_timesteps}")
+                else:
+                    # Log warning if Ray is somehow unavailable here
+                    global_logger.warning("Ray is not available during tune.report call.")
 
-        # --- Ensure final report at the end of training always happens ---
-        # This part is handled outside the callback, at the end of train_rl_agent_tune
-
-        return True # Continue training
+            except Exception as e:
+                global_logger.error(f"Error during tune.report: {e}", exc_info=True)
+                # We'll continue training even if reporting fails
+        
+        return True  # Continue training
 
 
 # --- Ray Tune Trainable Function --- #
@@ -422,17 +464,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         model.learn(
             total_timesteps=train_config["total_timesteps"],
             callback=callbacks,
-            log_interval=1,
-            reset_num_timesteps=not train_config.get("load_model", False)
+            reset_num_timesteps=not train_config.get("continue_training", False)
         )
+        training_time = time.time() - training_start_time
+        logger.info(f"Training completed in {training_time:.2f} seconds")
     except Exception as e:
-        logger.critical(f"Training failed: {e}", exc_info=True)
-        error_save_path = os.path.join(log_dir, "model_on_error.zip")
-        try:
-            model.save(error_save_path)
-            logger.info(f"Model state saved to {error_save_path}.")
-        except Exception as save_e:
-            logger.error(f"Could not save model after error: {save_e}")
+        logger.error(f"Error during training: {e}")
+        logger.error(traceback.format_exc())
         # Report failure to Ray Tune
         if RAY_AVAILABLE:
             tune.report(training_iteration=model.num_timesteps, training_failure=True)
@@ -445,42 +483,98 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             eval_env.close()
     
     training_time = time.time() - training_start_time
-    logger.info(f"Training finished in {training_time:.2f} seconds.")
     
-    # Save final model
-    final_model_path = os.path.join(log_dir, "final_model.zip")
-    model.save(final_model_path)
-    logger.info(f"Final model saved to {final_model_path}")
+    # --- Final Evaluation ---
+    logger.info("Performing final evaluation...")
+    # If we have an eval env, run a final evaluation
+    final_eval_metrics = {}
+    if eval_env is not None:
+        try:
+            mean_reward, _, _, _ = evaluate_model(
+                model=model,
+                env=eval_env,
+                config=train_config,
+                n_episodes=train_config.get("n_eval_episodes", 5),
+                deterministic=True
+            )
+            final_eval_metrics["final_eval_mean_reward"] = mean_reward
+            logger.info(f"Final evaluation mean reward: {mean_reward:.4f}")
+        except Exception as e:
+            logger.error(f"Error during final evaluation: {e}")
     
-    # Save VecNormalize stats
-    if isinstance(train_env, VecNormalize):
-        stats_path = final_model_path.replace(".zip", "_vecnormalize.pkl")
-        train_env.save(stats_path)
-        logger.info(f"VecNorm stats saved to {stats_path}")
-    
+    # --- Final Report ---
+    # Prepare metrics to report to Ray Tune
     metrics = {
         "training_time": training_time,
-        "total_timesteps": model.num_timesteps,
-        "model_type": train_config["model_type"],
+        "timesteps": model.num_timesteps,
+        "training_iteration": model.num_timesteps,
+        **final_eval_metrics
     }
     
-    # Add the evaluation metrics if available
-    if hasattr(model.logger, "name_to_value"):
-        reward_value = model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0)
-        variance_value = model.logger.name_to_value.get("train/explained_variance", 0.0)
+    # Collect metrics from various sources to ensure we have the best values
+    reward_value = None
+    variance_value = None
+    
+    # Source 1: Check the TuneReportCallback for captured rewards
+    reward_callback = None
+    for callback in callbacks:
+        if isinstance(callback, TuneReportCallback):
+            reward_callback = callback
+            break
+    
+    if reward_callback and hasattr(reward_callback, "episode_rewards") and reward_callback.episode_rewards:
+        # Use the collected episode rewards from our callback
+        reward_value = np.mean(reward_callback.episode_rewards[-10:])
+        logger.info(f"Using rewards from TuneReportCallback: {reward_value:.4f}")
+    
+    # Source 2: Check the model's logger
+    if reward_value is None and hasattr(model, "logger") and hasattr(model.logger, "name_to_value"):
+        if "rollout/ep_rew_mean" in model.logger.name_to_value:
+            reward_value = model.logger.name_to_value["rollout/ep_rew_mean"]
+            logger.info(f"Using rewards from model logger: {reward_value:.4f}")
         
-        metrics["eval/mean_reward"] = float(reward_value)
-        metrics["eval/explained_variance"] = float(variance_value)
-        
-        # Create a callback instance just to use the normalization method
-        callback = TuneReportCallback()
-        combined_score = callback._normalize_and_combine_metrics(reward_value, variance_value)
-        metrics["eval/combined_score"] = float(combined_score)
-
-    # Final report to Ray Tune (basic completion info)
+        if "train/explained_variance" in model.logger.name_to_value:
+            variance_value = model.logger.name_to_value["train/explained_variance"]
+            logger.info(f"Using explained variance from model logger: {variance_value:.4f}")
+    
+    # Source 3: Check the environment directly
+    if reward_value is None and hasattr(model, "env"):
+        try:
+            if hasattr(model.env, "get_episode_rewards"):
+                rewards = model.env.get_episode_rewards()
+                if rewards:
+                    reward_value = np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards)
+                    logger.info(f"Using rewards from environment: {reward_value:.4f}")
+        except (AttributeError, IndexError) as e:
+            logger.warning(f"Could not get rewards from environment: {e}")
+    
+    # Fallback values if needed
+    if reward_value is None:
+        reward_value = final_eval_metrics.get("final_eval_mean_reward", 0.0)
+        logger.warning(f"No reward metric found from normal sources, using final eval: {reward_value:.4f}")
+    
+    if variance_value is None:
+        variance_value = 0.0
+        logger.warning("No explained variance metric found, using 0.0")
+    
+    # Add the evaluation metrics
+    metrics["eval/mean_reward"] = float(reward_value)
+    metrics["eval/explained_variance"] = float(variance_value)
+    
+    # Create a callback instance just to use the normalization method
+    callback = TuneReportCallback()
+    combined_score = callback._normalize_and_combine_metrics(reward_value, variance_value)
+    metrics["eval/combined_score"] = float(combined_score)
+    
+    logger.info(f"Final metrics - reward: {reward_value:.4f}, variance: {variance_value:.4f}, combined: {combined_score:.4f}")
+    
+    # Final report to Ray Tune
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary with the correct metric names
-        tune.report(**metrics)
+        logger.info("Sending final report to Ray Tune")
+        if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
+            ray.air.session.report(metrics)
+        else:
+            tune.report(**metrics)
     
     return model, metrics
 
