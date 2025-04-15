@@ -243,7 +243,7 @@ class TradingEnvironment(Env):
             Tuple of (observation, reward, terminated, truncated, info)
         """
         # --- Log state at the very beginning of the step ---
-        logger.info(f"STEP ENTRY (Step {self.current_step}): Balance={self.balance:.2f}, Shares={self.shares_held:.6f}")
+        # logger.info(f"STEP ENTRY (Step {self.current_step}): Balance={self.balance:.2f}, Shares={self.shares_held:.6f}") # Silenced
         # --------------------------------------------------
         # Record previous portfolio value
         prev_portfolio_value = self.portfolio_value
@@ -254,11 +254,11 @@ class TradingEnvironment(Env):
 
         # --- Update portfolio and check drawdown BEFORE incrementing step ---
         # Log state BEFORE update
-        logger.info(f"PRE-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}")
+        # logger.info(f"PRE-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}") # Silenced
         # Update portfolio value using price at the current step (t)
         self._update_portfolio_value() # Uses self.current_step
         # Log state AFTER update
-        logger.info(f"POST-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, AssetValue={self.asset_value:.2f}, PV={self.portfolio_value:.2f}")
+        # logger.info(f"POST-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, AssetValue={self.asset_value:.2f}, PV={self.portfolio_value:.2f}") # Silenced
 
         # Update max portfolio value based on value at step t
         self.max_portfolio_value = max(self.max_portfolio_value, 
@@ -271,7 +271,7 @@ class TradingEnvironment(Env):
                        / self.max_portfolio_value
         self.max_drawdown = max(self.max_drawdown, drawdown)
         # Log drawdown calculation
-        logger.info(f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, Drawdown={drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}")
+        # logger.info(f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, Drawdown={drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}") # Silenced
 
         # Check for early stopping based on drawdown at step t
         drawdown_terminated = False # Flag specific to drawdown termination
@@ -522,9 +522,12 @@ class TradingEnvironment(Env):
 
         current_price = self.data['close'].iloc[self.current_step]
 
-        # 1. Portfolio Value Change Reward (Core)
-        portfolio_change = self.portfolio_value - prev_portfolio_value
-        reward_components['portfolio_change'] = portfolio_change * self.portfolio_change_weight
+        # 1. Portfolio Value Change Reward (Use Percentage Change)
+        portfolio_change_pct = 0.0
+        if prev_portfolio_value != 0: # Avoid division by zero
+            portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
+        # Scale by 100 to make it more comparable to other penalties/bonuses? Optional.
+        reward_components['portfolio_change'] = portfolio_change_pct * 100 * self.portfolio_change_weight
 
         # 2. Drawdown Penalty
         # self.max_drawdown is updated in step()
@@ -592,10 +595,11 @@ class TradingEnvironment(Env):
 
         # 10. Invalid Action Penalty (e.g., buying with no balance)
         if action == 2 and self.balance <= 1e-6: # Check if balance is effectively zero
-            reward_components['invalid_action_penalty'] = -1.0 # Apply a fixed penalty (tune weight if needed)
+            # reward_components['invalid_action_penalty'] = -1.0 # Apply a fixed penalty (tune weight if needed)
+            reward_components['invalid_action_penalty'] = -100.0 # Increased penalty significantly
         # Could add penalty for selling with no shares, but _take_action already prevents it
         # elif action == 0 and self.shares_held <= 1e-9:
-        #    reward_components['invalid_action_penalty'] = -1.0 
+        #    reward_components['invalid_action_penalty'] = -100.0 
 
         # Sum all reward components for the raw total
         # Ensure the new component is included in the sum
@@ -605,12 +609,10 @@ class TradingEnvironment(Env):
         # Apply reward scaling for the final reward
         reward_components['total_reward'] = raw_total * self.reward_scaling
 
-        # Log the reward breakdown if needed
-        # if self.episode_step % 100 == 0 or action != 1:  # Log on non-hold actions or periodically
         # Always log for debugging purposes for now
         component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items() 
                                   if k not in ['raw_total', 'total_reward']])
-        logger.info(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}")
+        # logger.info(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}") # Silenced
         # logger.debug(f"Total reward: {reward_components['total_reward']:.4f}")
 
         return reward_components
