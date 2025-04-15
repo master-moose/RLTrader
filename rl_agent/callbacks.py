@@ -417,8 +417,8 @@ class EpisodeInfoCallback(BaseCallback):
     def __init__(self, verbose: int = 1):
         super().__init__(verbose)
         self.episode_count = 0
-        # Use the main logger configured in train.py
-        self.logger = logging.getLogger("rl_agent")
+        # Use a different name to avoid conflict with BaseCallback.logger
+        self._info_logger = logging.getLogger("rl_agent")
 
     def _on_step(self) -> bool:
         """
@@ -463,8 +463,8 @@ class EpisodeInfoCallback(BaseCallback):
                     f"Return={return_str}, Sharpe={sharpe_str}, "
                     f"Trades={trades_str}"
                 )
-                # Use the main logger instance
-                self.logger.info(log_str)
+                # Use the renamed logger instance
+                self._info_logger.info(log_str)
 
         return True
 
