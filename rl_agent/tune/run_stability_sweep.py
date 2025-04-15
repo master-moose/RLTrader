@@ -46,7 +46,7 @@ def parse_args():
         help="Number of trials to run"
     )
     parser.add_argument(
-        "--cpus_per_trial", type=float, default=2.0,
+        "--cpus_per_trial", type=float, default=4.0,
         help="CPUs per trial"
     )
     parser.add_argument(

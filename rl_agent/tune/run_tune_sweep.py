@@ -67,7 +67,7 @@ DEFAULT_CONFIG = {
     
     # Fixed environment params as requested
     "sequence_length": 15,
-    "num_envs": 8,
+    # num_envs is calculated dynamically based on available CPUs
     "max_steps": 20000,
     
     # Other fixed params
@@ -114,7 +114,7 @@ def parse_args():
         help="Number of trials to run"
     )
     parser.add_argument(
-        "--cpus_per_trial", type=float, default=2.0,
+        "--cpus_per_trial", type=float, default=4.0,
         help="CPUs per trial"
     )
     parser.add_argument(
@@ -188,6 +188,15 @@ def run_tune_experiment(args):
     
     # Set timesteps per trial
     base_config["total_timesteps"] = args.timesteps_per_trial
+    
+    # Calculate appropriate num_envs based on CPUs per trial
+    # RecurrentPPO is limited by available CPU cores
+    cpus_available = args.cpus_per_trial
+    # Reserve 1 CPU for the main process, use the rest for environments
+    # At least 1 environment, max 8 environments
+    num_envs = max(1, min(8, int(cpus_available - 1)))
+    base_config["num_envs"] = num_envs
+    print(f"Setting num_envs={num_envs} based on cpus_per_trial={cpus_available}")
     
     # Ensure Ray results directory exists
     ensure_dir_exists(args.local_dir)

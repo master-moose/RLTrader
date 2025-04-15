@@ -20,7 +20,7 @@ python rl_agent/tune/run_tune_sweep.py \
   --val_data_path /path/to/validation_data.csv \
   --exp_name ppo_stability_sweep \
   --num_samples 20 \
-  --cpus_per_trial 2 \
+  --cpus_per_trial 4 \
   --gpus_per_trial 0.25 \
   --search_algo optuna
 ```
@@ -32,11 +32,21 @@ python rl_agent/tune/run_tune_sweep.py \
 - `--data_key`: Key for HDF5 data files (if applicable)
 - `--exp_name`: Name for the experiment (default: "ppo_tune")
 - `--num_samples`: Number of trials to run (default: 20)
-- `--cpus_per_trial`: CPU resources per trial (default: 2.0)
+- `--cpus_per_trial`: CPU resources per trial (default: 4.0)
 - `--gpus_per_trial`: GPU resources per trial (default: 0.25)
 - `--search_algo`: Search algorithm to use ("basic", "optuna", or "hyperopt") (default: "optuna")
 - `--timesteps_per_trial`: Timesteps per trial (default: 1,000,000)
 - `--base_config`: Path to a JSON file with base configuration (optional)
+
+## Resource Management for RecurrentPPO
+
+RecurrentPPO has a limitation where the number of parallel environments (`num_envs`) is limited by available CPU cores. To address this, the script automatically calculates an appropriate `num_envs` based on `cpus_per_trial`:
+
+- 1 CPU is reserved for the main process
+- The remaining CPUs are allocated for environment processes (up to a maximum of 8)
+- For example, with `--cpus_per_trial=4`, you'll get `num_envs=3` (1 for main, 3 for environments)
+
+This dynamic allocation ensures efficient resource usage while preventing CPU oversubscription.
 
 ## Current Search Space
 
