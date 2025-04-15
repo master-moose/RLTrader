@@ -230,11 +230,11 @@ class TradingEnvironment(Env):
             'drawdown_penalty': 0.0,
             'sharpe_reward': 0.0,
             'fee_penalty': 0.0,
-            'benchmark_reward': 0.0,
-            'consistency_penalty': 0.0,
+            'benchmark_reward': 0.0, # Ensure all potential keys are present
+            'consistency_penalty': 0.0, # Ensure all potential keys are present
             'idle_penalty': 0.0,
             'profit_bonus': 0.0,
-            'exploration_bonus': 0.0,
+            'exploration_bonus': 0.0, # Ensure all potential keys are present
         }
         # --- End cumulative reward component trackers ---
 
