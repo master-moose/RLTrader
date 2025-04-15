@@ -124,6 +124,9 @@ if __name__ == "__main__":
     print(f"Running {args.num_samples} trials with {args.timesteps_per_trial} steps each")
     print("Note: TUNE_DISABLE_STRICT_METRIC_CHECKING=1 has been set to prevent metric validation errors")
     
+    if args.search_algo == "optuna":
+        print("Using multi-objective optimization targeting both mean reward and explained variance")
+    
     best_trial = run_tune_experiment(args)
     
     # Print a summary of the best found configuration

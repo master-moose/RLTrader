@@ -282,16 +282,16 @@ def run_tune_experiment(args):
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
-            metric="rollout/ep_rew_mean",
-            mode="max"
+            metrics=["eval/mean_reward", "eval/explained_variance"],
+            mode=["max", "max"]
         )
-        print("Using Optuna search algorithm")
+        print("Using Optuna search algorithm with multi-objective optimization")
     elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
-            metric="rollout/ep_rew_mean",
+            metric="eval/mean_reward",  # HyperOptSearch doesn't support multi-objective optimization
             mode="max"
         )
-        print("Using HyperOpt search algorithm")
+        print("Using HyperOpt search algorithm (note: only optimizes for eval/mean_reward)")
     else:  # "basic"
         search_alg = None
         print("Using basic random search algorithm")
@@ -299,7 +299,7 @@ def run_tune_experiment(args):
     # Configure scheduler for early stopping
     scheduler = ASHAScheduler(
         time_attr="timesteps",
-        metric="rollout/ep_rew_mean",
+        metric="eval/mean_reward",  # Primary metric for early stopping
         mode="max",
         max_t=args.timesteps_per_trial,
         grace_period=100000,  # Min steps before stopping a trial
@@ -330,8 +330,13 @@ def run_tune_experiment(args):
     best_trial = analysis.best_trial
     print("\n==== Best Trial Results ====")
     print(f"Trial ID: {best_trial.trial_id}")
-    best_reward = best_trial.last_result.get('rollout/ep_rew_mean', 'N/A')
-    print(f"Best Rollout Mean Reward: {best_reward}")
+    
+    # Show both optimization metrics in the output
+    best_reward = best_trial.last_result.get('eval/mean_reward', 'N/A')
+    best_explained_variance = best_trial.last_result.get('eval/explained_variance', 'N/A')
+    print(f"Best Mean Reward: {best_reward}")
+    print(f"Best Explained Variance: {best_explained_variance}")
+    
     print(f"Final Timesteps: {best_trial.last_result['timesteps']}")
     print("\nBest Hyperparameters:")
     for param_name in search_space.keys():
