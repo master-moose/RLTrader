@@ -456,30 +456,24 @@ class EpisodeInfoCallback(BaseCallback):
                 trades_str = str(total_trades)
                 length_str = str(ep_length)
 
-                # --- Extract and process reward components information ---
-                reward_components_str = ""
-                if 'reward_components' in info:
-                    # We'll use the final step's reward components as a representative sample
-                    # since we don't collect them over the episode
-                    reward_components = info['reward_components']
-                    
-                    # Filter out raw_total and total_reward, and only include non-zero components
-                    components_to_log = {}
-                    for k, v in reward_components.items():
-                        if k not in ['raw_total', 'total_reward'] and abs(v) > 1e-6:
-                            components_to_log[k] = v
-                    
+                # --- Extract and process CUMULATIVE reward components information ---
+                cumulative_components_str = ""
+                if 'cumulative_reward_components' in info:
+                    cumulative_components = info['cumulative_reward_components']
+                    # Filter out zero components for brevity
+                    components_to_log = {k: v for k, v in cumulative_components.items() if abs(v) > 1e-6}
                     if components_to_log:
                         # Format components as a string
                         components_str = ', '.join([f"{k}: {v:.4f}" for k, v in components_to_log.items()])
-                        reward_components_str = f"\nReward Components: {components_str}"
+                        cumulative_components_str = f"\nCum. Rewards: {components_str}"
+                # --- End Extract --- 
 
-                # Format log message
+                # Format log message using cumulative rewards
                 log_str = (
                     f"Episode {self.episode_count} finished: "
                     f"Reward={reward_str}, Length={length_str}, "
                     f"Return={return_str}, Sharpe={sharpe_str}, "
-                    f"Trades={trades_str}{reward_components_str}"
+                    f"Trades={trades_str}{cumulative_components_str}" # Use cumulative string
                 )
                 # Use the renamed logger instance
                 self._info_logger.info(log_str)

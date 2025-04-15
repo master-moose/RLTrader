@@ -224,6 +224,19 @@ class TradingEnvironment(Env):
         self.total_fees_paid = 0.0 # Reset total fees
         self.failed_buys = 0 # Initialize failed buy counter
         self.failed_sells = 0 # Initialize failed sell counter
+        # --- Add cumulative reward component trackers ---
+        self.cumulative_rewards = {
+            'portfolio_change': 0.0,
+            'drawdown_penalty': 0.0,
+            'sharpe_reward': 0.0,
+            'fee_penalty': 0.0,
+            'benchmark_reward': 0.0,
+            'consistency_penalty': 0.0,
+            'idle_penalty': 0.0,
+            'profit_bonus': 0.0,
+            'exploration_bonus': 0.0,
+        }
+        # --- End cumulative reward component trackers ---
 
         # Steps taken within the current episode
         self.episode_step = 0
@@ -625,6 +638,12 @@ class TradingEnvironment(Env):
         # Apply reward scaling for the final reward
         reward_components['total_reward'] = raw_total * self.reward_scaling
 
+        # --- Update cumulative reward sums ---
+        for key in self.cumulative_rewards:
+            if key in reward_components:
+                self.cumulative_rewards[key] += reward_components[key]
+        # --- End update ---
+
         # Always log for debugging purposes for now
         component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items()
                                   if k not in ['raw_total', 'total_reward'] and abs(v) > 1e-6]) # Only log non-zero components
@@ -762,6 +781,10 @@ class TradingEnvironment(Env):
 
         info['benchmark_portfolio_value'] = benchmark_portfolio_value
         info['benchmark_return'] = benchmark_return
+
+        # --- Add cumulative reward components to info ---
+        info['cumulative_reward_components'] = self.cumulative_rewards.copy()
+        # --- End add cumulative ---
 
         # Reward components are added in the step method after _calculate_reward is called
         # if 'reward_components' not in info: # Ensure it exists even at step 0
