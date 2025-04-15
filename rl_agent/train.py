@@ -1214,7 +1214,6 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         early_stopping_patience=config["early_stopping_patience"], # EvalCallback handles patience
         checkpoint_save_path=checkpoint_save_path, # Checkpoint callback needs this
         model_name=config["model_type"], # Checkpoint callback needs this
-        vec_normalize_env=train_env if isinstance(train_env, VecNormalize) else None, # Pass VecNormalize env if used
         custom_callbacks=[]
     )
 
