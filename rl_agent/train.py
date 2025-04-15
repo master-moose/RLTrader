@@ -104,36 +104,39 @@ class TuneReportCallback(BaseCallback):
                 self._logged_missing_logger_warning = True
             return True # Cannot report if logger or values are missing
 
-        # --- Key metric required by the scheduler ---
-        # Ensure this matches the 'metric' argument in tune.run() scheduler setup
-        scheduler_metric = "rollout/ep_rew_mean"
-
-        # Check if the scheduler metric *is currently available* in the logger's values
-        if scheduler_metric in sb3_logger.name_to_value:
+        # --- Key metrics required by the scheduler ---
+        # Ensure these match the 'metrics' argument in OptunaSearch setup
+        metrics_to_report = {}
+        metrics_to_report["timesteps"] = self.num_timesteps
+        # Use training_iteration for Tune's internal tracking
+        metrics_to_report["training_iteration"] = self.num_timesteps # Aligning iteration with timesteps
+        
+        # Include rollout metrics if available
+        if "rollout/ep_rew_mean" in sb3_logger.name_to_value:
+            current_reward_mean = sb3_logger.name_to_value["rollout/ep_rew_mean"]
+            # Report this as both the original metric name AND the one expected by the scheduler
+            metrics_to_report["rollout/ep_rew_mean"] = float(current_reward_mean)
+            metrics_to_report["eval/mean_reward"] = float(current_reward_mean)  # Map to the metric name used by scheduler
+        
+        # Include explained variance if available
+        if "train/explained_variance" in sb3_logger.name_to_value:
+            explained_var = sb3_logger.name_to_value["train/explained_variance"]
+            metrics_to_report["train/explained_variance"] = float(explained_var)
+            metrics_to_report["eval/explained_variance"] = float(explained_var)  # Map to the metric name used by scheduler
+            
+        # Optionally add other important metrics if available and scalar
+        other_metrics = ["rollout/ep_len_mean", "time/fps"]
+        for key in other_metrics:
+            if key in sb3_logger.name_to_value:
+                value = sb3_logger.name_to_value[key]
+                # Ensure value is scalar (int or float) before reporting
+                if isinstance(value, (int, float, np.number)): # Added np.number check
+                    metrics_to_report[key] = float(value) # Convert to float
+        
+        # Only report if we have at least one metric to report
+        if len(metrics_to_report) > 2:  # More than just timesteps and training_iteration
             # Avoid reporting the exact same timestep multiple times if _on_step is called rapidly
             if self.num_timesteps > self.last_reported_timestep:
-
-                metrics_to_report = {}
-                # Definitely include the scheduler metric
-                current_reward_mean = sb3_logger.name_to_value[scheduler_metric]
-                # Ensure the value is a standard float (sometimes it might be numpy float)
-                metrics_to_report[scheduler_metric] = float(current_reward_mean)
-
-
-                # Optionally add other important metrics if available and scalar
-                other_metrics = ["rollout/ep_len_mean", "train/explained_variance", "time/fps"]
-                for key in other_metrics:
-                    if key in sb3_logger.name_to_value:
-                        value = sb3_logger.name_to_value[key]
-                        # Ensure value is scalar (int or float) before reporting
-                        if isinstance(value, (int, float, np.number)): # Added np.number check
-                            metrics_to_report[key] = float(value) # Convert to float
-
-                # Always include timestep info
-                metrics_to_report["timesteps"] = self.num_timesteps
-                # Use training_iteration for Tune's internal tracking if needed
-                metrics_to_report["training_iteration"] = self.num_timesteps # Aligning iteration with timesteps
-
                 # Report to Ray Tune
                 try:
                     if RAY_AVAILABLE: # Check Ray availability
@@ -150,7 +153,6 @@ class TuneReportCallback(BaseCallback):
                         # Log warning if Ray is somehow unavailable here
                         global_logger = logging.getLogger("rl_agent")
                         global_logger.warning("Ray is not available during tune.report call.")
-
 
                 except Exception as e:
                      global_logger = logging.getLogger("rl_agent")
@@ -397,11 +399,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         "training_time": training_time,
         "total_timesteps": model.num_timesteps,
         "model_type": train_config["model_type"],
+        "eval/mean_reward": model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0) if hasattr(model.logger, "name_to_value") else 0.0,
+        "eval/explained_variance": model.logger.name_to_value.get("train/explained_variance", 0.0) if hasattr(model.logger, "name_to_value") else 0.0
     }
 
     # Final report to Ray Tune (basic completion info)
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary (now without ep_rew_mean)
+        # Pass the consolidated metrics dictionary (now with the correct metric names)
         tune.report(**metrics)
     
     return model, metrics
@@ -1668,11 +1672,13 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         "training_time": training_time,
         "total_timesteps": model.num_timesteps,
         "model_type": config["model_type"],
+        "eval/mean_reward": model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0) if hasattr(model.logger, "name_to_value") else 0.0,
+        "eval/explained_variance": model.logger.name_to_value.get("train/explained_variance", 0.0) if hasattr(model.logger, "name_to_value") else 0.0
     }
 
     # Final report to Ray Tune (basic completion info)
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary (now without ep_rew_mean)
+        # Pass the consolidated metrics dictionary (now with the correct metric names)
         tune.report(**metrics)
     
     return model, metrics
