@@ -588,11 +588,12 @@ class TradingEnvironment(Env):
         reward_components['total_reward'] = raw_total * self.reward_scaling
 
         # Log the reward breakdown if needed
-        if self.episode_step % 100 == 0 or action != 1:  # Log on non-hold actions or periodically
-            component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items() 
-                                      if k not in ['raw_total', 'total_reward']])
-            logger.debug(f"Reward components: {component_str}")
-            logger.debug(f"Total reward: {reward_components['total_reward']:.4f}")
+        # if self.episode_step % 100 == 0 or action != 1:  # Log on non-hold actions or periodically
+        # Always log for debugging purposes for now
+        component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items() 
+                                  if k not in ['raw_total', 'total_reward']])
+        logger.debug(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}")
+        # logger.debug(f"Total reward: {reward_components['total_reward']:.4f}")
 
         return reward_components
     
