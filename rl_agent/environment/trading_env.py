@@ -242,6 +242,9 @@ class TradingEnvironment(Env):
         Returns:
             Tuple of (observation, reward, terminated, truncated, info)
         """
+        # --- Log state at the very beginning of the step ---
+        logger.info(f"STEP ENTRY (Step {self.current_step}): Balance={self.balance:.2f}, Shares={self.shares_held:.6f}")
+        # --------------------------------------------------
         # Record previous portfolio value
         prev_portfolio_value = self.portfolio_value
         prev_fees_paid = self.total_fees_paid # Store fees before action
