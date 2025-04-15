@@ -399,22 +399,9 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         "model_type": train_config["model_type"],
     }
 
-    # --- Add the last rollout reward to the final metrics --- 
-    if hasattr(model, "logger") and model.logger is not None and \
-       hasattr(model.logger, "name_to_value") and \
-       "rollout/ep_rew_mean" in model.logger.name_to_value:
-        last_rollout_reward = model.logger.name_to_value["rollout/ep_rew_mean"]
-        metrics["rollout/ep_rew_mean"] = last_rollout_reward
-        logger.info(f"Adding last rollout/ep_rew_mean ({last_rollout_reward:.4f}) to final report.")
-    else:
-        logger.warning("Could not find rollout/ep_rew_mean in SB3 logger for final report.")
-        # Optionally report a default value if needed by the scheduler, e.g., 0 or -inf
-        # metrics["rollout/ep_rew_mean"] = 0 
-    # --------------------------------------------------------
-    
-    # Final report to Ray Tune
+    # Final report to Ray Tune (basic completion info)
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary
+        # Pass the consolidated metrics dictionary (now without ep_rew_mean)
         tune.report(**metrics)
     
     return model, metrics
@@ -1683,22 +1670,9 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         "model_type": config["model_type"],
     }
 
-    # --- Add the last rollout reward to the final metrics --- 
-    if hasattr(model, "logger") and model.logger is not None and \
-       hasattr(model.logger, "name_to_value") and \
-       "rollout/ep_rew_mean" in model.logger.name_to_value:
-        last_rollout_reward = model.logger.name_to_value["rollout/ep_rew_mean"]
-        metrics["rollout/ep_rew_mean"] = last_rollout_reward
-        logger.info(f"Adding last rollout/ep_rew_mean ({last_rollout_reward:.4f}) to final report.")
-    else:
-        logger.warning("Could not find rollout/ep_rew_mean in SB3 logger for final report.")
-        # Optionally report a default value if needed by the scheduler, e.g., 0 or -inf
-        # metrics["rollout/ep_rew_mean"] = 0 
-    # --------------------------------------------------------
-    
-    # Final report to Ray Tune
+    # Final report to Ray Tune (basic completion info)
     if RAY_AVAILABLE:
-        # Pass the consolidated metrics dictionary
+        # Pass the consolidated metrics dictionary (now without ep_rew_mean)
         tune.report(**metrics)
     
     return model, metrics
