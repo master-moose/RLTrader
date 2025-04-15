@@ -405,14 +405,73 @@ class TradingMetricsCallback(BaseCallback):
             logger.error(f"Failed to save episode data: {e}")
     
     def get_metrics_history(self) -> List[Dict[str, Any]]:
-        """Get the historical metrics data."""
+        """Get the metrics history."""
         return self.metrics_history
+
+
+class EpisodeInfoCallback(BaseCallback):
+    """
+    Callback to log detailed episode information when an episode ends,
+    including custom metrics like total trades.
+    """
+    def __init__(self, verbose: int = 1):
+        super().__init__(verbose)
+        self.episode_count = 0
+        # Use the main logger configured in train.py
+        self.logger = logging.getLogger("rl_agent")
+
+    def _on_step(self) -> bool:
+        """
+        This method will be called by the model after each call to `env.step()`.
+
+        For child callback (of an `EventCallback`), this will be called
+        when the event is triggered.
+
+        :return: (bool) If the callback returns False, training is aborted early.
+        """
+        # Check if any environments are done
+        if "dones" not in self.locals or self.locals["dones"] is None:
+            return True # Should not happen with VecEnv
+
+        for i, done in enumerate(self.locals["dones"]):
+            if done:
+                self.episode_count += 1
+                # Extract info for the finished episode
+                info = self.locals["infos"][i].copy() # Use .copy() to avoid modifying original
+
+                # Get metrics from Monitor's 'episode' sub-dict
+                ep_info = info.get("episode", {})
+                ep_reward = ep_info.get("r", "N/A")
+                ep_length = ep_info.get("l", "N/A")
+
+                # Get custom metrics directly from info dict (from TradingEnvironment)
+                total_trades = info.get("total_trades", "N/A")
+                episode_return = info.get("episode_return", 0.0) # This is a fraction
+                sharpe_ratio = info.get("sharpe_ratio_episode", "N/A")
+
+                # Format values for logging
+                reward_str = f"{ep_reward:.2f}" if isinstance(ep_reward, (int, float)) else str(ep_reward)
+                return_str = f"{episode_return * 100:.2f}%" if isinstance(episode_return, (int, float)) else str(episode_return)
+                sharpe_str = f"{sharpe_ratio:.2f}" if isinstance(sharpe_ratio, (int, float)) else str(sharpe_ratio)
+                trades_str = str(total_trades)
+                length_str = str(ep_length)
+
+                # Format log message
+                log_str = (
+                    f"Episode {self.episode_count} finished: "
+                    f"Reward={reward_str}, Length={length_str}, "
+                    f"Return={return_str}, Sharpe={sharpe_str}, "
+                    f"Trades={trades_str}"
+                )
+                # Use the main logger instance
+                self.logger.info(log_str)
+
+        return True
 
 
 class BestModelCallback(EvalCallback):
     """
-    Callback for evaluating the agent and saving the best model.
-    Optionally includes early stopping.
+    Callback for evaluating the agent and saving the best model based on evaluation results.
     """
     
     def __init__(
@@ -597,87 +656,99 @@ def get_callback_list(
     curriculum_duration_fraction: float = 0.5 # Added argument for curriculum
 ) -> CallbackList:
     """
-    Assemble a list of callbacks for training.
+    Constructs the list of callbacks for training.
 
     Args:
         eval_env: Environment for evaluation
-        log_dir: Directory for logs and models
-        eval_freq: Evaluation frequency
-        n_eval_episodes: Number of evaluation episodes
-        save_freq: Checkpoint save frequency
+        log_dir: Directory for saving logs
+        eval_freq: Frequency of evaluation
+        n_eval_episodes: Number of episodes for evaluation
+        save_freq: Frequency of saving model checkpoints
         keep_checkpoints: Number of checkpoints to keep
-        resource_check_freq: Frequency for resource checks
-        metrics_log_freq: Frequency for logging trading metrics
-        early_stopping_patience: Patience for early stopping
+        resource_check_freq: Frequency of resource usage checks
+        metrics_log_freq: Frequency of trading metrics logging
+        early_stopping_patience: Patience for early stopping (0=disable)
         custom_callbacks: List of additional custom callbacks
-        checkpoint_save_path: Directory to save checkpoints
-        model_name: Name prefix for checkpoint files
+        checkpoint_save_path: Base path to save checkpoints
+        model_name: Name of the model (used for checkpoint naming)
         target_transaction_fee: Target fee for curriculum learning
-        curriculum_duration_fraction: Duration fraction for curriculum
+        curriculum_duration_fraction: Fraction of training for curriculum
 
     Returns:
-        CallbackList object
+        CallbackList containing all configured callbacks.
     """
     callbacks = []
     
-    # --- Add Curriculum Callback --- #
-    # TEMPORARILY DISABLED to establish baseline
-    # if target_transaction_fee > 0:  # Only add if curriculum is intended
-    #     callbacks.append(CurriculumCallback(
-    #         target_fee=target_transaction_fee,
-    #         curriculum_duration_fraction=curriculum_duration_fraction,
-    #         verbose=1
-    #     ))
-    #     logger.info(f"Added CurriculumCallback for transaction fee "
-    #                 f"scheduling to {target_transaction_fee:.6f}")
-    # else:
-    #     logger.info("Target transaction fee is 0, skipping CurriculumCallback.")
-    logger.info("CurriculumCallback for transaction fee is currently DISABLED.")
+    # Checkpoint save path setup
+    checkpoint_dir = os.path.join(checkpoint_save_path, model_name)
+    ensure_dir_exists(checkpoint_dir)
+    
+    # Curriculum Callback (if duration > 0)
+    # Check if total_timesteps is available in the config/model
+    # Note: This requires passing total_timesteps or accessing model.total_timesteps
+    # For now, assume it's handled elsewhere or add a parameter if needed.
+    if curriculum_duration_fraction > 0:
+        callbacks.append(CurriculumCallback(
+            target_fee=target_transaction_fee, 
+            curriculum_duration_fraction=curriculum_duration_fraction,
+            verbose=1
+        ))
 
-    # --- Standard Callbacks --- #
-
-    # Checkpoint callback (using provided path and name)
-    # Checkpoint path is now directly passed
+    # Resource Monitoring Callback
+    callbacks.append(ResourceMonitorCallback(
+        check_freq=max(1, resource_check_freq), 
+        verbose=1)
+    )
+    
+    # Trading Metrics Logging Callback
+    callbacks.append(TradingMetricsCallback(
+        log_freq=max(1, metrics_log_freq), 
+        verbose=1, 
+        log_dir=os.path.join(log_dir, "trading_metrics"))
+    )
+    
+    # --- Evaluation Callback ---
+    if eval_env is not None:
+        best_model_save_path = os.path.join(log_dir, "best_model")
+        eval_log_path = os.path.join(log_dir, "eval_logs")
+        ensure_dir_exists(best_model_save_path)
+        ensure_dir_exists(eval_log_path)
+        
+        eval_callback = BestModelCallback(
+            eval_env=eval_env,
+            log_dir=log_dir, # Pass main log dir
+            eval_freq=max(1, eval_freq),
+            n_eval_episodes=n_eval_episodes,
+            deterministic=True,
+            verbose=1,
+            best_model_save_path=best_model_save_path,
+            log_path=eval_log_path, # Specific path for eval logs
+            patience=early_stopping_patience if early_stopping_patience > 0 else 0
+        )
+        callbacks.append(eval_callback)
+        
+    # Checkpoint Callback
     callbacks.append(CheckpointCallback(
-        save_freq=save_freq,
-        save_path=checkpoint_save_path, # Use the provided path
-        name_prefix=model_name,         # Use the provided name prefix
+        save_freq=max(1, save_freq),
+        save_path=checkpoint_dir, # Use specific checkpoint dir
+        name_prefix=model_name, # Use model name as prefix
         keep_checkpoints=keep_checkpoints,
         verbose=1
     ))
-    
-    # Resource monitor callback
-    callbacks.append(ResourceMonitorCallback(check_freq=resource_check_freq, 
-                                         verbose=1))
-    
-    # Trading metrics callback
-    callbacks.append(TradingMetricsCallback(log_freq=metrics_log_freq, 
-                                        verbose=1, log_dir=log_dir))
-    
-    # Evaluation callback (includes best model saving and early stopping)
-    if eval_env is not None:
-        eval_log_path = os.path.join(log_dir, "evaluations")
-        best_model_path = os.path.join(log_dir, "best_model")
-        callbacks.append(BestModelCallback(
-            eval_env=eval_env,
-            log_dir=log_dir,
-            eval_freq=eval_freq,
-            n_eval_episodes=n_eval_episodes,
-            best_model_save_path=best_model_path,
-            log_path=eval_log_path,
-            # Force patience=0 to disable early stopping for now
-            patience=0, 
-            verbose=1
-        ))
-        
+
+    # --- Add Custom Episode Info Logger ---
+    # This will log details AFTER Monitor has processed the episode end
+    callbacks.append(EpisodeInfoCallback(verbose=1))
+
+    # Tensorboard Logging Callback (Optional - SB3 logger is usually preferred)
+    # callbacks.append(TensorboardCallback(verbose=1, model_name=model_name))
+
     # Add custom callbacks if provided
     if custom_callbacks:
         callbacks.extend(custom_callbacks)
-        
+
     return CallbackList(callbacks)
 
-
-# TensorboardCallback moved from train_dqn.py
 
 class TensorboardCallback(BaseCallback):
     """
