@@ -278,7 +278,6 @@ def run_tune_experiment(args):
         search_alg=search_alg,
         local_dir=args.local_dir,
         name=args.exp_name,
-        checkpoint_freq=2,
         keep_checkpoints_num=2,
         metric="eval/mean_reward",
         mode="max",
