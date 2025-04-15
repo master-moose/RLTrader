@@ -355,6 +355,14 @@ def parse_args():
         "--clip_range", type=float, default=0.2,
         help="PPO clip range (range: 0.1-0.3)"
     )
+    ppo.add_argument(
+        "--gae_lambda", type=float, default=0.95,
+        help="Lambda parameter for GAE in PPO/A2C (range: 0.9-0.99)"
+    )
+    ppo.add_argument(
+        "--max_grad_norm", type=float, default=0.5,
+        help="Maximum norm for gradient clipping (range: 0.1-1.0)"
+    )
 
     # --- SAC Specific Parameters --- #
     sac = parser.add_argument_group('SAC Specific Parameters')
@@ -372,6 +380,14 @@ def parse_args():
     network.add_argument(
         "--lstm_hidden_size", type=int, default=128,
         help="Hidden size of LSTM layer (range: 32-512)"
+    )
+    network.add_argument(
+        "--n_lstm_layers", type=int, default=1,
+        help="Number of LSTM layers for RecurrentPPO (range: 1-3)"
+    )
+    network.add_argument(
+        "--shared_lstm", type=bool, default=True,
+        help="Whether to share LSTM between actor and critic in RecurrentPPO"
     )
     network.add_argument(
         "--fc_hidden_size", type=int, default=64,
@@ -603,8 +619,8 @@ def create_model(
         model_kwargs["ent_coef"] = float(config["ent_coef"])
         model_kwargs["vf_coef"] = config["vf_coef"]
         model_kwargs["clip_range"] = config["clip_range"]
-        model_kwargs["gae_lambda"] = config.get("gae_lambda", 0.95)
-        model_kwargs["max_grad_norm"] = config.get("max_grad_norm", 0.5)
+        model_kwargs["gae_lambda"] = config["gae_lambda"]
+        model_kwargs["max_grad_norm"] = config["max_grad_norm"]
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
@@ -615,8 +631,8 @@ def create_model(
         model_kwargs["n_steps"] = config["n_steps"]
         model_kwargs["ent_coef"] = float(config["ent_coef"])
         model_kwargs["vf_coef"] = config["vf_coef"]
-        model_kwargs["gae_lambda"] = config.get("gae_lambda", 0.95)
-        model_kwargs["max_grad_norm"] = config.get("max_grad_norm", 0.5)
+        model_kwargs["gae_lambda"] = config["gae_lambda"]
+        model_kwargs["max_grad_norm"] = config["max_grad_norm"]
         model_kwargs["rms_prop_eps"] = config.get("rms_prop_eps", 1e-5)
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
@@ -686,16 +702,23 @@ def create_model(
         model_kwargs["ent_coef"] = float(config["ent_coef"])
         model_kwargs["vf_coef"] = config["vf_coef"]
         model_kwargs["clip_range"] = config["clip_range"]
-        model_kwargs["gae_lambda"] = config.get("gae_lambda", 0.95)
-        model_kwargs["max_grad_norm"] = config.get("max_grad_norm", 0.5)
+        model_kwargs["gae_lambda"] = config["gae_lambda"]
+        model_kwargs["max_grad_norm"] = config["max_grad_norm"]
 
         # Configure LSTM within the policy_kwargs
         if "lstm_hidden_size" in config:
             policy_kwargs["lstm_hidden_size"] = config["lstm_hidden_size"]
-        # policy_kwargs["n_lstm_layers"] = config.get("n_lstm_layers", 1)
-        # policy_kwargs["enable_critic_lstm"] = config.get("enable_critic_lstm", True)
-
-        # MlpLstmPolicy generally handles net_arch internally based on LSTM size
+        if "n_lstm_layers" in config:
+            policy_kwargs["n_lstm_layers"] = config["n_lstm_layers"]
+        if "shared_lstm" in config:
+            policy_kwargs["shared_lstm"] = config["shared_lstm"]
+        
+        # Set policy_kwargs in model_kwargs
+        model_kwargs["policy_kwargs"] = policy_kwargs
+        
+        logger.info(f"RecurrentPPO LSTM config: hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
+                    f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
+                    f"shared={policy_kwargs.get('shared_lstm', True)}")
 
         model = RecurrentPPO(**model_kwargs)
 
