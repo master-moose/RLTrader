@@ -75,330 +75,326 @@ logger = logging.getLogger(__name__)
 def parse_args():
     """Parse command line arguments, incorporating args from dqn_old.py."""
     parser = argparse.ArgumentParser(
-        description="Train RL agents (DQN, PPO, A2C, SAC) for trading"
+        description="Train and evaluate RL agents (DQN, PPO, A2C, SAC, LSTM-DQN, QRDQN, RecurrentPPO) for trading",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    # --- Model Selection --- #
-    parser.add_argument(
+    # --- General Parameters --- #
+    general = parser.add_argument_group('General Parameters')
+    general.add_argument(
         "--model_type", type=str, default="dqn",
         choices=[
             "dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo"
         ],
-        help="RL algorithm (default: dqn). Use lstm_dqn for DQN w/ LSTM feats."
+        help="RL algorithm to use"
     )
-    parser.add_argument(
+    general.add_argument(
         "--load_model", type=str, default=None,
         help="Path to saved model to continue training from"
     )
-    parser.add_argument(
-        "--lstm_model_path", type=str, default=None,
-        help="Path to saved LSTM model state_dict for feature extraction"
+    general.add_argument(
+        "--load_config", type=str, default=None,
+        help="Path to config file (overrides defaults, overridden by CLI)"
+    )
+    general.add_argument(
+        "--model_name", type=str, default=None,
+        help="Name for model/log folder (auto-generated if None)"
+    )
+    general.add_argument(
+        "--seed", type=int, default=None,
+        help="Random seed for reproducibility (None = random)"
+    )
+    general.add_argument(
+        "--verbose", type=int, default=1, choices=[0, 1, 2],
+        help="Verbosity level: 0=no output, 1=info, 2=debug"
+    )
+    general.add_argument(
+        "--cpu_only", action="store_true",
+        help="Force using CPU even if GPU is available"
+    )
+    general.add_argument(
+        "--eval_only", action="store_true",
+        help="Only evaluate a trained model (--load_model required)"
     )
 
     # --- Data Parameters --- #
-    parser.add_argument(
+    data = parser.add_argument_group('Data Parameters')
+    data.add_argument(
         "--data_path", type=str, required=True,
-        help="Path to data file (CSV or HDF5)"
+        help="Path to training data file (CSV or HDF5)"
     )
-    parser.add_argument(
+    data.add_argument(
         "--val_data_path", type=str, default=None,
         help="Path to validation data file (optional)"
     )
-    parser.add_argument(
+    data.add_argument(
         "--test_data_path", type=str, default=None,
         help="Path to test data file (optional)"
     )
-    parser.add_argument(
+    data.add_argument(
         "--data_key", type=str, default=None,
-        help="Key for HDF5 file (e.g., '/15m')"
+        help="Key for HDF5 file (e.g., '/15m' for 15-minute data)"
     )
-    parser.add_argument(
+    data.add_argument(
         "--symbol", type=str, default="BTC/USDT",
-        help="Trading symbol (used if env needs it, default: BTC/USDT)"
+        help="Trading symbol"
     )
-    parser.add_argument(
+    data.add_argument(
         "--sequence_length", type=int, default=60,
-        help="Length of history sequence for features/LSTM (default: 60)"
+        help="Length of history sequence for features/LSTM (range: 30-120)"
     )
-    parser.add_argument(
+    data.add_argument(
         "--features", type=str,
         default="close,volume,open,high,low,rsi_14,macd,ema_9,ema_21",
         help="Comma-separated list of features/indicators to use"
     )
 
     # --- Environment Parameters --- #
-    parser.add_argument(
+    env = parser.add_argument_group('Environment Parameters')
+    env.add_argument(
         "--initial_balance", type=float, default=10000,
-        help="Initial balance for trading environment (default: 10000)"
+        help="Initial balance for trading environment"
     )
-    parser.add_argument(
+    env.add_argument(
+        "--max_position", type=float, default=1.0,
+        help="Maximum position size as fraction of balance (range: 0.0-1.0)"
+    )
+    env.add_argument(
         "--commission", type=float, default=0.001,
-        help="Trading commission percentage (default: 0.001 = 0.1%%)"
+        help="Trading commission percentage (0.001 = 0.1%)"
     )
-    parser.add_argument(
+    env.add_argument(
         "--max_steps", type=int, default=20000,
-        help="Maximum steps per episode (default: 20000)"
+        help="Maximum steps per episode"
     )
-    parser.add_argument(
+    env.add_argument(
         "--episode_length", type=int, default=None,
         help="Length of each episode in days (overrides max_steps if set)"
     )
-    parser.add_argument(
+    env.add_argument(
         "--reward_scaling", type=float, default=1.0,
-        help="Scaling factor for environment rewards (default: 1.0)"
+        help="Scaling factor for environment rewards (range: 0.1-10.0)"
     )
-    parser.add_argument(
+    env.add_argument(
         "--max_holding_steps", type=int, default=8,
-        help="Max steps to hold before potential forced action (default: 8)"
+        help="Max steps to hold before potential forced action"
     )
-    parser.add_argument(
+    env.add_argument(
         "--take_profit_pct", type=float, default=0.03,
-        help="Take profit percentage (default: 0.03)"
+        help="Take profit percentage (range: 0.01-0.05)"
     )
-    parser.add_argument(
+    env.add_argument(
         "--target_cash_ratio", type=str, default="0.3-0.7",
-        help="Target cash ratio range for reward shaping (default: '0.3-0.7')"
+        help="Target cash ratio range for reward shaping (format: 'min-max')"
     )
     
     # --- Reward Component Weights --- #
-    parser.add_argument(
+    rewards = parser.add_argument_group('Reward Parameters')
+    rewards.add_argument(
         "--portfolio_change_weight", type=float, default=1.0,
-        help="Weight for portfolio value change reward (default: 1.0)"
+        help="Weight for portfolio value change reward (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--drawdown_penalty_weight", type=float, default=0.5,
-        help="Weight for drawdown penalty (default: 0.5)"
+        help="Weight for drawdown penalty (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--sharpe_reward_weight", type=float, default=0.5,
-        help="Weight for Sharpe ratio reward (default: 0.5)"
+        help="Weight for Sharpe ratio reward (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--fee_penalty_weight", type=float, default=2.0,
-        help="Weight for transaction fee penalty (default: 2.0)"
+        help="Weight for transaction fee penalty (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--benchmark_reward_weight", type=float, default=0.5,
-        help="Weight for benchmark comparison reward (default: 0.5)"
+        help="Weight for benchmark comparison reward (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--consistency_penalty_weight", type=float, default=0.2,
-        help="Weight for trade consistency penalty (default: 0.2)"
+        help="Weight for trade consistency penalty (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--idle_penalty_weight", type=float, default=0.1,
-        help="Weight for idle position penalty (default: 0.1)"
+        help="Weight for idle position penalty (range: 0.0-5.0)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--profit_bonus_weight", type=float, default=0.5,
-        help="Weight for profit bonus (default: 0.5)"
+        help="Weight for profit bonus (range: 0.0-5.0)"
+    )
+    rewards.add_argument(
+        "--exploration_bonus_weight", type=float, default=0.1,
+        help="Weight for exploration bonus (range: 0.0-1.0)"
     )
     
     # --- Additional Reward Parameters --- #
-    parser.add_argument(
+    rewards.add_argument(
         "--sharpe_window", type=int, default=20,
-        help="Window size for Sharpe ratio calculation (default: 20)"
+        help="Window size for Sharpe ratio calculation (range: 10-50)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--consistency_threshold", type=int, default=3,
-        help="Minimum consecutive actions before flip is acceptable (default: 3)"
+        help="Min consecutive actions before flip is acceptable (range: 2-10)"
     )
-    parser.add_argument(
+    rewards.add_argument(
         "--idle_threshold", type=int, default=5,
-        help="Number of consecutive holds before applying idle penalty (default: 5)"
+        help="Consecutive holds before idle penalty (range: 3-10)"
     )
 
-    # --- Training Parameters --- #
-    parser.add_argument(
+    # --- Common Training Parameters --- #
+    training = parser.add_argument_group('Common Training Parameters')
+    training.add_argument(
         "--total_timesteps", type=int, default=1000000,
-        help="Total number of training timesteps (default: 1,000,000)"
+        help="Total number of training timesteps (range: 100k-10M)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--learning_rate", type=float, default=0.0003,
-        help="Learning rate for the optimizer (default: 0.0003)"
+        help="Learning rate for optimizer (range: 1e-5 to 1e-2)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--batch_size", type=int, default=2048,
-        help="Batch size (default: 2048 for PPO/A2C/SAC, smaller for DQN)"
+        help="Batch size (DQN: 32-128, PPO/A2C/SAC: 256-2048)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--gamma", type=float, default=0.99,
-        help="Discount factor for future rewards (default: 0.99)"
+        help="Discount factor for future rewards (range: 0.9-0.999)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--eval_freq", type=int, default=10000,
-        help="Evaluation frequency during training (default: 10000)"
+        help="Evaluation frequency during training (steps)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--n_eval_episodes", type=int, default=5,
-        help="Number of episodes for evaluation (default: 5)"
+        help="Number of episodes for evaluation (range: 1-20)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--save_freq", type=int, default=50000,
-        help="Model saving frequency during training (default: 50000)"
+        help="Model saving frequency during training (steps)"
     )
-    parser.add_argument(
+    training.add_argument(
         "--keep_checkpoints", type=int, default=3,
-        help="Number of model checkpoints to keep (default: 3)"
+        help="Number of model checkpoints to keep"
     )
-    parser.add_argument(
+    training.add_argument(
         "--early_stopping_patience", type=int, default=10,
-        help="Patience for early stopping (0=disable, default: 10)"
+        help="Patience for early stopping (0=disable)"
     )
-    parser.add_argument(
-        "--seed", type=int, default=None,
-        help="Random seed for reproducibility"
-    )
-    parser.add_argument(
+    training.add_argument(
         "--num_envs", type=int, default=1,
-        help="Number of parallel environments for training (default: 1)"
+        help="Number of parallel environments for training"
     )
 
-    # --- PPO/A2C Specific --- #
-    parser.add_argument(
-        "--n_steps", type=int, default=2048,
-        help="Steps per update for PPO/A2C (default: 2048)"
-    )
-    parser.add_argument(
-        "--ent_coef", type=str, default="0.01",
-        help="Entropy coef. (PPO/A2C/SAC, default: 0.01 PPO/A2C, 'auto' SAC)"
-    )
-    parser.add_argument(
-        "--vf_coef", type=float, default=0.5,
-        help="Value function coefficient for PPO/A2C (default: 0.5)"
-    )
-    parser.add_argument(
-        "--n_epochs", type=int, default=10,
-        help="Number of epochs per update for PPO (default: 10)"
-    )
-    parser.add_argument(
-        "--clip_range", type=float, default=0.2,
-        help="PPO clip range (default: 0.2)"
-    )
-
-    # --- DQN/SAC/QRDQN Specific --- #  (Consolidated section)
-    parser.add_argument(
+    # --- DQN/QRDQN Specific Parameters --- #
+    dqn = parser.add_argument_group('DQN/QRDQN Specific Parameters')
+    dqn.add_argument(
         "--buffer_size", type=int, default=100000,
-        help="Replay buffer size (DQN/SAC/QRDQN, default: 100000)"
+        help="Replay buffer size (range: 10k-1M)"
     )
-    parser.add_argument(
+    dqn.add_argument(
         "--exploration_fraction", type=float, default=0.1,
-        help="Exploration decay fraction (DQN/QRDQN, default: 0.1)"
+        help="Exploration decay fraction (range: 0.05-0.5)"
     )
-    parser.add_argument(
+    dqn.add_argument(
         "--exploration_initial_eps", type=float, default=1.0,
-        help="Initial exploration rate epsilon (DQN/QRDQN, default: 1.0)"
+        help="Initial exploration rate epsilon (range: 0.5-1.0)"
     )
-    parser.add_argument(
+    dqn.add_argument(
         "--exploration_final_eps", type=float, default=0.05,
-        help="Final exploration rate epsilon (DQN/QRDQN, default: 0.05)"
+        help="Final exploration rate epsilon (range: 0.01-0.1)"
     )
-    parser.add_argument(
+    dqn.add_argument(
         "--target_update_interval", type=int, default=10000,
-        help="Target network update freq (DQN/SAC/QRDQN, default: 10000)"
+        help="Target network update frequency (range: 1k-20k)"
     )
-    parser.add_argument(
-        "--tau", type=float, default=0.005,
-        help="Soft update coefficient tau (SAC, default: 0.005)"
-    )
-    parser.add_argument(
+    dqn.add_argument(
         "--gradient_steps", type=int, default=1,
-        help="Gradient steps per update (DQN/SAC/QRDQN, default: 1)"
+        help="Gradient steps per environment step (range: 1-10)"
     )
-    parser.add_argument(
+    dqn.add_argument(
         "--learning_starts", type=int, default=1000,
-        help="Steps before learning starts (DQN/SAC/QRDQN, default: 1000)"
+        help="Steps before learning starts (range: 100-10k)"
+    )
+    # Environment exploration bonus parameters
+    dqn.add_argument(
+        "--exploration_start", type=float, default=1.0,
+        help="Starting value for exploration bonus (range: 0.5-1.0)"
+    )
+    dqn.add_argument(
+        "--exploration_end", type=float, default=0.01,
+        help="Final value for exploration bonus (range: 0.01-0.1)"
+    )
+    dqn.add_argument(
+        "--exploration_decay_rate", type=float, default=0.0001,
+        help="Decay rate for exploration bonus per step (range: 0.00001-0.001)"
+    )
+    # QRDQN specific
+    dqn.add_argument(
+        "--n_quantiles", type=int, default=200,
+        help="Number of quantiles for QRDQN (range: 50-200)"
     )
 
-    # --- LSTM Specific --- #
-    parser.add_argument(
-        "--lstm_hidden_size", type=int, default=128,
-        help="Hidden size of LSTM layer (if using LSTM features, default: 128)"
+    # --- PPO/A2C Specific Parameters --- #
+    ppo = parser.add_argument_group('PPO/A2C Specific Parameters')
+    ppo.add_argument(
+        "--n_steps", type=int, default=2048,
+        help="Steps per update for PPO/A2C (range: 128-2048)"
     )
-    parser.add_argument(
+    ppo.add_argument(
+        "--ent_coef", type=str, default="0.01",
+        help="Entropy coefficient ('auto' for SAC, range: 0.0-0.1)"
+    )
+    ppo.add_argument(
+        "--vf_coef", type=float, default=0.5,
+        help="Value function coefficient for PPO/A2C (range: 0.1-1.0)"
+    )
+    ppo.add_argument(
+        "--n_epochs", type=int, default=10,
+        help="Number of epochs per update for PPO (range: 3-20)"
+    )
+    ppo.add_argument(
+        "--clip_range", type=float, default=0.2,
+        help="PPO clip range (range: 0.1-0.3)"
+    )
+
+    # --- SAC Specific Parameters --- #
+    sac = parser.add_argument_group('SAC Specific Parameters')
+    sac.add_argument(
+        "--tau", type=float, default=0.005,
+        help="Soft update coefficient tau (range: 0.001-0.01)"
+    )
+
+    # --- LSTM/Network Architecture --- #
+    network = parser.add_argument_group('Network Architecture')
+    network.add_argument(
+        "--lstm_model_path", type=str, default=None,
+        help="Path to saved LSTM model state_dict for feature extraction"
+    )
+    network.add_argument(
+        "--lstm_hidden_size", type=int, default=128,
+        help="Hidden size of LSTM layer (range: 32-512)"
+    )
+    network.add_argument(
         "--fc_hidden_size", type=int, default=64,
-        help="Hidden size of FC layers after LSTM/features (default: 64)"
+        help="Hidden size of FC layers after LSTM/features (range: 32-256)"
     )
 
     # --- Resource Management & Logging --- #
-    parser.add_argument(
+    logging_group = parser.add_argument_group('Logging and Resource Management')
+    logging_group.add_argument(
         "--resource_check_freq", type=int, default=5000,
-        help="Frequency of resource usage checks (default: 5000)"
+        help="Frequency of resource usage checks (steps)"
     )
-    parser.add_argument(
+    logging_group.add_argument(
         "--metrics_log_freq", type=int, default=1000,
-        help="Frequency of trading metrics logging (default: 1000)"
+        help="Frequency of trading metrics logging (steps)"
     )
-    parser.add_argument(
+    logging_group.add_argument(
         "--log_dir", type=str, default="./logs",
-        help="Directory for saving logs (default: ./logs)"
+        help="Directory for saving logs"
     )
-    parser.add_argument(
+    logging_group.add_argument(
         "--checkpoint_dir", type=str, default="./checkpoints",
-        help="Directory for saving model checkpoints (default: ./checkpoints)"
-    )
-    parser.add_argument(
-        "--model_name", type=str, default=None,
-        help="Name for model/log folder (default: auto-generated)"
-    )
-    parser.add_argument(
-        "--verbose", type=int, default=1, choices=[0, 1, 2],
-        help="Verbosity level (0: no output, 1: info, 2: debug)"
-    )
-    parser.add_argument(
-        "--load_config", type=str, default=None,
-        help="Path to config file (overrides defaults, overridden by CLI)"
-    )
-    parser.add_argument(
-        "--cpu_only", action="store_true",
-        help="Force using CPU even if GPU is available"
-    )
-    parser.add_argument(
-        "--eval_only", action="store_true",
-        help="Only evaluate a trained model (--load_model required)"
-    )
-
-    # --- New DQN PER arguments --- (Commented out for SB3 v2.6.0 compatibility)
-    # parser.add_argument(
-    #     "--prioritized_replay", action="store_true",
-    #     help="Enable Prioritized Experience Replay (PER) for DQN"
-    # )
-    # parser.add_argument(
-    #     "--prioritized_replay_alpha", type=float, default=0.6,
-    #     help="Alpha parameter for PER (default: 0.6)"
-    # )
-    # parser.add_argument(
-    #     "--prioritized_replay_beta0", type=float, default=0.4,
-    #     help="Initial beta for PER importance sampling (default: 0.4)"
-    # )
-    # parser.add_argument(
-    #     "--prioritized_replay_eps", type=float, default=1e-6,
-    #     help="Epsilon for PER to avoid zero priority (default: 1e-6)"
-    # )
-    # --- End New DQN PER arguments ---
-
-    # Add new exploration bonus arguments for TradingEnvironment
-    parser.add_argument(
-        "--exploration_start", type=float, default=1.0,
-        help="Starting value for exploration bonus in TradingEnvironment (default: 1.0)"
-    )
-    parser.add_argument(
-        "--exploration_end", type=float, default=0.01,
-        help="Final value for exploration bonus in TradingEnvironment (default: 0.01)"
-    )
-    parser.add_argument(
-        "--exploration_decay_rate", type=float, default=0.0001,
-        help="Decay rate for exploration bonus per step (default: 0.0001)"
-    )
-    parser.add_argument(
-        "--exploration_bonus_weight", type=float, default=0.1,
-        help="Weight for exploration bonus in reward calculation (default: 0.1)"
-    )
-
-    # QRDQN specific parameters
-    parser.add_argument(
-        "--n_quantiles", type=int, default=200,
-        help="Number of quantiles for QRDQN (default: 200)"
+        help="Directory for saving model checkpoints"
     )
 
     args = parser.parse_args()
@@ -408,7 +404,7 @@ def parse_args():
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         args.model_name = f"{args.model_type}_{timestamp}"
 
-    # Process features string into list
+    # Convert features string into list
     if isinstance(args.features, str):
         args.features = args.features.split(",")
 
