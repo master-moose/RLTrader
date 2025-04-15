@@ -84,6 +84,11 @@ DEFAULT_CONFIG = {
     # num_envs is calculated dynamically based on available CPUs
     "max_steps": 20000,
     
+    # Trading environment parameters
+    "initial_balance": 10000.0,
+    "commission": 0.00075,
+    "reward_scaling": 1.0,
+    
     # Other fixed params
     "gae_lambda": 0.95,
     "max_grad_norm": 0.5,
