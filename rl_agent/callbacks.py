@@ -456,12 +456,30 @@ class EpisodeInfoCallback(BaseCallback):
                 trades_str = str(total_trades)
                 length_str = str(ep_length)
 
+                # --- Extract and process reward components information ---
+                reward_components_str = ""
+                if 'reward_components' in info:
+                    # We'll use the final step's reward components as a representative sample
+                    # since we don't collect them over the episode
+                    reward_components = info['reward_components']
+                    
+                    # Filter out raw_total and total_reward, and only include non-zero components
+                    components_to_log = {}
+                    for k, v in reward_components.items():
+                        if k not in ['raw_total', 'total_reward'] and abs(v) > 1e-6:
+                            components_to_log[k] = v
+                    
+                    if components_to_log:
+                        # Format components as a string
+                        components_str = ', '.join([f"{k}: {v:.4f}" for k, v in components_to_log.items()])
+                        reward_components_str = f"\nReward Components: {components_str}"
+
                 # Format log message
                 log_str = (
                     f"Episode {self.episode_count} finished: "
                     f"Reward={reward_str}, Length={length_str}, "
                     f"Return={return_str}, Sharpe={sharpe_str}, "
-                    f"Trades={trades_str}"
+                    f"Trades={trades_str}{reward_components_str}"
                 )
                 # Use the renamed logger instance
                 self._info_logger.info(log_str)
