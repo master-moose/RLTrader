@@ -160,7 +160,7 @@ def parse_args():
         help="Trading commission percentage (0.001 = 0.1%)"
     )
     env.add_argument(
-        "--max_steps", type=int, default=20000,
+        "--max_steps", type=int, default=100000,
         help="Maximum steps per episode"
     )
     env.add_argument(
@@ -410,6 +410,11 @@ def parse_args():
     logging_group.add_argument(
         "--checkpoint_dir", type=str, default="./checkpoints",
         help="Directory for saving model checkpoints"
+    )
+    logging_group.add_argument(
+        "--norm_obs", type=str, default="auto",
+        choices=["auto", "true", "false"],
+        help="Control observation normalization in VecNormalize. 'auto' uses True for raw features, False for _scaled features."
     )
 
     args = parser.parse_args()
@@ -919,7 +924,34 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         test_env.training = False  # Set to inference mode
         test_env.norm_reward = False  # Do not normalize rewards for eval
     else:
-        logger.warning("VecNormalize stats not found. Eval may be less accurate.")
+        logger.warning("VecNormalize stats not found. Creating fresh wrapper for evaluation.")
+        
+        # Determine norm_obs setting based on config - same logic as train function
+        norm_obs_setting = config.get("norm_obs", "auto").lower()
+        
+        if norm_obs_setting == "auto":
+            # Auto-detect if features are already scaled
+            features = config.get("features", [])
+            if isinstance(features, str):
+                features = features.split(",")
+            
+            # Check if features contain _scaled suffix
+            has_scaled_features = any("_scaled" in feature for feature in features)
+            should_norm_obs = not has_scaled_features
+            logger.info(f"Auto-detected {'pre-scaled' if has_scaled_features else 'raw'} features. Setting norm_obs={should_norm_obs}")
+        else:
+            should_norm_obs = norm_obs_setting == "true"
+            logger.info(f"Using explicit norm_obs={should_norm_obs} from config")
+            
+        # Apply VecNormalize with the determined settings
+        test_env = VecNormalize(
+            test_env,
+            norm_obs=should_norm_obs,
+            norm_reward=False,
+            clip_obs=10.,
+            gamma=config["gamma"],
+            training=False
+        )
 
     # Load the model
     model_cls = {
@@ -1081,10 +1113,27 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         train_env = VecNormalize.load(vec_normalize_stats_path, train_env)
         train_env.training = True  # Ensure it continues training
     else:
-        logger.info("Applying VecNorm (norm_obs=True, norm_reward=False).")
+        # Determine norm_obs setting based on config
+        norm_obs_setting = config.get("norm_obs", "auto").lower()
+        
+        if norm_obs_setting == "auto":
+            # Auto-detect if features are already scaled
+            features = config.get("features", [])
+            if isinstance(features, str):
+                features = features.split(",")
+            
+            # Check if features contain _scaled suffix
+            has_scaled_features = any("_scaled" in feature for feature in features)
+            should_norm_obs = not has_scaled_features
+            logger.info(f"Auto-detected {'pre-scaled' if has_scaled_features else 'raw'} features. Setting norm_obs={should_norm_obs}")
+        else:
+            should_norm_obs = norm_obs_setting == "true"
+            logger.info(f"Using explicit norm_obs={should_norm_obs} from config")
+        
+        logger.info(f"Applying VecNorm (norm_obs={should_norm_obs}, norm_reward=False).")
         train_env = VecNormalize(
             train_env,
-            norm_obs=True,
+            norm_obs=should_norm_obs,
             norm_reward=False,
             clip_obs=10.,
             gamma=config["gamma"]
@@ -1113,9 +1162,23 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
             eval_env.norm_reward = False
         else:
             logger.info("Applying new VecNorm wrapper to eval_env.")
+            
+            # Use the same norm_obs setting as determined for training
+            norm_obs_setting = config.get("norm_obs", "auto").lower()
+            if norm_obs_setting == "auto":
+                features = config.get("features", [])
+                if isinstance(features, str):
+                    features = features.split(",")
+                has_scaled_features = any("_scaled" in feature for feature in features)
+                should_norm_obs = not has_scaled_features
+            else:
+                should_norm_obs = norm_obs_setting == "true"
+                
+            logger.info(f"Using norm_obs={should_norm_obs} for validation environment")
+            
             eval_env = VecNormalize(
                 eval_env,
-                norm_obs=True,
+                norm_obs=should_norm_obs,
                 norm_reward=False,
                 clip_obs=10.,
                 gamma=config["gamma"],
