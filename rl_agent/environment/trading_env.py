@@ -507,15 +507,15 @@ class TradingEnvironment(Env):
         # Initialize reward components dictionary
         reward_components = {
             'portfolio_change': 0.0,
-            'drawdown_penalty': 0.0,
-            'sharpe_reward': 0.0,
-            'fee_penalty': 0.0,
-            'benchmark_reward': 0.0,
-            'consistency_penalty': 0.0,
-            'idle_penalty': 0.0,
-            'profit_bonus': 0.0,
-            'exploration_bonus': 0.0,
-            'invalid_action_penalty': 0.0, # Add new penalty component
+            # 'drawdown_penalty': 0.0,
+            # 'sharpe_reward': 0.0,
+            # 'fee_penalty': 0.0,
+            # 'benchmark_reward': 0.0,
+            # 'consistency_penalty': 0.0,
+            # 'idle_penalty': 0.0,
+            # 'profit_bonus': 0.0,
+            # 'exploration_bonus': 0.0,
+            'invalid_action_penalty': 0.0, # Keep this penalty
             'raw_total': 0.0, # Sum before scaling
             'total_reward': 0.0 # Final scaled reward
         }
@@ -529,84 +529,49 @@ class TradingEnvironment(Env):
         # Scale by 100 to make it more comparable to other penalties/bonuses? Optional.
         reward_components['portfolio_change'] = portfolio_change_pct * 100 * self.portfolio_change_weight
 
+        # --- Temporarily Comment Out Other Reward Components ---
         # 2. Drawdown Penalty
-        # self.max_drawdown is updated in step()
-        # Penalize based on the *current* maximum drawdown experienced so far
-        reward_components['drawdown_penalty'] = -self.max_drawdown * self.drawdown_penalty_weight
+        # reward_components['drawdown_penalty'] = -self.max_drawdown * self.drawdown_penalty_weight
 
-        # 3. Sharpe Ratio Reward (using rolling window)
-        if len(self.step_returns) >= self.sharpe_window:
-            window_returns = np.array(self.step_returns[-self.sharpe_window:])
-            mean_return = np.mean(window_returns)
-            std_return = np.std(window_returns)
-            if std_return > 1e-9: # Avoid division by zero or near-zero
-                 # Annualized Sharpe (assuming daily data -> sqrt(252), adjust if needed)
-                 # Use a small risk-free rate proxy if desired, e.g., 0
-                 sharpe_ratio = (mean_return / std_return) # * np.sqrt(252) # Optional annualization
-                 # Scale reward, maybe clip to avoid extreme values?
-                 reward_components['sharpe_reward'] = np.clip(sharpe_ratio, -5, 5) * self.sharpe_reward_weight
-            else:
-                 reward_components['sharpe_reward'] = 0.0 # Assign neutral reward if no volatility
+        # 3. Sharpe Ratio Reward
+        # ... (Sharpe calculation logic omitted for brevity) ...
+        # reward_components['sharpe_reward'] = ...
 
         # 4. Fee Penalty
-        # Penalize based on the fee paid *in this step*
-        reward_components['fee_penalty'] = -fee_paid_this_step * self.fee_penalty_weight
+        # reward_components['fee_penalty'] = -fee_paid_this_step * self.fee_penalty_weight
 
-        # 5. Benchmark Comparison Reward (Buy and Hold)
-        # Calculate Buy & Hold portfolio value for the current step
-        initial_investment_units = self.initial_balance / self.episode_start_price
-        benchmark_portfolio_value = initial_investment_units * current_price
-        benchmark_return = (benchmark_portfolio_value - self.initial_balance) / self.initial_balance
-        agent_return = (self.portfolio_value - self.initial_balance) / self.initial_balance
-        # Reward for outperforming the benchmark
-        reward_components['benchmark_reward'] = (agent_return - benchmark_return) * self.benchmark_reward_weight
+        # 5. Benchmark Comparison Reward
+        # ... (Benchmark calculation logic omitted for brevity) ...
+        # reward_components['benchmark_reward'] = ...
 
-        # 6. Consistency Penalty (Penalize quick flips)
-        # Apply penalty if switching from Buy->Sell or Sell->Buy too quickly
-        is_flip = False
-        if action == 0 and self.last_action == 2 and self.consecutive_buys < self.consistency_threshold:
-             is_flip = True
-        elif action == 2 and self.last_action == 0 and self.consecutive_sells < self.consistency_threshold:
-             is_flip = True
-        
-        if is_flip:
-            reward_components['consistency_penalty'] = -1.0 * self.consistency_penalty_weight # Fixed penalty amount
+        # 6. Consistency Penalty
+        # ... (Consistency calculation logic omitted for brevity) ...
+        # reward_components['consistency_penalty'] = ...
 
-        # 7. Idle Penalty (Penalize holding too long)
-        if action == 1 and self.consecutive_holds > self.idle_threshold:
-            # Apply penalty that scales with the number of steps held beyond the threshold
-            penalty_factor = self.consecutive_holds - self.idle_threshold
-            # Make penalty proportional to time spent idle - stronger penalty the longer it stays idle
-            reward_components['idle_penalty'] = -penalty_factor * 0.1 * self.idle_penalty_weight
+        # 7. Idle Penalty
+        # ... (Idle calculation logic omitted for brevity) ...
+        # reward_components['idle_penalty'] = ...
 
-        # 8. Profit/Selling Bonus (Reward for profitable trades when selling)
-        if action == 0 and self.shares_held > 0 and self.last_buy_price is not None:
-            # Calculate return on this specific trade
-            if current_price > self.last_buy_price:  # If profitable
-                step_return = (current_price - self.last_buy_price) / self.last_buy_price
-                reward_components['profit_bonus'] = step_return * self.profit_bonus_weight
+        # 8. Profit/Selling Bonus
+        # ... (Profit bonus calculation logic omitted for brevity) ...
+        # reward_components['profit_bonus'] = ...
 
-        # 9. Exploration Bonus (decreases over time)
-        if self.exploration_bonus_value > 0:
-            # Encourage exploration by giving a bonus that diminishes over time
-            # Only apply to buys and sells to encourage action exploration
-            if action != 1:  # Not hold - applies to buys and sells
-                reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
+        # 9. Exploration Bonus
+        # ... (Exploration bonus calculation logic omitted for brevity) ...
+        # reward_components['exploration_bonus'] = ...
+        # --- End of Temporarily Commented Out Components ---
 
-        # 10. Invalid Action Penalty (e.g., buying with no balance)
+        # 10. Invalid Action Penalty (Keep this active)
         if action == 2 and self.balance <= 1e-6: # Check if balance is effectively zero
-            # reward_components['invalid_action_penalty'] = -1.0 # Apply a fixed penalty (tune weight if needed)
             reward_components['invalid_action_penalty'] = -100.0 # Increased penalty significantly
-        # Could add penalty for selling with no shares, but _take_action already prevents it
-        # elif action == 0 and self.shares_held <= 1e-9:
-        #    reward_components['invalid_action_penalty'] = -100.0 
 
-        # Sum all reward components for the raw total
-        # Ensure the new component is included in the sum
-        raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward']
+        # Sum remaining active reward components (portfolio_change + invalid_action_penalty)
+        raw_total = reward_components['portfolio_change'] + reward_components['invalid_action_penalty']
+        # raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # Old sum
         reward_components['raw_total'] = raw_total
 
         # Apply reward scaling for the final reward
+        # Note: We will set scaling to 1.0 in the command line for this run
         reward_components['total_reward'] = raw_total * self.reward_scaling
 
         # Always log for debugging purposes for now

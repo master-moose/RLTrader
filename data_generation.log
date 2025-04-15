@@ -206,3 +206,51 @@
 2025-04-15 01:43:42,044 - crypto_trading_model.data_generation - INFO - Synthetic data generation complete. Data saved to data/synthetic
 2025-04-15 01:43:42,061 - crypto_trading_model.data_generation_10y - INFO - Successfully generated 10 years of data in data/synthetic_10y
 2025-04-15 01:43:42,061 - crypto_trading_model.data_generation_10y - INFO - 10-year data generation complete!
+2025-04-15 02:32:33,628 - crypto_trading_model.data_generation - INFO - Created directory: data/raw
+2025-04-15 02:32:33,629 - crypto_trading_model.data_generation - INFO - Created directory: data/processed
+2025-04-15 02:32:33,630 - crypto_trading_model.data_generation - INFO - Created directory: data/synthetic
+2025-04-15 02:32:33,630 - crypto_trading_model.data_generation - INFO - Created directory: output/time_series
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Created directory: output/reinforcement
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Created directory: output/ensemble
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Created directory: output/backtest
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Created directory: logs
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Directory setup complete.
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation_10y - INFO - Generating 350400 samples (10 years of 15-minute data)
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Loaded configuration from data_generation_config.json
+2025-04-15 02:32:33,631 - crypto_trading_model.data_generation - INFO - Generating 525600 samples based on configuration
+2025-04-15 02:32:33,637 - crypto_trading_model.data_generation - INFO - Generating market regime sequence...
+2025-04-15 02:32:33,948 - crypto_trading_model.data_generation - INFO - Generated regime sequence with 525600 elements
+2025-04-15 02:32:33,984 - crypto_trading_model.data_generation - INFO -   - volatility_expansion: 15767 periods (3.0%)
+2025-04-15 02:32:33,985 - crypto_trading_model.data_generation - INFO -   - volatility_contraction: 12661 periods (2.4%)
+2025-04-15 02:32:33,985 - crypto_trading_model.data_generation - INFO -   - downtrend: 186894 periods (35.6%)
+2025-04-15 02:32:33,985 - crypto_trading_model.data_generation - INFO -   - ranging: 69234 periods (13.2%)
+2025-04-15 02:32:33,985 - crypto_trading_model.data_generation - INFO -   - uptrend: 241044 periods (45.9%)
+2025-04-15 02:32:33,985 - crypto_trading_model.data_generation - INFO - Generating price, volatility, and volume processes...
+2025-04-15 02:33:02,050 - crypto_trading_model.data_generation - INFO - Generating realistic OHLC data...
+2025-04-15 02:33:08,376 - crypto_trading_model.data_generation - INFO - Generated dataframes: 15m (525600 rows), 4h (32850 rows), 1d (5475 rows)
+2025-04-15 02:33:08,376 - crypto_trading_model.data_generation - INFO - Calculating technical indicators...
+2025-04-15 02:33:08,967 - crypto_trading_model.data_generation - INFO - Calculating advanced multi-timeframe signals...
+2025-04-15 02:35:37,356 - crypto_trading_model.data_generation - INFO - Successfully updated price_direction with multi-timeframe signals
+2025-04-15 02:35:51,094 - crypto_trading_model.data_generation - INFO - Saved 15m data to data/synthetic\synthetic_dataset.h5/15m (525600 rows)
+2025-04-15 02:35:51,590 - crypto_trading_model.data_generation - INFO - Saved 4h data to data/synthetic\synthetic_dataset.h5/4h (32850 rows)
+2025-04-15 02:35:51,782 - crypto_trading_model.data_generation - INFO - Saved 1d data to data/synthetic\synthetic_dataset.h5/1d (5475 rows)
+2025-04-15 02:35:51,789 - crypto_trading_model.data_generation - INFO - Saved dataset metadata to data/synthetic\dataset_metadata.json
+2025-04-15 02:35:51,892 - crypto_trading_model.data_generation - INFO - Scaling features for 15m: ['open', 'high', 'low', 'close', 'volume', 'sma_7', 'sma_25', 'sma_99', 'ema_9', 'ema_21', 'price_sma_ratio', 'rsi_14', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_hist', 'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_pct_b', 'atr_14', 'volume_sma_20', 'volume_ratio', 'obv', 'cmf_20', 'return', 'log_return', 'high_low_range', 'body_size', 'true_volatility']
+2025-04-15 02:35:52,076 - crypto_trading_model.data_generation - INFO - Split 15m data (train): 367920 rows
+2025-04-15 02:35:52,103 - crypto_trading_model.data_generation - INFO - Split 15m data (val): 78840 rows
+2025-04-15 02:35:52,129 - crypto_trading_model.data_generation - INFO - Split 15m data (test): 78840 rows
+2025-04-15 02:35:52,146 - crypto_trading_model.data_generation - INFO - Scaling features for 4h: ['open', 'high', 'low', 'close', 'volume', 'sma_7', 'sma_25', 'sma_99', 'ema_9', 'ema_21', 'price_sma_ratio', 'rsi_14', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_hist', 'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_pct_b', 'atr_14', 'volume_sma_20', 'volume_ratio', 'obv', 'cmf_20', 'return', 'log_return', 'high_low_range', 'body_size', 'true_volatility']
+2025-04-15 02:35:52,164 - crypto_trading_model.data_generation - INFO - Split 4h data (train): 22995 rows
+2025-04-15 02:35:52,171 - crypto_trading_model.data_generation - INFO - Split 4h data (val): 4927 rows
+2025-04-15 02:35:52,178 - crypto_trading_model.data_generation - INFO - Split 4h data (test): 4928 rows
+2025-04-15 02:35:52,180 - crypto_trading_model.data_generation - INFO - Scaling features for 1d: ['open', 'high', 'low', 'close', 'volume', 'sma_7', 'sma_25', 'sma_99', 'ema_9', 'ema_21', 'price_sma_ratio', 'rsi_14', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_hist', 'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_pct_b', 'atr_14', 'volume_sma_20', 'volume_ratio', 'obv', 'cmf_20', 'return', 'log_return', 'high_low_range', 'body_size', 'true_volatility']
+2025-04-15 02:35:52,190 - crypto_trading_model.data_generation - INFO - Split 1d data (train): 3832 rows
+2025-04-15 02:35:52,195 - crypto_trading_model.data_generation - INFO - Split 1d data (val): 821 rows
+2025-04-15 02:35:52,200 - crypto_trading_model.data_generation - INFO - Split 1d data (test): 822 rows
+2025-04-15 02:35:52,205 - crypto_trading_model.data_generation - INFO - Saved feature scalers to data/synthetic\feature_scalers.joblib
+2025-04-15 02:36:12,076 - crypto_trading_model.data_generation - INFO - Saved train split to data/synthetic\train_data.h5
+2025-04-15 02:36:15,241 - crypto_trading_model.data_generation - INFO - Saved val split to data/synthetic\val_data.h5
+2025-04-15 02:36:18,389 - crypto_trading_model.data_generation - INFO - Saved test split to data/synthetic\test_data.h5
+2025-04-15 02:36:18,408 - crypto_trading_model.data_generation - INFO - Synthetic data generation complete. Data saved to data/synthetic
+2025-04-15 02:36:18,424 - crypto_trading_model.data_generation_10y - INFO - Successfully generated 10 years of data in data/synthetic_10y
+2025-04-15 02:36:18,424 - crypto_trading_model.data_generation_10y - INFO - 10-year data generation complete!
