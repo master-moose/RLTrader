@@ -282,10 +282,10 @@ def run_tune_experiment(args):
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
-            metrics=["eval/mean_reward", "eval/explained_variance"],
-            mode=["max", "max"]
+            metric="eval/mean_reward",
+            mode="max"
         )
-        print("Using Optuna search algorithm with multi-objective optimization")
+        print("Using Optuna search algorithm optimizing for mean reward")
     elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
             metric="eval/mean_reward",  # HyperOptSearch doesn't support multi-objective optimization

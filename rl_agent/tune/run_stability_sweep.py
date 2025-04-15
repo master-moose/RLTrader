@@ -125,7 +125,7 @@ if __name__ == "__main__":
     print("Note: TUNE_DISABLE_STRICT_METRIC_CHECKING=1 has been set to prevent metric validation errors")
     
     if args.search_algo == "optuna":
-        print("Using multi-objective optimization targeting both mean reward and explained variance")
+        print("Using Optuna search algorithm optimizing for mean reward")
     
     best_trial = run_tune_experiment(args)
     
