@@ -703,27 +703,34 @@ def create_model(
             policy_kwargs["n_lstm_layers"] = config["n_lstm_layers"]
         if "shared_lstm" in config:
             # Convert from string param to the boolean format expected by sb3_contrib
+            # The RecurrentActorCriticPolicy has a validation:
+            # assert not (self.shared_lstm and self.enable_critic_lstm)
+            # "You must choose between shared LSTM, seperate or no LSTM for the critic."
+            # We need to set both shared_lstm and enable_critic_lstm correctly
             shared_lstm_mode = config["shared_lstm"]
-            # For RecurrentPPO, shared_lstm must be a boolean value
-            # where True means "shared" and False means "separate"
-            # The "none" option would need a different configuration
+            
             if shared_lstm_mode == "shared":
+                # For shared LSTM: shared_lstm=True, enable_critic_lstm=False
                 policy_kwargs["shared_lstm"] = True
+                policy_kwargs["enable_critic_lstm"] = False
                 policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
             elif shared_lstm_mode == "seperate":
+                # For separate LSTM: shared_lstm=False, enable_critic_lstm=True
                 policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = True
                 policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
             elif shared_lstm_mode == "none":
-                # For "none", we don't include shared_lstm parameter at all
-                logger.warning("'none' LSTM mode not fully supported, using separate LSTM")
+                # For no LSTM on critic: shared_lstm=False, enable_critic_lstm=False
                 policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = False
                 policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
             else:
                 logger.warning(
                     f"Invalid shared_lstm value '{shared_lstm_mode}', "
-                    "defaulting to shared=True"
+                    "defaulting to separate LSTM for critic"
                 )
-                policy_kwargs["shared_lstm"] = True
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["enable_critic_lstm"] = True
                 policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
 
         # Set policy_kwargs in model_kwargs
@@ -733,7 +740,8 @@ def create_model(
             f"RecurrentPPO LSTM config: "
             f"hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
             f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
-            f"shared={policy_kwargs.get('shared_lstm', True)}"
+            f"shared={policy_kwargs.get('shared_lstm', False)}, "
+            f"critic_lstm={policy_kwargs.get('enable_critic_lstm', True)}"
         )
 
         model = RecurrentPPO(**model_kwargs)
