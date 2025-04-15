@@ -15,6 +15,8 @@ import logging
 # Get module logger
 logger = logging.getLogger("rl_agent.environment")
 
+# Define a small threshold for floating point comparisons
+ZERO_THRESHOLD = 1e-9
 
 class TradingEnvironment(Env):
     """
@@ -141,14 +143,14 @@ class TradingEnvironment(Env):
         self.action_space = spaces.Discrete(3)  # 0: Sell, 1: Hold, 2: Buy
         
         # Observation space: features + balance + position
-        feature_space = len(self.features) * self.sequence_length  # Historical features
-        account_space = 2  # Cash balance and asset position
-        total_space = feature_space + account_space
+        feature_space_dim = len(self.features) * self.sequence_length
+        account_space_dim = 2  # Cash balance and asset position (normalized)
+        total_space_dim = feature_space_dim + account_space_dim
         
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(total_space,),
+            shape=(total_space_dim,), # Use the calculated total dimension
             dtype=np.float32
         )
         
@@ -221,6 +223,7 @@ class TradingEnvironment(Env):
         self.exploration_bonus_value = self.exploration_start # Reset exploration bonus
         self.total_fees_paid = 0.0 # Reset total fees
         self.failed_buys = 0 # Initialize failed buy counter
+        self.failed_sells = 0 # Initialize failed sell counter
 
         # Steps taken within the current episode
         self.episode_step = 0
@@ -265,26 +268,28 @@ class TradingEnvironment(Env):
                                        self.portfolio_value)
 
         # Calculate drawdown based on value at step t
-        drawdown = 0
-        if self.max_portfolio_value > 0:
-            drawdown = (self.max_portfolio_value - self.portfolio_value) \
-                       / self.max_portfolio_value
-        self.max_drawdown = max(self.max_drawdown, drawdown)
+        current_drawdown = 0.0 # Use a different name to avoid confusion
+        if self.max_portfolio_value > ZERO_THRESHOLD: # Use threshold
+            current_drawdown = (self.max_portfolio_value - self.portfolio_value) \
+                               / self.max_portfolio_value
+        self.max_drawdown = max(self.max_drawdown, current_drawdown)
         # Log drawdown calculation
-        # logger.info(f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, Drawdown={drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}") # Silenced
+        # logger.info(f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, Drawdown={current_drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}") # Silenced
 
         # Check for early stopping based on drawdown at step t
         drawdown_terminated = False # Flag specific to drawdown termination
-        if self.max_drawdown > 0.90: # Terminate if drawdown exceeds 90%
+        # Using 0.95 as a slightly less aggressive threshold
+        if self.max_drawdown > 0.95:
             drawdown_terminated = True
-            # logger.info(f"Episode terminated early due to drawdown > 90% ({self.max_drawdown:.2%})") # Silenced as requested
+            # Log termination reason later in the step
+
         # --------------------------------------------------------------------
 
         # Store portfolio value history for step t
         self.portfolio_values.append(self.portfolio_value)
 
         # Calculate step return for Sharpe ratio (t vs t-1)
-        if prev_portfolio_value != 0: # Avoid division by zero
+        if abs(prev_portfolio_value) > ZERO_THRESHOLD: # Avoid division by zero/near-zero
             step_return = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
             self.step_returns.append(step_return)
         else:
@@ -308,6 +313,23 @@ class TradingEnvironment(Env):
         terminated = drawdown_terminated or is_end_of_data # Terminate if drawdown OR end of data
         truncated = is_max_steps_reached and not terminated # Truncate if max steps reached AND not already terminated
         # ---------------------------------------------------
+
+        # --- Log Termination/Truncation Reason ---
+        termination_reason = "None"
+        if terminated:
+            if drawdown_terminated:
+                termination_reason = f"Drawdown > 95% ({self.max_drawdown:.2%})"
+            elif is_end_of_data:
+                termination_reason = "End of Data"
+        elif truncated:
+            termination_reason = f"Max Steps Reached ({self.max_steps})"
+
+        if terminated or truncated:
+            logger.info(
+                f"Episode End (Step {self.current_step}, EpStep {self.episode_step}): "
+                f"Terminated={terminated}, Truncated={truncated}, Reason: {termination_reason}"
+            )
+        # --- End Log ---
 
         # Decay exploration bonus for the next step
         if self.exploration_decay_rate > 0 and self.exploration_bonus_value > self.exploration_end:
@@ -352,8 +374,9 @@ class TradingEnvironment(Env):
             self.total_trades += 1 # Increment trade count for successful sell
         elif action == 1:
             self.total_holds += 1
-        # elif action == 2: # Defer Buy/Trade count increment
-        #     self.total_buys += 1
+        elif action == 2:
+            # Defer Buy/Trade count increment until success confirmed
+            pass # Handled below
         
         # Update consecutive action counts
         if action == self.last_action:
@@ -382,7 +405,7 @@ class TradingEnvironment(Env):
         self.last_action = action
 
         if action == 0:  # Sell
-            if self.shares_held > 0:
+            if self.shares_held > ZERO_THRESHOLD: # Check if shares held > 0
                 # Calculate transaction fee
                 sell_amount = self.shares_held * current_price
                 fee = sell_amount * self.transaction_fee # Use fixed fee
@@ -405,22 +428,36 @@ class TradingEnvironment(Env):
                 self.trades.append(sell_info)
                 self.sell_prices.append(current_price)
                 
-                logger.debug(f"Step {self.current_step}: Sold {self.shares_held:.6f} shares at "
-                           f"{current_price:.2f} for {sell_amount:.2f} "
-                           f"(fee: {fee:.2f})")
+                logger.debug(f"Step {self.current_step}: Sold {self.shares_held:.6f} shares @ "
+                           f"{current_price:.2f} (Amt: {sell_amount:.2f}, Fee: {fee:.2f}) -> "
+                           f"Bal: {self.balance:.2f}")
                 
                 self.shares_held = 0
                 self.asset_value = 0
-        
+            else:
+                # Log failed sell attempt
+                self.failed_sells += 1
+                logger.debug(f"Step {self.current_step}: Attempted Sell, but no shares held.")
+                # Correct action tracking if sell fails
+                if self.last_action == 0: # If the *previous* effective action was sell
+                   self.consecutive_sells = 0 # Reset sell streak as it failed
+                self.last_action = 1 # Treat effective action as hold for next step's consistency check
+                self.consecutive_holds +=1
+                # We didn't increment total_sells or total_trades, so no need to decrement.
+
         elif action == 2:  # Buy
-            if self.balance > 0:
+            if self.balance > ZERO_THRESHOLD: # Check if balance > 0
                 # Calculate amount to invest based on max_position
                 invest_amount = self.balance * self.max_position
                 # Calculate shares we can buy considering the fee
-                shares_to_buy = invest_amount / (current_price * (1 + self.transaction_fee))
-                
-                # Ensure we don't try to buy zero shares (if balance is tiny)
-                if shares_to_buy > 1e-9: # Use a small threshold 
+                # Avoid division by zero/small price
+                if current_price * (1 + self.transaction_fee) > ZERO_THRESHOLD:
+                    shares_to_buy = invest_amount / (current_price * (1 + self.transaction_fee))
+                else:
+                    shares_to_buy = 0 # Cannot buy if price is zero
+
+                # Ensure we can buy a meaningful amount of shares
+                if shares_to_buy > ZERO_THRESHOLD: # Use threshold
                     # --- Buy Succeeded ---
                     # Increment trade/buy counts here
                     self.total_buys += 1
@@ -455,28 +492,29 @@ class TradingEnvironment(Env):
                     }
                     self.trades.append(buy_info)
                     
-                    logger.debug(f"Step {self.current_step}: Bought {self.shares_held:.6f} shares at "
-                               f"{current_price:.2f} for {buy_cost:.2f} "
-                               f"(fee: {fee:.2f})")
+                    logger.debug(f"Step {self.current_step}: Bought {self.shares_held:.6f} shares @ "
+                               f"{current_price:.2f} (Cost: {buy_cost:.2f}, Fee: {fee:.2f}) -> "
+                               f"Bal: {self.balance:.2f}")
                 else:
-                    # --- Buy Failed ---
+                    # --- Buy Failed (Insufficient funds for meaningful amount) ---
                     self.failed_buys += 1 # Increment failed buy counter
-                    # Log if we tried to buy but couldn't afford it
-                    logger.debug(f"Step {self.current_step}: Attempted buy with balance "
-                               f"{self.balance:.2f}, but calculated shares {shares_to_buy:.8f} "
-                               f"was too small. Holding instead.")
+                    logger.debug(f"Step {self.current_step}: Attempted Buy. Bal: {self.balance:.2f}, "
+                               f"Price: {current_price:.2f}, MaxPos: {self.max_position:.2f}. "
+                               f"Calculated shares {shares_to_buy:.8f} <= threshold. Holding.")
                     # Correct action tracking if buy fails
-                    # Update consecutive counts as if it was a hold action
-                    # Ensure last_action reflects the *attempted* action for consistency penalty etc.
-                    # but update consecutive counts based on the *outcome* (hold)
                     if self.last_action == 2: # If the *previous* effective action was buy
                        self.consecutive_buys = 0 # Reset buy streak as it failed
                     self.last_action = 1 # Treat effective action as hold for next step's consistency check
                     self.consecutive_holds +=1
-                    # We didn't increment total_buys or total_trades, so no need to decrement here.
-                    # self.total_buys -=1 # Incorrect old logic
-                    # self.total_holds +=1 # Incorrect old logic - hold counter updated above
-                    # self.total_trades -=1 # Incorrect old logic
+            else:
+                # --- Buy Failed (Zero balance) ---
+                self.failed_buys += 1 # Increment failed buy counter
+                logger.debug(f"Step {self.current_step}: Attempted Buy, but balance is {self.balance:.2f}. Holding.")
+                # Correct action tracking if buy fails
+                if self.last_action == 2:
+                    self.consecutive_buys = 0
+                self.last_action = 1
+                self.consecutive_holds += 1
 
         elif action == 1: # Hold
              logger.debug(f"Step {self.current_step}: Holding. "
@@ -507,14 +545,14 @@ class TradingEnvironment(Env):
         # Initialize reward components dictionary
         reward_components = {
             'portfolio_change': 0.0,
-            # 'drawdown_penalty': 0.0,
-            # 'sharpe_reward': 0.0,
-            # 'fee_penalty': 0.0,
-            # 'benchmark_reward': 0.0,
-            # 'consistency_penalty': 0.0,
-            # 'idle_penalty': 0.0,
-            # 'profit_bonus': 0.0,
-            # 'exploration_bonus': 0.0,
+            'drawdown_penalty': 0.0,
+            'sharpe_reward': 0.0,
+            'fee_penalty': 0.0,
+            'benchmark_reward': 0.0,
+            'consistency_penalty': 0.0,
+            'idle_penalty': 0.0,
+            'profit_bonus': 0.0,
+            'exploration_bonus': 0.0,
             'invalid_action_penalty': 0.0, # Keep this penalty
             'raw_total': 0.0, # Sum before scaling
             'total_reward': 0.0 # Final scaled reward
@@ -530,44 +568,88 @@ class TradingEnvironment(Env):
         reward_components['portfolio_change'] = portfolio_change_pct * 100 * self.portfolio_change_weight
 
         # --- Temporarily Comment Out Other Reward Components ---
-        # 2. Drawdown Penalty
-        # reward_components['drawdown_penalty'] = -self.max_drawdown * self.drawdown_penalty_weight
+        # 2. Drawdown Penalty (Re-enabled)
+        # Penalize based on the *current step's* drawdown contribution
+        # Using self.max_drawdown penalizes past mistakes repeatedly
+        current_drawdown = 0.0
+        if self.max_portfolio_value > ZERO_THRESHOLD:
+            current_drawdown = (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value
+        # Use the *increase* in drawdown, or just the current drawdown level? Let's use current level for simplicity.
+        reward_components['drawdown_penalty'] = -current_drawdown * self.drawdown_penalty_weight
 
-        # 3. Sharpe Ratio Reward
-        # ... (Sharpe calculation logic omitted for brevity) ...
-        # reward_components['sharpe_reward'] = ...
+        # 3. Sharpe Ratio Reward (Re-enabled - using rolling window)
+        sharpe_ratio_rolling = 0.0
+        if len(self.step_returns) >= self.sharpe_window:
+            window_returns = np.array(self.step_returns[-self.sharpe_window:])
+            mean_return = np.mean(window_returns)
+            std_return = np.std(window_returns)
+            if std_return > ZERO_THRESHOLD:
+                 # Simple Sharpe (no risk-free rate)
+                 sharpe_ratio_rolling = mean_return / std_return
+                 # Optional: Clip or scale Sharpe ratio to avoid extreme values
+                 # sharpe_ratio_rolling = np.clip(sharpe_ratio_rolling, -3, 3)
+        reward_components['sharpe_reward'] = sharpe_ratio_rolling * self.sharpe_reward_weight
 
-        # 4. Fee Penalty
-        # reward_components['fee_penalty'] = -fee_paid_this_step * self.fee_penalty_weight
+        # 4. Fee Penalty (Re-enabled)
+        # Penalize based on fees paid *in this step* relative to portfolio value?
+        # Or just penalize the fee amount directly? Let's penalize directly.
+        # Scale penalty by portfolio value change to keep relative magnitude?
+        # Simpler: Penalize the fee amount, scaled by weight.
+        reward_components['fee_penalty'] = -fee_paid_this_step * self.fee_penalty_weight
 
-        # 5. Benchmark Comparison Reward
-        # ... (Benchmark calculation logic omitted for brevity) ...
-        # reward_components['benchmark_reward'] = ...
+        # 5. Benchmark Comparison Reward (Optional - keep commented for now)
+        # current_price = self.data['close'].iloc[self.current_step]
+        # benchmark_portfolio_value = (self.initial_balance / self.episode_start_price) * current_price
+        # benchmark_return = (benchmark_portfolio_value - self.initial_balance) / self.initial_balance
+        # agent_return = (self.portfolio_value - self.initial_balance) / self.initial_balance
+        # reward_components['benchmark_reward'] = (agent_return - benchmark_return) * self.benchmark_reward_weight
 
-        # 6. Consistency Penalty
-        # ... (Consistency calculation logic omitted for brevity) ...
-        # reward_components['consistency_penalty'] = ...
+        # 6. Consistency Penalty (Re-enabled)
+        consistency_penalty = 0.0
+        # Penalize switching actions too frequently
+        if action != self.last_action: # Action changed
+             if action == 0 and self.consecutive_buys < self.consistency_threshold: # Switched to Sell from Buy too soon
+                 consistency_penalty = -1.0
+             elif action == 2 and self.consecutive_sells < self.consistency_threshold: # Switched to Buy from Sell too soon
+                 consistency_penalty = -1.0
+             # Optional: Penalize switching from Hold too soon?
+             # elif action != 1 and self.consecutive_holds < self.consistency_threshold // 2:
+             #     consistency_penalty = -0.5
+        reward_components['consistency_penalty'] = consistency_penalty * self.consistency_penalty_weight
 
-        # 7. Idle Penalty
-        # ... (Idle calculation logic omitted for brevity) ...
-        # reward_components['idle_penalty'] = ...
+        # 7. Idle Penalty (Re-enabled)
+        idle_penalty = 0.0
+        if action == 1 and self.consecutive_holds > self.idle_threshold:
+             idle_penalty = -1.0 # Penalize for holding too long consecutively
+        reward_components['idle_penalty'] = idle_penalty * self.idle_penalty_weight
 
-        # 8. Profit/Selling Bonus
-        # ... (Profit bonus calculation logic omitted for brevity) ...
-        # reward_components['profit_bonus'] = ...
+        # 8. Profit/Selling Bonus (Re-enabled)
+        profit_bonus = 0.0
+        if action == 0 and self.last_buy_price is not None: # If selling and we have a record of the last buy
+            sell_profit_pct = (current_price - self.last_buy_price) / self.last_buy_price
+            if sell_profit_pct > 0: # Only reward profitable sells
+                profit_bonus = sell_profit_pct * 10 # Scale up bonus?
+                self.last_buy_price = None # Reset after successful profitable sell
+        reward_components['profit_bonus'] = profit_bonus * self.profit_bonus_weight
 
-        # 9. Exploration Bonus
-        # ... (Exploration bonus calculation logic omitted for brevity) ...
-        # reward_components['exploration_bonus'] = ...
+        # 9. Exploration Bonus (Re-enabled)
+        # Give a small bonus decaying over time
+        # This is applied regardless of action to encourage activity early on
+        reward_components['exploration_bonus'] = self.exploration_bonus_value * self.exploration_bonus_weight
         # --- End of Temporarily Commented Out Components ---
 
-        # 10. Invalid Action Penalty (Keep this active)
-        if action == 2 and self.balance <= 1e-6: # Check if balance is effectively zero
-            reward_components['invalid_action_penalty'] = -100.0 # Increased penalty significantly
+        # 10. Invalid Action Penalty (Keep active, reduced penalty)
+        # Penalize trying to buy with zero balance OR sell with zero shares
+        invalid_penalty = 0.0
+        if action == 2 and self.balance <= ZERO_THRESHOLD:
+            invalid_penalty = -5.0 # Reduced penalty significantly
+        elif action == 0 and self.shares_held <= ZERO_THRESHOLD:
+            invalid_penalty = -5.0 # Penalize trying to sell nothing
+        reward_components['invalid_action_penalty'] = invalid_penalty # No weight needed
 
-        # Sum remaining active reward components (portfolio_change + invalid_action_penalty)
-        raw_total = reward_components['portfolio_change'] + reward_components['invalid_action_penalty']
-        # raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # Old sum
+        # Sum all active reward components
+        # raw_total = reward_components['portfolio_change'] + reward_components['invalid_action_penalty'] # Old sum
+        raw_total = sum(reward_components.values()) - reward_components['raw_total'] - reward_components['total_reward'] # New sum of all components
         reward_components['raw_total'] = raw_total
 
         # Apply reward scaling for the final reward
@@ -575,9 +657,9 @@ class TradingEnvironment(Env):
         reward_components['total_reward'] = raw_total * self.reward_scaling
 
         # Always log for debugging purposes for now
-        component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items() 
-                                  if k not in ['raw_total', 'total_reward']])
-        # logger.info(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}") # Silenced
+        component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items()
+                                  if k not in ['raw_total', 'total_reward'] and abs(v) > 1e-6]) # Only log non-zero components
+        logger.debug(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}")
         # logger.debug(f"Total reward: {reward_components['total_reward']:.4f}")
 
         return reward_components
@@ -614,9 +696,9 @@ class TradingEnvironment(Env):
         # Add account information
         account_info = [
             self.balance / self.initial_balance,  # Normalized balance
-            # Normalized position value
-            self.shares_held * self.data['close'].iloc[self.current_step] / \
-                self.initial_balance  
+            # Normalized position value (ensure initial balance > 0)
+            (self.shares_held * self.data['close'].iloc[self.current_step] /
+             self.initial_balance) if self.initial_balance > ZERO_THRESHOLD else 0.0
         ]
         
         # Combine features and account info
@@ -653,6 +735,7 @@ class TradingEnvironment(Env):
             'max_drawdown': self.max_drawdown,
             'total_fees_paid': self.total_fees_paid, # Added total fees
             'failed_buys': self.failed_buys, # Added failed buy counter
+            'failed_sells': self.failed_sells, # Added failed sell counter
             'last_action': self.last_action, # Added last action
             'consecutive_holds': self.consecutive_holds, # Added consecutive holds
             'consecutive_buys': self.consecutive_buys,
@@ -675,7 +758,7 @@ class TradingEnvironment(Env):
                 if std_portfolio_return > 1e-9:
                     # Optional annualization (sqrt(252) for daily)
                     # info['sharpe_ratio_episode'] = (mean_portfolio_return / std_portfolio_return) * np.sqrt(252)
-                    info['sharpe_ratio_episode'] = mean_portfolio_return / std_portfolio_return
+                    info['sharpe_ratio_episode'] = mean_portfolio_return / std_portfolio_return # Simple non-annualized
                 else:
                     info['sharpe_ratio_episode'] = 0.0
             else:
@@ -700,10 +783,17 @@ class TradingEnvironment(Env):
             info['sharpe_ratio_rolling'] = 0.0
         
         # Benchmark (Buy & Hold) Performance
-        initial_investment_units = self.initial_balance / self.episode_start_price
-        benchmark_portfolio_value = initial_investment_units * current_price
+        # Avoid division by zero if start price is zero
+        if abs(self.episode_start_price) > ZERO_THRESHOLD:
+            initial_investment_units = self.initial_balance / self.episode_start_price
+            benchmark_portfolio_value = initial_investment_units * current_price
+            benchmark_return = (benchmark_portfolio_value - self.initial_balance) / self.initial_balance if self.initial_balance > ZERO_THRESHOLD else 0.0
+        else:
+            benchmark_portfolio_value = self.initial_balance # If start price is 0, value remains initial balance
+            benchmark_return = 0.0 # Return is zero
+
         info['benchmark_portfolio_value'] = benchmark_portfolio_value
-        info['benchmark_return'] = (benchmark_portfolio_value - self.initial_balance) / self.initial_balance
+        info['benchmark_return'] = benchmark_return
 
         # Reward components are added in the step method after _calculate_reward is called
         # if 'reward_components' not in info: # Ensure it exists even at step 0

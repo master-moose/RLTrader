@@ -8,61 +8,53 @@ This script provides a command-line interface for training and evaluating
 the LSTM-DQN reinforcement learning agent on financial time series data.
 """
 
+import argparse
+import json
+import logging
 import os
 import sys
-import argparse
-import logging
-import json
 import time
-from typing import Dict, Any, Optional, Tuple, List
-import numpy as np
-import pandas as pd
-import torch
-import gymnasium as gym
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent directory to path *before* attempting local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import SB3 models
-from stable_baselines3 import DQN, PPO, A2C, SAC
+import gymnasium as gym
+import numpy as np
+import pandas as pd
 # Import SB3 Contrib models
 from sb3_contrib import QRDQN, RecurrentPPO
-# Import SB3 VecEnv utils
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecNormalize
-# Import Buffers
-from stable_baselines3.common.buffers import ReplayBuffer  # , PrioritizedReplayBuffer
-# Import Policies
-from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy  # , CnnPolicy
-from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
-from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy  # For SAC
+# Import specific recurrent policy if needed
+# from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy
+from sb3_contrib.qrdqn.policies import QRDQNPolicy
+# Import SB3 models
+from stable_baselines3 import A2C, DQN, PPO, SAC
 # Import Base class and Monitor
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
+# Import Buffers
+from stable_baselines3.common.buffers import ReplayBuffer  # , PrioritizedReplayBuffer
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-# Import specific recurrent policy if needed (ensure sb3_contrib is installed)
-# from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy # Example for RecurrentPPO
-# Note: RecurrentPPO often uses strings like "MlpLstmPolicy" directly
+# Import Policies
+from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
+# Import VecEnv utils
+from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv,
+                                              VecNormalize)
+from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy  # , CnnPolicy
+from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy  # For SAC
+import torch
 
 # Import local modules (now possible after sys.path modification)
-from rl_agent.callbacks import get_callback_list  # Use this instead of individual imports
-# Remove unused specific callback imports
-# from rl_agent.callback import TensorboardCallback, CheckpointCallback, ProgressBarManager
-from rl_agent.utils import (
-    setup_logger,
-    setup_sb3_logger,
-    check_resources,
-    save_config,
-    load_config,
-    create_evaluation_plots,
-    calculate_trading_metrics,
-    ensure_dir_exists,
-    set_seeds
-)
+from rl_agent.callbacks import get_callback_list
+from rl_agent.data.data_loader import DataLoader
 from rl_agent.environment import TradingEnvironment
 from rl_agent.models import LSTMFeatureExtractor
-from rl_agent.data.data_loader import DataLoader
+from rl_agent.utils import (calculate_trading_metrics, check_resources,
+                            create_evaluation_plots, ensure_dir_exists,
+                            load_config, save_config, set_seeds, setup_logger,
+                            setup_sb3_logger)
 
+# Note: RecurrentPPO often uses strings like "MlpLstmPolicy" directly
 # Define technical indicators - ensure these match the environment needs
 # INDICATORS = [
 #     'macd', 'rsi', 'cci', 'dx', 'bb_upper', 'bb_lower', 'bb_middle', 'volume'
@@ -75,7 +67,10 @@ logger = logging.getLogger(__name__)
 def parse_args():
     """Parse command line arguments, incorporating args from dqn_old.py."""
     parser = argparse.ArgumentParser(
-        description="Train and evaluate RL agents (DQN, PPO, A2C, SAC, LSTM-DQN, QRDQN, RecurrentPPO) for trading",
+        description=(
+            "Train and evaluate RL agents (DQN, PPO, A2C, SAC, LSTM-DQN, "
+            "QRDQN, RecurrentPPO) for trading"
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -714,33 +709,18 @@ def create_model(
         if "shared_lstm" in config:
             # Convert from string param to the proper format
             shared_lstm_mode = config["shared_lstm"]
-            
-            # For RecurrentPPO, we need to convert the string to proper boolean parameters
-            # RecurrentPPO expects:
-            # - shared_lstm: bool - whether to share LSTM between actor and critic
-            # - enable_critic_lstm: bool - whether critic uses an LSTM
-            
-            if shared_lstm_mode == "shared":
-                policy_kwargs["shared_lstm"] = True
-                policy_kwargs["enable_critic_lstm"] = False
-            elif shared_lstm_mode == "seperate":
-                policy_kwargs["shared_lstm"] = False
-                policy_kwargs["enable_critic_lstm"] = True
-            elif shared_lstm_mode == "none":
-                policy_kwargs["shared_lstm"] = False
-                policy_kwargs["enable_critic_lstm"] = False
-            else:
+            # For RecurrentPPO, shared_lstm must be one of: 'shared', 'seperate', or 'none'
+            if shared_lstm_mode not in ["shared", "seperate", "none"]:
                 logger.warning(f"Invalid shared_lstm value '{shared_lstm_mode}', defaulting to 'shared'")
-                policy_kwargs["shared_lstm"] = True
-                policy_kwargs["enable_critic_lstm"] = False
+                shared_lstm_mode = "shared"
+            policy_kwargs["shared_lstm"] = shared_lstm_mode
         
         # Set policy_kwargs in model_kwargs
         model_kwargs["policy_kwargs"] = policy_kwargs
         
         logger.info(f"RecurrentPPO LSTM config: hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
                     f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
-                    f"shared_lstm={policy_kwargs.get('shared_lstm', False)}, "
-                    f"enable_critic_lstm={policy_kwargs.get('enable_critic_lstm', False)}")
+                    f"shared={policy_kwargs.get('shared_lstm', 'shared')}")
 
         model = RecurrentPPO(**model_kwargs)
 
