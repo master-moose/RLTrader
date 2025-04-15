@@ -320,7 +320,7 @@ def parse_args():
     )
     dqn.add_argument(
         "--exploration_decay_rate", type=float, default=0.0001,
-        help="Decay rate for exploration bonus per step (range: 0.00001-0.001)"
+        help="Decay rate for exploration bonus per step (range: 1e-5 to 1e-3)"
     )
     # QRDQN specific
     dqn.add_argument(
@@ -454,17 +454,6 @@ def create_env(
         data_loader = DataLoader(data_path=data_path, data_key=data_key)
         data = data_loader.load_data()
 
-    # Determine seed for this environment instance
-    # base_seed = config.get("seed")
-    # env_seed = None
-    # if base_seed is not None:
-    #     # Use different seeds for train vs eval vs parallel envs
-    #     if is_eval:
-    #         env_seed = base_seed + 1  # Simple offset for eval
-    #     else:
-    #         env_seed = base_seed  # Use base seed for main training env
-    # Note: Seeding is handled by make_vec_env wrapper now
-
     # Create environment instance
     # Start with core arguments
     env_kwargs = {
@@ -476,12 +465,12 @@ def create_env(
         "reward_scaling": config["reward_scaling"],
         # Optional args from TradingEnvironment (using defaults or config)
         "window_size": config.get("window_size", 20),
-        "max_position": config.get("max_position", 1.0),  # Make sure this line exists
+        "max_position": config.get("max_position", 1.0),
         "max_steps": config.get("max_steps"),
-        "random_start": config.get("random_start", True),  # Make sure this line exists
+        "random_start": config.get("random_start", True),
     }
 
-    # --- Conditionally add new reward parameters --- 
+    # --- Conditionally add new reward parameters ---
     # Define the keys for the new reward parameters
     reward_param_keys = [
         "portfolio_change_weight", "drawdown_penalty_weight",
@@ -493,26 +482,23 @@ def create_env(
         "exploration_start", "exploration_end",
         "exploration_decay_rate"
     ]
-    
+
     # Add them to env_kwargs ONLY if they exist in the config dict
     for key in reward_param_keys:
         if key in config:
             env_kwargs[key] = config[key]
-            logger.debug(f"Passing reward parameter '{key}' = {config[key]} to environment.")
+            # logger.debug(
+            #     f"Passing reward parameter '{key}' = {config[key]} "
+            #     f"to environment."
+            # )
         # else: # Optional: Log if a parameter is *not* found in config
-        #     logger.debug(f"Reward parameter '{key}' not found in config, using env default.")
+        #     logger.debug(
+        #       f"Reward parameter '{key}' not found in config, "
+        #       "using env default."
+        #      )
     # ---------------------------------------------
 
-    # Filter out None values from core arguments if necessary
-    # (Though None is valid for max_steps, features, etc.)
-    # env_kwargs = {k: v for k, v in env_kwargs.items() if v is not None}
-    # Removing the above filter as None might be intended for some args.
-
     env = TradingEnvironment(**env_kwargs)
-
-    # Apply wrappers (e.g., SafeTradingEnvWrapper) if needed
-    # env = SafeTradingEnvWrapper(env, ...)
-    # env = TimeLimit(env, max_episode_steps=config["max_steps"])
 
     return env
 
@@ -549,9 +535,10 @@ def create_model(
         "device": device,
         "verbose": 0,  # Callbacks handle progress output
         "policy_kwargs": policy_kwargs,  # Updated below
-        "tensorboard_log": os.path.join(
-            config["log_dir"], config["model_name"], "sb3_logs"
-        )
+        # SB3 models expect tensorboard_log in learn(), not init
+        # "tensorboard_log": os.path.join(
+        #     config["log_dir"], config["model_name"], "sb3_logs"
+        # )
     }
 
     # --- LSTM Feature Extractor Setup --- #
@@ -587,8 +574,10 @@ def create_model(
         model_kwargs["batch_size"] = config["batch_size"]
         model_kwargs["learning_starts"] = config["learning_starts"]
         model_kwargs["gradient_steps"] = config["gradient_steps"]
+        # Target network update frequency
         model_kwargs["target_update_interval"] = config["target_update_interval"]
         model_kwargs["exploration_fraction"] = config["exploration_fraction"]
+        # Initial exploration rate epsilon
         model_kwargs["exploration_initial_eps"] = config["exploration_initial_eps"]
         model_kwargs["exploration_final_eps"] = config["exploration_final_eps"]
 
@@ -603,7 +592,7 @@ def create_model(
         model_kwargs["replay_buffer_kwargs"] = {}
 
         # Remove kwargs not accepted by DQN.__init__
-        model_kwargs.pop("tensorboard_log", None)  # Uses learn's tb_log_name
+        # model_kwargs.pop("tensorboard_log", None)  # Uses learn's tb_log_name
 
         model = DQN(**model_kwargs)
 
@@ -620,6 +609,7 @@ def create_model(
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
+        model_kwargs["policy_kwargs"] = policy_kwargs
         model = PPO(**model_kwargs)
 
     elif model_type == "a2c":
@@ -633,6 +623,7 @@ def create_model(
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
+        model_kwargs["policy_kwargs"] = policy_kwargs
         model = A2C(**model_kwargs)
 
     elif model_type == "sac":
@@ -641,6 +632,7 @@ def create_model(
         model_kwargs["batch_size"] = config["batch_size"]
         model_kwargs["learning_starts"] = config["learning_starts"]
         model_kwargs["gradient_steps"] = config["gradient_steps"]
+        # Target network update frequency
         model_kwargs["target_update_interval"] = config["target_update_interval"]
         model_kwargs["tau"] = config["tau"]
 
@@ -661,18 +653,21 @@ def create_model(
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
+        model_kwargs["policy_kwargs"] = policy_kwargs
         model = SAC(**model_kwargs)
 
     elif model_type == "qrdqn":
-        # Import QRDQNPolicy from sb3_contrib
+        # Import QRDQNPolicy locally to avoid unused import error at top-level
         from sb3_contrib.qrdqn.policies import QRDQNPolicy
-        model_kwargs["policy"] = QRDQNPolicy  # Use QRDQNPolicy instead of DQNMlpPolicy
+        model_kwargs["policy"] = QRDQNPolicy
         model_kwargs["buffer_size"] = config["buffer_size"]
         model_kwargs["batch_size"] = config["batch_size"]
         model_kwargs["learning_starts"] = config["learning_starts"]
         model_kwargs["gradient_steps"] = config["gradient_steps"]
+        # Target network update frequency
         model_kwargs["target_update_interval"] = config["target_update_interval"]
         model_kwargs["exploration_fraction"] = config["exploration_fraction"]
+        # Initial exploration rate epsilon
         model_kwargs["exploration_initial_eps"] = config["exploration_initial_eps"]
         model_kwargs["exploration_final_eps"] = config["exploration_final_eps"]
 
@@ -680,13 +675,13 @@ def create_model(
         if "net_arch" not in policy_kwargs:
             fc_size = config.get("fc_hidden_size", 64)
             policy_kwargs["net_arch"] = [fc_size] * 2
-        
+
         # QRDQN specific args - set n_quantiles in policy_kwargs
-        policy_kwargs["n_quantiles"] = config.get("n_quantiles", 200)  # Default to 200 quantiles
+        policy_kwargs["n_quantiles"] = config.get("n_quantiles", 200)
         model_kwargs["policy_kwargs"] = policy_kwargs
 
         # Remove incompatible args
-        model_kwargs.pop("tensorboard_log", None)
+        # model_kwargs.pop("tensorboard_log", None)
         model = QRDQN(**model_kwargs)
 
     elif model_type == "recurrentppo":
@@ -707,29 +702,52 @@ def create_model(
         if "n_lstm_layers" in config:
             policy_kwargs["n_lstm_layers"] = config["n_lstm_layers"]
         if "shared_lstm" in config:
-            # Convert from string param to the proper format
+            # Convert from string param to the boolean format expected by sb3_contrib
             shared_lstm_mode = config["shared_lstm"]
-            # For RecurrentPPO, shared_lstm must be one of: 'shared', 'seperate', or 'none'
-            if shared_lstm_mode not in ["shared", "seperate", "none"]:
-                logger.warning(f"Invalid shared_lstm value '{shared_lstm_mode}', defaulting to 'shared'")
-                shared_lstm_mode = "shared"
-            policy_kwargs["shared_lstm"] = shared_lstm_mode
-        
+            # For RecurrentPPO, shared_lstm must be a boolean value
+            # where True means "shared" and False means "separate"
+            # The "none" option would need a different configuration
+            if shared_lstm_mode == "shared":
+                policy_kwargs["shared_lstm"] = True
+                policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
+            elif shared_lstm_mode == "seperate":
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
+            elif shared_lstm_mode == "none":
+                # For "none", we don't include shared_lstm parameter at all
+                logger.warning("'none' LSTM mode not fully supported, using separate LSTM")
+                policy_kwargs["shared_lstm"] = False
+                policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
+            else:
+                logger.warning(
+                    f"Invalid shared_lstm value '{shared_lstm_mode}', "
+                    "defaulting to shared=True"
+                )
+                policy_kwargs["shared_lstm"] = True
+                policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
+
         # Set policy_kwargs in model_kwargs
         model_kwargs["policy_kwargs"] = policy_kwargs
-        
-        logger.info(f"RecurrentPPO LSTM config: hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
-                    f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
-                    f"shared={policy_kwargs.get('shared_lstm', 'shared')}")
+
+        logger.info(
+            f"RecurrentPPO LSTM config: "
+            f"hidden_size={policy_kwargs.get('lstm_hidden_size', 128)}, "
+            f"layers={policy_kwargs.get('n_lstm_layers', 1)}, "
+            f"shared={policy_kwargs.get('shared_lstm', True)}"
+        )
 
         model = RecurrentPPO(**model_kwargs)
 
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
+    # Extract policy name for logging
+    policy_name = model_kwargs['policy']
+    if not isinstance(policy_name, str):
+        policy_name = policy_name.__name__
+
     logger.info(
-        f"Created {model_type.upper()} model with policy "
-        f"{model_kwargs['policy'] if isinstance(model_kwargs['policy'], str) else model_kwargs['policy'].__name__}"
+        f"Created {model_type.upper()} model with policy {policy_name}"
     )
     return model
 
@@ -762,7 +780,9 @@ def evaluate_model(
     is_vectorized = hasattr(env, 'num_envs')
     if not is_vectorized:
         # This function expects a VecEnv
-        logger.warning("evaluate_model expects a VecEnv, wrapping in DummyVecEnv")
+        logger.warning(
+            "evaluate_model expects a VecEnv, wrapping in DummyVecEnv"
+        )
         env = DummyVecEnv([lambda: env])
 
     n_envs = env.num_envs
@@ -823,8 +843,8 @@ def evaluate_model(
                 current_rewards_list[i] = []
 
                 # Important: Check if the environment needs manual reset after done
-                # VecEnv handles auto-reset, but Monitor might need manual if not wrapped?
-                # Generally VecEnv handles this.
+                # VecEnv handles auto-reset, but Monitor might need manual
+                # if not wrapped? Generally VecEnv handles this.
 
     # Calculate mean reward across all completed episodes
     mean_reward = np.mean(all_episode_rewards) if all_episode_rewards else 0.0
@@ -848,26 +868,32 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dictionary of evaluation metrics
     """
-    # Setup logger
-    log_path = os.path.join(config["log_dir"], config["model_name"], "evaluation")
+    # Setup logger (File level depends on verbose, Console fixed to INFO)
+    log_path = os.path.join(
+        config["log_dir"], config["model_name"], "evaluation"
+    )
     ensure_dir_exists(log_path)
     setup_logger(
         log_dir=log_path,
-        log_level=logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+        log_level=(
+            logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+        ),
+        console_level=logging.INFO  # Keep console clean
     )
 
     # Check if model path exists
     model_path = config["load_model"]
-    if not os.path.exists(model_path):
-        logger.error(f"Model path not found: {model_path}")
+    if not model_path or not os.path.exists(model_path):
+        logger.error(f"Model path not found or not provided: {model_path}")
         sys.exit(1)
 
-    num_envs = config.get("num_envs", 1)
-    vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
+    # Unused variable removed
+    # num_envs = config.get("num_envs", 1)
+    # vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
 
     # Load test data
     if not config.get("test_data_path"):
-        logger.error("No test data path provided")
+        logger.error("No test data path provided for evaluation")
         sys.exit(1)
 
     # Create test environment with same settings as training
@@ -884,7 +910,12 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
             env = create_env(config=env_config, is_eval=True)
-            monitor_log_path_eval = os.path.join(log_path, f'monitor_eval_{rank}.csv')
+            # Ensure eval monitor log path exists
+            eval_monitor_dir = os.path.join(log_path, "monitor_logs")
+            ensure_dir_exists(eval_monitor_dir)
+            monitor_log_path_eval = os.path.join(
+                eval_monitor_dir, f'monitor_eval_{rank}.csv'
+            )
             env = Monitor(env, filename=monitor_log_path_eval)
             return env
         return _init
@@ -910,7 +941,9 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
         test_env.training = False  # Set to inference mode
         test_env.norm_reward = False  # Do not normalize rewards for eval
     else:
-        logger.warning("VecNormalize stats not found. Evaluation might be less accurate.")
+        logger.warning(
+            "VecNormalize stats not found. Evaluation might be less accurate."
+        )
 
     # Load the model
     model_cls = {
@@ -972,14 +1005,21 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
     # Log metrics
     logger.info("Evaluation Results:")
     for key, value in metrics.items():
-        logger.info(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
+        # Format for better readability
+        log_msg = f"  {key}: {value}"
+        if isinstance(value, float):
+            log_msg = f"  {key}: {value:.4f}"
+        logger.info(log_msg)
 
     # Save metrics to JSON file
     metrics_file = os.path.join(log_path, "evaluation_metrics.json")
     try:
         with open(metrics_file, 'w', encoding='utf-8') as f:
             # Convert numpy types for JSON serialization
-            serializable_metrics = {k: (float(v) if isinstance(v, (np.floating, np.integer)) else v) for k, v in metrics.items()}
+            serializable_metrics = {
+                k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
+                for k, v in metrics.items()
+            }
             json.dump(serializable_metrics, f, indent=4)
         logger.info(f"Metrics saved to {metrics_file}")
     except Exception as e:
@@ -996,16 +1036,20 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     """
     Train a reinforcement learning agent based on config.
     """
-    # Setup logger
+    # Setup logger (File level depends on verbose, Console fixed to INFO)
     log_path = os.path.join(config["log_dir"], config["model_name"])
     ensure_dir_exists(log_path)
     setup_logger(
         log_dir=log_path,
-        log_level=logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+        log_level=(
+            logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+        ),
+        console_level=logging.INFO  # Keep console clean
     )
 
     # Setup SB3 logger
-    sb3_log_path = log_path
+    sb3_log_path = os.path.join(log_path, "sb3_logs")
+    ensure_dir_exists(sb3_log_path) # Ensure SB3 log dir exists
     sb3_logger_instance = setup_sb3_logger(log_dir=sb3_log_path)
 
     # Save configuration
@@ -1033,8 +1077,10 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
             env = create_env(config=env_config, is_eval=False)
-            monitor_log_path = os.path.join(log_path, f'monitor_{rank}.csv')
-            os.makedirs(os.path.dirname(monitor_log_path), exist_ok=True)
+            # Ensure monitor log path exists
+            monitor_dir = os.path.join(log_path, "monitor_logs")
+            ensure_dir_exists(monitor_dir)
+            monitor_log_path = os.path.join(monitor_dir, f'monitor_{rank}.csv')
             env = Monitor(env, filename=monitor_log_path)
             return env
         return _init
@@ -1058,14 +1104,18 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         )
         if os.path.exists(potential_stats_path):
             vec_normalize_stats_path = potential_stats_path
-            logger.info(f"Found VecNormalize stats: {vec_normalize_stats_path}")
+            logger.info(
+                f"Found VecNormalize stats: {vec_normalize_stats_path}"
+            )
 
     if vec_normalize_stats_path:
         logger.info(f"Loading VecNormalize stats: {vec_normalize_stats_path}")
         train_env = VecNormalize.load(vec_normalize_stats_path, train_env)
         train_env.training = True  # Ensure it continues training
     else:
-        logger.info("Applying new VecNormalize (norm_obs=True, norm_reward=False).")
+        logger.info(
+            "Applying new VecNormalize (norm_obs=True, norm_reward=False)."
+        )
         train_env = VecNormalize(
             train_env,
             norm_obs=True,
@@ -1077,7 +1127,9 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     # Create validation environment if specified
     eval_env = None
     if config.get("val_data_path"):
-        logger.info(f"Creating validation environment: {config['val_data_path']}")
+        logger.info(
+            f"Creating validation environment: {config['val_data_path']}"
+        )
         eval_env_config = config.copy()
         eval_env_config["data_path"] = config["val_data_path"]
 
@@ -1144,27 +1196,32 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     ensure_dir_exists(checkpoint_save_path)
     callbacks = get_callback_list(
         eval_env=eval_env,
-        log_dir=log_path,
-        eval_freq=max(config["eval_freq"], 5000),
+        log_dir=log_path,  # Pass base log dir
+        eval_freq=max(config["eval_freq"] // num_envs, 1), # Adjust freq for vec env
         n_eval_episodes=config["n_eval_episodes"],
-        save_freq=config["save_freq"],
+        save_freq=max(config["save_freq"] // num_envs, 1), # Adjust freq for vec env
         keep_checkpoints=config["keep_checkpoints"],
-        resource_check_freq=config["resource_check_freq"],
-        metrics_log_freq=config["metrics_log_freq"],
-        early_stopping_patience=max(20, config["early_stopping_patience"]),
-        checkpoint_save_path=checkpoint_save_path,
-        model_name=config["model_type"],
+        resource_check_freq=max(config["resource_check_freq"] // num_envs, 1),
+        metrics_log_freq=max(config["metrics_log_freq"] // num_envs, 1),
+        early_stopping_patience=config["early_stopping_patience"], # EvalCallback handles patience
+        checkpoint_save_path=checkpoint_save_path, # Checkpoint callback needs this
+        model_name=config["model_type"], # Checkpoint callback needs this
+        vec_normalize_env=train_env if isinstance(train_env, VecNormalize) else None, # Pass VecNormalize env if used
         custom_callbacks=[]
     )
 
     # --- Training --- #
+    # Define tb_log_name here for clarity
+    tb_log_name = f"{config['model_type']}_{config['model_name']}"
     logger.info(f"Starting training: {config['total_timesteps']} timesteps...")
+    logger.info(f"Tensorboard log name: {tb_log_name}")
     training_start_time = time.time()
     try:
         model.learn(
             total_timesteps=config["total_timesteps"],
             callback=callbacks,
-            log_interval=1,
+            log_interval=1, # Log scalar values every step for detailed analysis
+            tb_log_name=tb_log_name, # Pass log name here
             reset_num_timesteps=not config.get("load_model")
         )
     except Exception as e:
@@ -1173,6 +1230,11 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         try:
             model.save(error_save_path)
             logger.info(f"Model state saved to {error_save_path}.")
+            # Save VecNormalize stats on error too
+            if isinstance(train_env, VecNormalize):
+                stats_path = error_save_path.replace(".zip", "_vecnormalize.pkl")
+                train_env.save(stats_path)
+                logger.info(f"VecNormalize stats saved to {stats_path}")
         except Exception as save_e:
             logger.error(f"Could not save model after error: {save_e}")
         sys.exit(1)
@@ -1216,9 +1278,16 @@ def main():
         if os.path.exists(args.load_config):
             print(f"Loading configuration from {args.load_config}")
             file_config = load_config(args.load_config)
-            cli_overrides = {k: v for k, v in vars(args).items() if v is not None}
-            file_config.update(cli_overrides)
-            config = file_config
+            # Update base config with file config, then override with CLI args
+            base_config = config.copy() # Start with CLI args/defaults
+            base_config.update(file_config) # Update with file values
+            # Override with non-None CLI args again to ensure they take precedence
+            cli_overrides = {
+                k: v for k, v in vars(args).items() if v is not None
+            }
+            base_config.update(cli_overrides)
+            config = base_config
+            # Ensure features are list if loaded from config
             if 'features' in config and isinstance(config['features'], str):
                 config['features'] = config['features'].split(",")
         else:
@@ -1258,11 +1327,17 @@ def main():
             final_model_path = os.path.join(
                 log_base_dir, model_name, "final_model.zip"
             )
-            eval_config = config.copy()
-            eval_config["load_model"] = final_model_path
-            eval_config["test_data_path"] = config["test_data_path"]
-
-            test_metrics = evaluate(eval_config)
+            # Ensure the final model path exists before evaluation
+            if not os.path.exists(final_model_path):
+                 logger.error(f"Final model not found at {final_model_path} for evaluation.")
+                 test_metrics = {"error": "Final model not found"}
+            else:
+                eval_config = config.copy()
+                eval_config["load_model"] = final_model_path
+                eval_config["test_data_path"] = config["test_data_path"]
+                # Ensure evaluation uses appropriate verbosity for its logs
+                eval_config["verbose"] = config.get("verbose", 1)
+                test_metrics = evaluate(eval_config)
 
             print("\n--- Training Summary ---")
             print(f"Training time: {train_metrics['training_time']:.2f} sec")
@@ -1270,7 +1345,11 @@ def main():
             print(f"Final model: {final_model_path}")
             print("\n--- Test Set Evaluation Results ---")
             for key, value in test_metrics.items():
-                print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
+                 # Format for better readability
+                 print_msg = f"  {key}: {value}"
+                 if isinstance(value, float):
+                     print_msg = f"  {key}: {value:.4f}"
+                 print(print_msg)
 
         else:
             final_model_path = os.path.join(
