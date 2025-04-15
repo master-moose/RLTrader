@@ -74,8 +74,11 @@ from rl_agent.utils import (calculate_trading_metrics, check_resources,
 # Initialize logger globally (will be configured in main/train/evaluate)
 logger = logging.getLogger(__name__)
 
+# --- Import BaseCallback --- #
+from stable_baselines3.common.callbacks import BaseCallback
+
 # --- Ray Tune Callback Class --- #
-class TuneReportCallback:
+class TuneReportCallback(BaseCallback):
     """
     Callback to report metrics to Ray Tune during training.
     Works alongside the SB3 callback system.
@@ -88,29 +91,33 @@ class TuneReportCallback:
         Args:
             report_freq: How often to report metrics to Ray Tune (in timesteps)
         """
+        super().__init__()
         self.report_freq = report_freq
         self.last_reported_step = 0
     
-    def __call__(self, locals_dict: Dict[str, Any], globals_dict: Dict[str, Any]) -> None:
+    def _on_init(self) -> None:
+        """Called when the training starts."""
+        # No specific initialization needed for this callback
+        pass
+
+    def _on_step(self) -> bool:
         """
-        Called by SB3 during training. Reports metrics to Ray Tune.
-        
-        Args:
-            locals_dict: Local variables in the scope of the learn function
-            globals_dict: Global variables
+        Called by SB3 after each step. Reports metrics to Ray Tune.
+
+        Returns:
+            True if the training should continue, False otherwise.
         """
         if not RAY_AVAILABLE:
-            return
-            
-        # Get the model from locals
-        model = locals_dict.get("self")
-        if model is None:
-            return
-            
+            return True # Continue training
+
+        # Get the model from the callback's model attribute
+        # (set by BaseCallback)
+        model = self.model
+
         # Only report at specified frequency
         if model.num_timesteps - self.last_reported_step < self.report_freq:
-            return
-            
+            return True # Continue training
+
         self.last_reported_step = model.num_timesteps
         
         # Get metrics from model logger
@@ -125,6 +132,8 @@ class TuneReportCallback:
         # Report metrics to Ray Tune
         if metrics:
             tune.report(**metrics)
+
+        return True # Continue training
 
 
 # --- Ray Tune Trainable Function --- #
