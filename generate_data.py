@@ -9,8 +9,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import argparse
-from scipy import stats
+# from scipy import stats # Unused import
 import random
+import joblib
+from sklearn.preprocessing import StandardScaler
 from crypto_trading_model.data_processing.feature_engineering import (
     calculate_multi_timeframe_signal
 )
@@ -874,11 +876,29 @@ def save_dataset_hdf5(dataset, output_dir, filename="synthetic_dataset.h5"):
     logger.info(f"Saved dataset metadata to {metadata_path}")
 
 def create_and_save_splits(dataset, train_ratio, val_ratio, test_ratio, shuffle, output_dir):
-    """Create train/val/test splits and save them as separate HDF5 files."""
+    """Create train/val/test splits, apply scaling, and save them as separate HDF5 files."""
     
     split_sizes = {"train": train_ratio, "val": val_ratio, "test": test_ratio}
     split_datasets = {split_name: {} for split_name in split_sizes.keys()}
+    scalers = {} # To store scalers for each timeframe
     
+    # Define features to scale (adjust this list as needed)
+    # Exclude non-numeric or target variables like 'market_regime', 'price_direction'
+    # Also exclude original OHLC if they should remain unscaled
+    # Let's assume we scale all typical numeric indicator/price columns for the agent
+    # We will reference the scaled versions (_scaled suffix) for training features later
+    features_to_scale_base = [
+        'open', 'high', 'low', 'close', 'volume', # Base OHLCV
+        'sma_7', 'sma_25', 'sma_99', 'ema_9', 'ema_21', # Trend
+        'price_sma_ratio', # Trend derived
+        # 'sma_cross_signal', # Often categorical (-1, 1), maybe exclude? Let's exclude for now.
+        'rsi_14', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_hist', # Momentum
+        'bb_middle', 'bb_upper', 'bb_lower', 'bb_width', 'bb_pct_b', 'atr_14', # Volatility
+        'volume_sma_20', 'volume_ratio', 'obv', 'cmf_20', # Volume
+        'return', 'log_return', 'high_low_range', 'body_size', # Price-derived
+        'true_volatility' # Added volatility
+    ]
+
     for timeframe, df in dataset.items():
         # Make a copy to avoid modifying the original
         data = df.copy()
@@ -892,25 +912,56 @@ def create_and_save_splits(dataset, train_ratio, val_ratio, test_ratio, shuffle,
         train_idx = int(total_rows * train_ratio)
         val_idx = train_idx + int(total_rows * val_ratio)
         
-        # Split the data
-        split_datasets["train"][timeframe] = data.iloc[:train_idx]
-        split_datasets["val"][timeframe] = data.iloc[train_idx:val_idx]
-        split_datasets["test"][timeframe] = data.iloc[val_idx:]
+        # Split the data *before* scaling
+        train_df = data.iloc[:train_idx].copy()
+        val_df = data.iloc[train_idx:val_idx].copy()
+        test_df = data.iloc[val_idx:].copy()
         
-        logger.info(
-            f"Split {timeframe} data: "
-            f"train={len(split_datasets['train'][timeframe])}, "
-            f"val={len(split_datasets['val'][timeframe])}, "
-            f"test={len(split_datasets['test'][timeframe])}"
-        )
-    
+        # Identify columns present in this dataframe that need scaling
+        features_present = [f for f in features_to_scale_base if f in train_df.columns]
+        logger.info(f"Scaling features for {timeframe}: {features_present}")
+
+        # Fit scaler ONLY on training data for these features
+        scaler = StandardScaler()
+        scaler.fit(train_df[features_present])
+        scalers[timeframe] = scaler # Store the fitted scaler
+
+        # Apply scaler to train, val, and test sets
+        for split_name, split_df in [('train', train_df), ('val', val_df), ('test', test_df)]:
+            # Create new columns for scaled features
+            scaled_feature_names = [f"{f}_scaled" for f in features_present]
+            split_df[scaled_feature_names] = scaler.transform(split_df[features_present])
+            
+            # Store the processed dataframe
+            split_datasets[split_name][timeframe] = split_df
+            
+            logger.info(
+                f"Split {timeframe} data ({split_name}): {len(split_df)} rows"
+            )
+            
+    # Save the scalers
+    scaler_save_path = os.path.join(output_dir, "feature_scalers.joblib")
+    try:
+        joblib.dump(scalers, scaler_save_path)
+        logger.info(f"Saved feature scalers to {scaler_save_path}")
+    except Exception as e:
+        logger.error(f"Error saving scalers: {e}")
+
     # Save each split as a separate HDF5 file
     for split_name, split_data in split_datasets.items():
         split_file = os.path.join(output_dir, f"{split_name}_data.h5")
         
         with pd.HDFStore(split_file, mode='w') as store:
-            for timeframe, df in split_data.items():
-                store.put(f'/{timeframe}', df, format='table', data_columns=True)
+            for timeframe, df_split in split_data.items():
+                # Ensure index is suitable for HDFStore (like DatetimeIndex)
+                if not isinstance(df_split.index, pd.DatetimeIndex):
+                    logger.warning(f"Index for {split_name}/{timeframe} is not DatetimeIndex, attempting conversion.")
+                    try:
+                        df_split.index = pd.to_datetime(df_split.index)
+                    except Exception as e:
+                        logger.error(f"Failed to convert index for {split_name}/{timeframe}: {e}. Saving might fail.")
+
+                store.put(f'/{timeframe}', df_split, format='table', data_columns=True)
                 
         logger.info(f"Saved {split_name} split to {split_file}")
 
