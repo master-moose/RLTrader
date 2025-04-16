@@ -1,4 +1,0 @@
-time/fps,time/iterations,time/total_timesteps,time/time_elapsed,train/learning_rate,train/value_loss,train/n_updates,train/policy_loss,train/entropy_loss,train/explained_variance,resources/memory_mb,resources/cpu_percent
-3112,1,32768,10,,,,,,,,
-2897,2,65536,22,0.0002,182944.015625,1,-130.82057189941406,-1.0985994338989258,-1.6808509826660156e-05,,
-2686,3,98304,36,0.0002,37673.953125,2,-131.5050048828125,-1.080155372619629,9.059906005859375e-06,15092.5078125,1.8

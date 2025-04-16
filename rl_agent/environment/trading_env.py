@@ -549,11 +549,21 @@ class TradingEnvironment(Env):
         current_price = self.data['close'].iloc[self.current_step]
         self.asset_value = self.shares_held * current_price
         self.portfolio_value = self.balance + self.asset_value
-        # --- Log intermediate state --- #
-        logger.debug(f"_update_portfolio_value: Price={current_price:.4f}, Shares={self.shares_held:.8f} -> AssetVal={self.asset_value:.4f}, PortVal={self.portfolio_value:.4f}")
+        # --- DETAILED LOGGING FOR PORTFOLIO VALUE --- #
+        logger.debug(
+            f"_update_portfolio_value (Step {self.current_step}): "
+            f"Price={current_price:.4f}, Shares={self.shares_held:.8f}, "
+            f"Balance={self.balance:.4f} -> AssetVal={self.asset_value:.4f}, "
+            f"PortVal={self.portfolio_value:.4f}"
+        )
+        # Check for non-finite values immediately after calculation
         if not np.isfinite(self.asset_value) or not np.isfinite(self.portfolio_value):
-            logger.error(f"_update_portfolio_value: Values became non-finite! AssetVal={self.asset_value}, PortVal={self.portfolio_value}")
-        # --- End log --- #
+            logger.error(
+                f"_update_portfolio_value: NON-FINITE VALUE DETECTED! (Step {self.current_step})"
+                f" Price={current_price:.4f}, Shares={self.shares_held:.8f}, Balance={self.balance:.4f}"
+                f" -> AssetVal={self.asset_value}, PortVal={self.portfolio_value}"
+            )
+        # --- END DETAILED LOGGING --- #
     
     def _calculate_reward(self, action, prev_portfolio_value, fee_paid_this_step):
         """

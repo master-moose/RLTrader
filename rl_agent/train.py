@@ -83,9 +83,10 @@ class TuneReportCallback(BaseCallback):
     def __init__(self):
         super().__init__(verbose=0)
         self.last_reported_timestep = -1  # Track last report
-        self.episode_rewards = []  # Track episode rewards explicitly
-        self.last_episode_rewards = []  # For calculating deltas
-        
+        # Remove episode tracking variables:
+        # self.episode_rewards = []
+        # self.last_episode_rewards = []
+
     def _on_init(self) -> None:
         """Ensure the logger is available."""
         # Use self.logger which is automatically set by BaseCallback
@@ -93,175 +94,170 @@ class TuneReportCallback(BaseCallback):
             # Use the logger instance configured elsewhere in the script
             global_logger = logging.getLogger("rl_agent")
             global_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
-        
+
         # Set up initial logging
         global_logger = logging.getLogger("rl_agent")
-        global_logger.info("TuneReportCallback initialized - will track episode rewards directly")
+        # Modify log message
+        global_logger.info("TuneReportCallback initialized - will report metrics when available.")
 
     def _normalize_and_combine_metrics(self, reward, explained_variance):
         """
         Create a normalized combined score that equally weights reward and explained variance.
-        
+
         Args:
             reward: The mean reward value, can be very large or small
             explained_variance: The explained variance, typically between -1 and 1
-        
+
         Returns:
-            A combined normalized score between -1 and 1
+            A combined normalized score between 0 and 1 (higher is better)
         """
-        # Handle None or non-numeric values
+        # Handle None or non-numeric values robustly
         if reward is None or not isinstance(reward, (int, float, np.number)):
-            reward = 0.0
+            # If reward is missing, we cannot calculate a meaningful score
+            return 0.5 # Return neutral score if reward is unavailable
         if explained_variance is None or not isinstance(explained_variance, (int, float, np.number)):
-            explained_variance = 0.0
-            
+            explained_variance = 0.0 # Default variance to 0 if unavailable
+
         # Use tanh to normalize reward to [-1, 1] range regardless of magnitude
         # Scale factor of 1000 helps with gradual scaling for typical reward ranges
         normalized_reward = np.tanh(reward / 1000.0)
-        
+
         # Explained variance is typically between -1 and 1 already
         # Clip it just to be safe
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-        
+
         # Calculate combined score (equal weight to both normalized metrics)
-        # We add 1 to each to get values in [0, 2] range, then divide by 2 to get [0, 1]
-        # This makes the combined score more intuitive (higher is better, range 0-1)
+        # We add 1 to each to get values in [0, 2] range, then divide by 4 to get [0, 1]
         combined_score = ((normalized_reward + 1.0) + (normalized_variance + 1.0)) / 4.0
-        
+
         return combined_score
 
-    def _on_rollout_end(self) -> None:
-        """
-        Capture episode rewards at the end of each rollout.
-        This ensures we have the latest episode rewards.
-        """
-        if self.model and hasattr(self.model, "env") and hasattr(self.model.env, "buf_rews"):
-            # Try to get episode rewards directly from the VecEnv buffer
-            try:
-                rewards = self.model.env.get_episode_rewards()
-                if rewards and len(rewards) > len(self.last_episode_rewards):
-                    new_rewards = rewards[len(self.last_episode_rewards):]
-                    self.episode_rewards.extend(new_rewards)
-                    self.last_episode_rewards = rewards.copy()
-            except (AttributeError, IndexError) as e:
-                # If we can't get rewards from the env buffer, log the issue
-                global_logger = logging.getLogger("rl_agent")
-                global_logger.debug(f"Could not get rewards from env: {e}")
-        
-        # Also capture data from SB3 logger as a backup
-        if hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
-            if "rollout/ep_rew_mean" in self.model.logger.name_to_value:
-                mean_reward = self.model.logger.name_to_value["rollout/ep_rew_mean"]
-                global_logger = logging.getLogger("rl_agent")
-                global_logger.debug(f"SB3 logger ep_rew_mean: {mean_reward}")
+    # Remove _on_rollout_end method entirely
+    # def _on_rollout_end(self) -> None:
+    #     """
+    #     Capture episode rewards at the end of each rollout.
+    #     This ensures we have the latest episode rewards.
+    #     """
+    #     ... (removed code) ...
 
-    def _get_current_reward_metrics(self):
+    def _get_current_reward_metrics(self) -> Optional[float]:
         """
-        Get the current reward metrics using multiple fallback methods.
+        Get the current reward metrics, prioritizing the SB3 logger.
+        Returns None if the primary metric ('rollout/ep_rew_mean') is not available.
         """
         global_logger = logging.getLogger("rl_agent")
         reward_value = None
-        
-        # Method 1: Try to get reward from captured episode rewards
-        if self.episode_rewards:
-            reward_value = np.mean(self.episode_rewards[-10:])  # Average of last 10 episodes
-            global_logger.debug(f"Using captured rewards: {reward_value}")
-        
-        # Method 2: Try to get from SB3 logger
-        if reward_value is None and hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
+
+        # Method 1: Try to get from SB3 logger (Primary Method)
+        if hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
             if "rollout/ep_rew_mean" in self.model.logger.name_to_value:
-                reward_value = self.model.logger.name_to_value["rollout/ep_rew_mean"]
-                global_logger.debug(f"Using SB3 logger rewards: {reward_value}")
-        
-        # Method 3: Try to get directly from environment if available
+                try:
+                    reward_value = float(self.model.logger.name_to_value["rollout/ep_rew_mean"])
+                    global_logger.debug(f"Using SB3 logger rewards: {reward_value}")
+                except (ValueError, TypeError):
+                     global_logger.warning("Could not convert SB3 logger reward to float.")
+                     reward_value = None # Treat conversion error as unavailable
+
+        # Method 2: Try to get directly from environment if logger failed
         if reward_value is None and hasattr(self.model, "env"):
             try:
                 # Try to access VecEnv's episode rewards
                 if hasattr(self.model.env, "get_episode_rewards"):
                     rewards = self.model.env.get_episode_rewards()
                     if rewards:
-                        reward_value = np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards)
+                        # Use the mean of recent episodes if available
+                        reward_value = float(np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards))
                         global_logger.debug(f"Using env episode rewards: {reward_value}")
-            except (AttributeError, IndexError) as e:
-                global_logger.debug(f"Could not get rewards from env directly: {e}")
-        
-        # Fallback if all methods fail
+            except (AttributeError, IndexError, ValueError, TypeError) as e:
+                global_logger.debug(f"Could not get rewards from env directly or convert: {e}")
+                reward_value = None # Treat error as unavailable
+
+        # If reward_value is still None, it means neither reliable source had it.
         if reward_value is None:
-            # Check if we're in early training (first 1000 steps)
-            if self.num_timesteps < 1000:
-                reward_value = 0.0  # Silent default for early training
-                global_logger.debug("Early training phase (no episodes completed yet), using default reward")
-            else:
-                reward_value = 0.0
-                global_logger.warning("No reward metric found from any source, using default 0.0")
-        
-        return float(reward_value)
+            global_logger.debug("No reward metric found from SB3 logger or env buffer yet.")
+            return None # Explicitly return None
+
+        return reward_value # Return the found float value
 
     def _on_step(self) -> bool:
         """Report metrics to Ray Tune only when key metrics are available."""
-        # Access the SB3 logger via self.logger
+        global_logger = logging.getLogger("rl_agent")
+
+        # Try to get the reward value
+        reward_value = self._get_current_reward_metrics()
+
+        # --- Only report if reward_value is available ---
+        if reward_value is None:
+            # Log that we are skipping the report because the key metric is missing
+            if self.num_timesteps % 1000 == 0: # Log periodically to avoid spam
+                 global_logger.debug(f"Skipping Ray Tune report at step {self.num_timesteps}: rollout/ep_rew_mean not yet available.")
+            return True # Continue training
+
+        # --- Proceed with reporting if reward_value is valid ---
+        # Check if we're at a new timestep to report
+        if self.num_timesteps <= self.last_reported_timestep:
+             return True # Already reported for this step
+
+        # Prepare metrics dictionary
         metrics_to_report = {}
         metrics_to_report["timesteps"] = self.num_timesteps
-        metrics_to_report["training_iteration"] = self.num_timesteps  # Aligning iteration with timesteps
-        
-        # Early in training, don't bother with extensive reporting as no episodes have completed
-        early_training = self.num_timesteps < 1000 and not self.episode_rewards
-        
-        # Get reward metrics using our robust method
-        reward_value = self._get_current_reward_metrics()
+        metrics_to_report["training_iteration"] = self.num_timesteps
+
+        # Add the validated reward
         metrics_to_report["eval/mean_reward"] = float(reward_value)
-        
-        # Get variance metrics from logger if available
+
+        # Get variance metrics from logger if available, default to 0.0
         variance_value = 0.0
         if self.logger and hasattr(self.logger, "name_to_value"):
             if "train/explained_variance" in self.logger.name_to_value:
-                variance_value = self.logger.name_to_value["train/explained_variance"]
-        
+                 try:
+                     variance_value = float(self.logger.name_to_value["train/explained_variance"])
+                 except (ValueError, TypeError):
+                     variance_value = 0.0 # Default on conversion error
+
         metrics_to_report["eval/explained_variance"] = float(variance_value)
-        
-        # Always calculate combined score
+
+        # Calculate combined score using the valid reward
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
         metrics_to_report["eval/combined_score"] = float(combined_score)
-        
-        # Only add other metrics if not in early training to avoid logging noise
-        if not early_training and self.logger and hasattr(self.logger, "name_to_value"):
+
+        # Add other useful metrics if available
+        if self.logger and hasattr(self.logger, "name_to_value"):
             other_metrics = ["rollout/ep_len_mean", "time/fps"]
             for key in other_metrics:
                 if key in self.logger.name_to_value:
                     value = self.logger.name_to_value[key]
                     # Ensure value is scalar (int or float) before reporting
                     if isinstance(value, (int, float, np.number)):
-                        metrics_to_report[key] = float(value)
-        
-        # Log the metrics we're reporting (but avoid verbose logging in early training)
-        global_logger = logging.getLogger("rl_agent")
-        if not early_training or self.num_timesteps % 200 == 0:  # Reduce logging frequency in early training
-            global_logger.debug(f"Metrics to report: reward={reward_value}, variance={variance_value}, combined={combined_score}")
-        
-        # Only report if we're at a new timestep
-        if self.num_timesteps > self.last_reported_timestep:
-            # Report to Ray Tune
-            try:
-                if RAY_AVAILABLE:
-                    # Use session.report for Ray >= 2.0 (preferred)
-                    if hasattr(ray, "air") and hasattr(ray.air, "session") \
-                       and ray.air.session.is_active():
-                        ray.air.session.report(metrics_to_report)
-                    else:
-                        # Fallback for older Ray or direct tune usage without AIR session
-                        tune.report(**metrics_to_report)
+                        try:
+                            metrics_to_report[key] = float(value)
+                        except (ValueError, TypeError):
+                            pass # Skip if cannot convert
 
-                    self.last_reported_timestep = self.num_timesteps  # Update only on successful report
-                    if not early_training or self.num_timesteps % 1000 == 0:  # Reduce logging frequency
-                        global_logger.debug(f"Reported metrics to Ray Tune at timestep {self.num_timesteps}")
+        # Log the metrics being reported
+        global_logger.debug(f"Reporting metrics: reward={reward_value:.4f}, variance={variance_value:.4f}, combined={combined_score:.4f}")
+
+        # Report to Ray Tune
+        try:
+            if RAY_AVAILABLE:
+                # Use session.report for Ray >= 2.0 (preferred)
+                if hasattr(ray, "air") and hasattr(ray.air, "session") \
+                   and ray.air.session.is_active():
+                    ray.air.session.report(metrics_to_report)
                 else:
-                    # Log warning if Ray is somehow unavailable here
-                    global_logger.warning("Ray is not available during tune.report call.")
+                    # Fallback for older Ray or direct tune usage without AIR session
+                    tune.report(**metrics_to_report)
 
-            except Exception as e:
-                global_logger.error(f"Error during tune.report: {e}", exc_info=True)
-                # We'll continue training even if reporting fails
-        
+                self.last_reported_timestep = self.num_timesteps  # Update only on successful report
+                global_logger.debug(f"Reported metrics to Ray Tune at timestep {self.num_timesteps}")
+            else:
+                # Log warning if Ray is somehow unavailable here
+                global_logger.warning("Ray is not available during tune.report call.")
+
+        except Exception as e:
+            global_logger.error(f"Error during tune.report: {e}", exc_info=True)
+            # We'll continue training even if reporting fails
+
         return True  # Continue training
 
 
@@ -527,57 +523,54 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     reward_value = None
     variance_value = None
     
-    # Source 1: Check the TuneReportCallback for captured rewards
-    reward_callback = None
-    for callback in callbacks:
-        if isinstance(callback, TuneReportCallback):
-            reward_callback = callback
-            break
-    
-    if reward_callback and hasattr(reward_callback, "episode_rewards") and reward_callback.episode_rewards:
-        # Use the collected episode rewards from our callback
-        reward_value = np.mean(reward_callback.episode_rewards[-10:])
-        logger.info(f"Using rewards from TuneReportCallback: {reward_value:.4f}")
-    
-    # Source 2: Check the model's logger
-    if reward_value is None and hasattr(model, "logger") and hasattr(model.logger, "name_to_value"):
+    # Source 1: Check the model's logger (Primary source now)
+    if hasattr(model, "logger") and hasattr(model.logger, "name_to_value"):
         if "rollout/ep_rew_mean" in model.logger.name_to_value:
-            reward_value = model.logger.name_to_value["rollout/ep_rew_mean"]
-            logger.info(f"Using rewards from model logger: {reward_value:.4f}")
-        
+            try:
+                reward_value = float(model.logger.name_to_value["rollout/ep_rew_mean"])
+                logger.info(f"Using final rewards from model logger: {reward_value:.4f}")
+            except (ValueError, TypeError):
+                 reward_value = None # Handle potential non-float values
+
         if "train/explained_variance" in model.logger.name_to_value:
-            variance_value = model.logger.name_to_value["train/explained_variance"]
-            logger.info(f"Using explained variance from model logger: {variance_value:.4f}")
-    
-    # Source 3: Check the environment directly
+             try:
+                 variance_value = float(model.logger.name_to_value["train/explained_variance"])
+                 logger.info(f"Using final explained variance from model logger: {variance_value:.4f}")
+             except (ValueError, TypeError):
+                 variance_value = None
+
+    # Source 2: Check the environment directly (Fallback)
     if reward_value is None and hasattr(model, "env"):
         try:
             if hasattr(model.env, "get_episode_rewards"):
                 rewards = model.env.get_episode_rewards()
                 if rewards:
-                    reward_value = np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards)
-                    logger.info(f"Using rewards from environment: {reward_value:.4f}")
-        except (AttributeError, IndexError) as e:
-            logger.warning(f"Could not get rewards from environment: {e}")
-    
+                    reward_value = float(np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards))
+                    logger.info(f"Using final rewards from environment: {reward_value:.4f}")
+        except (AttributeError, IndexError, ValueError, TypeError) as e:
+            logger.warning(f"Could not get final rewards from environment: {e}")
+            reward_value = None
+
     # Fallback values if needed
     if reward_value is None:
+        # Use final eval reward if other sources failed
         reward_value = final_eval_metrics.get("final_eval_mean_reward", 0.0)
-        logger.warning(f"No reward metric found from normal sources, using final eval: {reward_value:.4f}")
-    
+        logger.warning(f"No reward metric found from logger/env, using final eval: {reward_value:.4f}")
+
     if variance_value is None:
-        variance_value = 0.0
+        variance_value = 0.0 # Default variance if not found
         logger.warning("No explained variance metric found, using 0.0")
-    
-    # Add the evaluation metrics
+
+    # Add the evaluation metrics (ensure they are floats)
     metrics["eval/mean_reward"] = float(reward_value)
     metrics["eval/explained_variance"] = float(variance_value)
-    
+
     # Create a callback instance just to use the normalization method
-    callback = TuneReportCallback()
-    combined_score = callback._normalize_and_combine_metrics(reward_value, variance_value)
+    # Note: Need to instantiate it here as it's not passed directly
+    temp_callback = TuneReportCallback()
+    combined_score = temp_callback._normalize_and_combine_metrics(reward_value, variance_value)
     metrics["eval/combined_score"] = float(combined_score)
-    
+
     logger.info(f"Final metrics - reward: {reward_value:.4f}, variance: {variance_value:.4f}, combined: {combined_score:.4f}")
     
     # Final report to Ray Tune
