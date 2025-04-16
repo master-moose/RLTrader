@@ -33,6 +33,7 @@ try:
         from ray.tune.schedulers import ASHAScheduler
         from ray.tune.search.optuna import OptunaSearch
         from ray.tune.search.hyperopt import HyperOptSearch
+        from ray.tune import CLIReporter
         # Remove RunConfig import since it's not available in Ray 2.5.1
         RAY_AVAILABLE = True
     except (ImportError, AttributeError) as e:
@@ -315,12 +316,30 @@ def run_tune_experiment(args):
     )
     print(f"Using ASHA scheduler with {args.timesteps_per_trial} max timesteps")
     
+    # --- Configure Reporter --- #
+    reporter = CLIReporter(
+        metric_columns={
+            "training_iteration": "iter",
+            "timesteps_total": "steps",
+            "eval/mean_reward": "reward",
+            "eval/explained_variance": "variance",
+            "eval/combined_score": "combined",
+            "time_total_s": "time(s)"
+        },
+        parameter_columns=list(search_space.keys()), # Show tuned hyperparameters
+        sort_by_metric=True,
+        metric="eval/combined_score",
+        mode="max"
+    )
+    print("Configured CLIReporter for console output")
+    # ------------------------ #
+
     # Create and run the tuner - Updated for Ray 2.5.1
     analysis = tune.run(
         train_rl_agent_tune,
         config=tune_config,
         resources_per_trial={
-            "cpu": args.cpus_per_trial, 
+            "cpu": args.cpus_per_trial,
             "gpu": args.gpus_per_trial
         },
         num_samples=args.num_samples,
@@ -329,6 +348,7 @@ def run_tune_experiment(args):
         storage_path=args.local_dir,
         name=args.exp_name,
         keep_checkpoints_num=2,
+        progress_reporter=reporter,
         verbose=1,
     )
     
