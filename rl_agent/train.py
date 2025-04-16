@@ -180,12 +180,16 @@ class TuneReportCallback(BaseCallback):
         # Try to get the reward value - should be available now
         reward_value = self._get_current_reward_metrics()
 
-        # --- Only report if reward_value is available ---
+        # --- Handle missing reward metric --- 
         if reward_value is None:
-            callback_logger.warning(f"Skipping Ray Tune report at rollout end (step {self.num_timesteps}): rollout/ep_rew_mean still not available.")
-            return # Do nothing if the key metric is missing
+            callback_logger.warning(
+                f"Metric 'rollout/ep_rew_mean' not found at rollout end (step {self.num_timesteps}). \
+                Using default value 0.0 for reporting."
+            )
+            reward_value = 0.0 # Use default value if metric is missing
+        # ----------------------------------
 
-        # --- Proceed with reporting ---
+        # --- Proceed with reporting (reward_value is now guaranteed to be a float) ---
         # Get variance metrics from SB3 logger if available, default to 0.0
         variance_value = 0.0
         if self.logger and hasattr(self.logger, "name_to_value"):
@@ -201,14 +205,14 @@ class TuneReportCallback(BaseCallback):
         else:
              callback_logger.debug("SB3 self.logger or name_to_value not available for variance.")
 
-        # Prepare metrics dictionary
+        # Prepare metrics dictionary - ensure all required keys are present
         metrics_to_report = {}
         metrics_to_report["timesteps"] = self.num_timesteps
         metrics_to_report["training_iteration"] = self.num_timesteps # Ray Tune often uses this
         metrics_to_report["eval/mean_reward"] = float(reward_value)
         metrics_to_report["eval/explained_variance"] = float(variance_value)
 
-        # Calculate combined score using the valid reward
+        # Calculate combined score using the (potentially default) reward and variance
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
         metrics_to_report["eval/combined_score"] = float(combined_score)
 
@@ -227,7 +231,7 @@ class TuneReportCallback(BaseCallback):
         # Log the metrics being reported
         callback_logger.debug(f"Reporting metrics at rollout end (step {self.num_timesteps}): reward={reward_value:.4f}, variance={variance_value:.4f}, combined={combined_score:.4f}")
 
-        # Report to Ray Tune
+        # Report to Ray Tune - THIS CALL IS NOW ALWAYS MADE
         try:
             if RAY_AVAILABLE:
                 if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
