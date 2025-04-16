@@ -133,10 +133,10 @@ class TuneReportCallback(BaseCallback):
         if hasattr(self, 'locals') and self.locals:
             possible_keys = ["explained_variance", "train/explained_variance"]
             for key in possible_keys:
-                 if key in self.locals:
+                if key in self.locals:
                     try:
                         self.last_explained_variance = float(self.locals[key])
-                        break # Found it
+                        break
                     except (ValueError, TypeError, KeyError):
                         pass # Ignore conversion errors
         return True
