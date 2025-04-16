@@ -245,6 +245,12 @@ def run_tune_experiment(args):
     base_config.setdefault("cpu_only", False)
     # --------------------------------------------------
 
+    # --- Add verbose setting from args (if available) ---
+    # Default to 1 (INFO) if not provided by the calling script
+    base_config["verbose"] = getattr(args, 'verbose', 1)
+    print(f"Setting verbosity level for trials: {base_config['verbose']}")
+    # ---------------------------------------------------
+
     # Calculate appropriate num_envs based on CPUs per trial
     # RecurrentPPO is limited by available CPU cores
     cpus_available = args.cpus_per_trial
