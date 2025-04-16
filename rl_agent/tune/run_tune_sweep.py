@@ -355,7 +355,7 @@ def run_tune_experiment(args):
     print(f"Tuning completed! Analyzed {analysis.trials} trials")
     
     # Get and print best result
-    best_trial = analysis.best_trial
+    best_trial = analysis.get_best_trial(metric="eval/combined_score", mode="max")
     print("\n==== Best Trial Results ====")
     print(f"Trial ID: {best_trial.trial_id}")
     
