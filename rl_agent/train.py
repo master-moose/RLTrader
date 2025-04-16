@@ -126,61 +126,6 @@ class TuneReportCallback(BaseCallback):
 
         return combined_score
 
-    def _get_current_reward_metrics(self) -> Optional[float]:
-        """
-        Get the current reward metrics, prioritizing the SB3 logger,
-        and falling back to the Monitor wrapper's buffer.
-        Returns None if no completed episode rewards are found.
-        """
-        # Use the specific logger name
-        callback_logger = logging.getLogger("rl_agent")
-        reward_value = None
-
-        # Method 1: Try to get from SB3 logger (Primary Method)
-        if hasattr(self.model, "logger") and hasattr(self.model.logger, "name_to_value"):
-            if "rollout/ep_rew_mean" in self.model.logger.name_to_value:
-                try:
-                    reward_value = float(self.model.logger.name_to_value["rollout/ep_rew_mean"])
-                    callback_logger.debug(f"Using SB3 logger rewards: {reward_value}")
-                except (ValueError, TypeError):
-                     callback_logger.warning("Could not convert SB3 logger reward to float.")
-                     reward_value = None # Treat conversion error as unavailable
-
-        # Method 2: Fallback to Monitor buffer if SB3 logger failed
-        if reward_value is None and hasattr(self.training_env, "env_is_wrapped"):
-            # Check if env_is_wrapped exists (for VecEnv compatibility)
-            try:
-                # Check specifically for Monitor wrapper
-                # Note: env_is_wrapped returns a list of booleans per env
-                is_monitor_wrapped = self.training_env.env_is_wrapped(Monitor)[0]
-                if is_monitor_wrapped:
-                    # Access the info buffer from all monitored envs
-                    ep_info_buffers = self.training_env.get_attr('ep_info_buffer')
-                    all_rewards = []
-                    for buf in ep_info_buffers:
-                        # Each buffer contains dicts like {'r': reward, 'l': length, 't': time}
-                        all_rewards.extend([info['r'] for info in buf])
-
-                    if all_rewards:
-                        # Use the mean of all completed episode rewards found
-                        reward_value = float(np.mean(all_rewards))
-                        callback_logger.debug(f"Using Monitor ep_info_buffer rewards (found {len(all_rewards)} episodes): {reward_value}")
-                    else:
-                        callback_logger.debug("Monitor ep_info_buffer found but empty.")
-                else:
-                    callback_logger.debug("Environment is not wrapped with Monitor.")
-
-            except (AttributeError, IndexError, ValueError, TypeError) as e:
-                callback_logger.debug(f"Could not get rewards from Monitor buffer: {e}")
-                reward_value = None # Treat error as unavailable
-
-        # If reward_value is still None, it means neither source had completed episode info.
-        if reward_value is None:
-            callback_logger.debug("No reward metric found from SB3 logger or Monitor buffer yet.")
-            return None # Explicitly return None
-
-        return reward_value # Return the found float value
-
     def _on_rollout_end(self) -> None:
         """
         This method is called at the end of each rollout.
