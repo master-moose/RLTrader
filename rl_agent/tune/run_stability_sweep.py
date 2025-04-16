@@ -138,9 +138,9 @@ if __name__ == "__main__":
     print("\n=====================================================")
     print("STABILITY SWEEP RESULTS")
     print("=====================================================")
-    print(f"Best Mean Reward: {best_trial.metrics['eval/mean_reward']:.4f}")
-    print(f"Best Explained Variance: {best_trial.metrics.get('eval/explained_variance', 'N/A')}")
-    print(f"Best Combined Score: {best_trial.metrics.get('eval/combined_score', 'N/A')}")
+    print(f"Best Mean Reward: {best_trial.last_result.get('eval/mean_reward', 'N/A'):.4f}")
+    print(f"Best Explained Variance: {best_trial.last_result.get('eval/explained_variance', 'N/A')}")
+    print(f"Best Combined Score: {best_trial.last_result.get('eval/combined_score', 'N/A')}")
     
     # Print the stability parameter values
     print("\nBest Stability Parameters:")
