@@ -96,6 +96,10 @@ def parse_args():
         "--timesteps_per_trial", type=int, default=500000,
         help="Timesteps per trial (reduced for faster iteration)"
     )
+    parser.add_argument(
+        "--verbose", type=int, default=1, choices=[0, 1, 2],
+        help="Verbosity level: 0=no output, 1=info, 2=debug"
+    )
     
     args = parser.parse_args()
     
