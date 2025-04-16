@@ -1601,7 +1601,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
 
     mean_reward, portfolio_values, actions, rewards = evaluate_model(
         model=model,
-        env=test_env,
+        env=test_env, # Use the already created eval_env
         config=config,
         n_episodes=n_eval_episodes,
         deterministic=True
