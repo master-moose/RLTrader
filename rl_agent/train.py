@@ -40,9 +40,9 @@ except ImportError:
 from stable_baselines3 import A2C, DQN, PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
 from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baseline3.common.env_util import make_vec_env
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
+from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
 from stable_baselines3.common.vec_env import (
     DummyVecEnv, SubprocVecEnv, VecNormalize
 )
