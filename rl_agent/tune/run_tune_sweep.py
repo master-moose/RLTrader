@@ -212,7 +212,7 @@ def define_search_space() -> Dict[str, Any]:
         "fee_penalty_weight": tune.uniform(0.0, 1.5),
         "idle_penalty_weight": 0.0, # Set idle penalty to 0
         "profit_bonus_weight": tune.uniform(0.0, 1.5),
-        "trade_penalty_weight": tune.uniform(0.0, 0.2),
+        "trade_penalty_weight": tune.uniform(0.1, 0.5),
     }
     
     return search_space

@@ -127,18 +127,31 @@ class TuneReportCallback(BaseCallback):
     def _on_step(self) -> bool:
         """
         Update the last known explained variance after each training step.
-        This runs *after* the gradient update where variance is calculated.
+        Try fetching directly from the logger's internal dictionary.
         """
-        # Try to get explained_variance from locals (most reliable source)
+        # Try fetching from logger first, as it might be updated later in step
+        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            # Use the name_to_value dictionary with .get() for safety
+            logged_variance = self.logger.name_to_value.get("train/explained_variance", None)
+            if logged_variance is not None:
+                try:
+                    self.last_explained_variance = float(logged_variance)
+                    # callback_logger.debug(f"Stored variance {self.last_explained_variance:.4f} from logger dict in _on_step")
+                    return True # Found it in logger, no need to check locals
+                except (ValueError, TypeError):
+                    pass # Ignore conversion errors from logger value
+
+        # Fallback: Try to get explained_variance from locals
         if hasattr(self, 'locals') and self.locals:
             possible_keys = ["explained_variance", "train/explained_variance"]
             for key in possible_keys:
                 if key in self.locals:
                     try:
                         self.last_explained_variance = float(self.locals[key])
-                        break
+                        # callback_logger.debug(f"Stored variance {self.last_explained_variance:.4f} from locals key '{key}' in _on_step")
+                        break 
                     except (ValueError, TypeError, KeyError):
-                        pass # Ignore conversion errors
+                        pass # Ignore conversion errors from locals value
         return True
 
     def _on_rollout_end(self) -> None:
