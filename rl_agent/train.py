@@ -136,45 +136,24 @@ class TuneReportCallback(BaseCallback):
         callback_logger = logging.getLogger("rl_agent")
         callback_logger.debug(f"Rollout end at step {self.num_timesteps}. Attempting to report.")
 
-        # --- Add detailed debug log --- 
-        if self.logger and hasattr(self.logger, "name_to_value"):
-            available_keys = list(self.logger.name_to_value.keys())
-            callback_logger.debug(f"Keys available in self.logger.name_to_value at rollout end: {available_keys}")
-        else:
-            callback_logger.debug("self.logger or self.logger.name_to_value not available at rollout end.")
-        # --- End detailed debug log ---
-
-        # Try to get the reward value - should be available now
-        # --- FIX: Replace non-existent method call with direct logger access ---
-        reward_value = None 
-        if self.logger and hasattr(self.logger, "name_to_value"):
-            if "rollout/ep_rew_mean" in self.logger.name_to_value:
-                try:
-                    raw_reward = self.logger.name_to_value["rollout/ep_rew_mean"]
-                    reward_value = float(raw_reward)
-                    callback_logger.debug(f"Found rollout/ep_rew_mean: {reward_value}")
-                except (ValueError, TypeError):
-                    callback_logger.warning(
-                        f"Could not convert rollout/ep_rew_mean '{raw_reward}' to float."
-                    )
-                    reward_value = None # Ensure it's None if conversion fails
+        # --- Calculate ep_rew_mean directly from model's ep_info_buffer ---
+        reward_value = 0.0 # Default if no episodes finish
+        ep_rewards = []
+        if hasattr(self.model, "ep_info_buffer") and len(self.model.ep_info_buffer) > 0:
+            ep_rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
+            if ep_rewards:
+                 reward_value = float(np.mean(ep_rewards))
+                 callback_logger.debug(f"Calculated mean reward from ep_info_buffer ({len(ep_rewards)} episodes): {reward_value:.4f}")
             else:
-                callback_logger.debug("rollout/ep_rew_mean not found in SB3 logger at rollout end.")
+                 callback_logger.debug("ep_info_buffer found but contained no rewards ('r' key). Defaulting reward to 0.0")
+                 reward_value = 0.0
         else:
-            callback_logger.debug("SB3 self.logger or name_to_value not available for reward.")
-        # --- END FIX ---
+            # This happens if no episodes finish during the current rollout
+            callback_logger.debug(f"No episodes finished in this rollout (step {self.num_timesteps}). Reporting reward as 0.0")
+            reward_value = 0.0
+        # --------------------------------------------------------------------
 
-        # --- Handle missing reward metric --- 
-        if reward_value is None:
-            callback_logger.warning(
-                f"Metric 'rollout/ep_rew_mean' not found at rollout end (step {self.num_timesteps}). \
-                Using default value 0.0 for reporting."
-            )
-            reward_value = 0.0 # Use default value if metric is missing
-        # ----------------------------------
-
-        # --- Proceed with reporting (reward_value is now guaranteed to be a float) ---
-        # Get variance metrics from SB3 logger if available, default to 0.0
+        # --- Get explained variance (which IS available in logger after train step) ---
         variance_value = 0.0
         if self.logger and hasattr(self.logger, "name_to_value"):
             if "train/explained_variance" in self.logger.name_to_value:
