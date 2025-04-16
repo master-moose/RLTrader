@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
     "model_type": "recurrentppo",
     
     # Features - keeping OHLCV features fixed as requested
-    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,rsi_14,macd_hist,ema_9,ema_21",
+    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,rsi_14_scaled,macd_hist_scaled,ema_9_scaled,ema_21_scaled",
     
     # Reward structure - simplified as requested
     "portfolio_change_weight": 1.0,
