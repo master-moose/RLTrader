@@ -1012,7 +1012,10 @@ def create_model(
             "gae_lambda": config["gae_lambda"],
             "max_grad_norm": config["max_grad_norm"]
         })
-        logger.info(f"RecurrentPPO LSTM: hidden={policy_kwargs['lstm_hidden_size']}, layers={policy_kwargs['n_lstm_layers']}, shared={policy_kwargs['shared_lstm']}, critic={policy_kwargs['enable_critic_lstm']}")
+        # Add default net_arch for policy/value heads after LSTM
+        fc_size = config.get("fc_hidden_size", 64)
+        policy_kwargs["net_arch"] = [fc_size] * 2
+        logger.info(f"RecurrentPPO LSTM: hidden={policy_kwargs['lstm_hidden_size']}, layers={policy_kwargs['n_lstm_layers']}, shared={policy_kwargs['shared_lstm']}, critic={policy_kwargs['enable_critic_lstm']}, net_arch={policy_kwargs['net_arch']}")
         model = RecurrentPPO(**model_kwargs)
 
     else:

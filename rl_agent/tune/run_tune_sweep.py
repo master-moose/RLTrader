@@ -86,7 +86,7 @@ DEFAULT_CONFIG = {
     "shared_lstm": "shared",
     
     # Fixed environment params as requested
-    "sequence_length": 15,
+    "sequence_length": 60,
     # num_envs is calculated dynamically based on available CPUs
     "max_steps": 20000,
     
