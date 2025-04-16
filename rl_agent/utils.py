@@ -8,18 +8,17 @@ This module contains various utility functions for resource monitoring,
 data visualization, file management, and other helper functions.
 """
 
-import os
 import gc
-import time
 import json
 import logging
-import psutil
-import numpy as np
-from typing import Dict, Any, List, Optional, Union, Tuple
+import os
 import random
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
+import psutil
 import seaborn as sns
 from stable_baselines3.common.logger import configure
 

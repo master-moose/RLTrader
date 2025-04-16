@@ -17,23 +17,30 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-# Add parent directory to path *before* attempting local imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 # --- Third-Party Imports --- #
 import gymnasium as gym
 import numpy as np
 import pandas as pd
 import torch
-import ray
-from ray import tune
-# Unused imports removed: ASHAScheduler, OptunaSearch, HyperOptSearch
+
+# --- Ray Imports (with availability check) --- #
+RAY_AVAILABLE = False
+try:
+    import ray
+    from ray import tune
+    from ray.tune.schedulers import ASHAScheduler
+    from ray.tune.search.optuna import OptunaSearch
+    from ray.tune.search.hyperopt import HyperOptSearch
+    RAY_AVAILABLE = True
+except ImportError:
+    # Detailed error handling in run_tune_sweep.py
+    pass
 
 # --- Stable Baselines3 Imports --- # 
 from stable_baselines3 import A2C, DQN, PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
 from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.env_util import make_vec_env
+from stable_baseline3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.policies import ActorCriticPolicy # For PPO/A2C
 from stable_baselines3.common.vec_env import (
@@ -45,9 +52,10 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 # --- SB3 Contrib Imports --- #
 from sb3_contrib import QRDQN, RecurrentPPO
-# QRDQNPolicy removed as it was unused
 
 # --- Local Module Imports --- #
+# Add parent directory to path *before* attempting local imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rl_agent.callbacks import get_callback_list
 from rl_agent.data.data_loader import DataLoader
 from rl_agent.environment import TradingEnvironment
@@ -61,15 +69,6 @@ from rl_agent.utils import (
 
 
 # --- Global Settings --- # 
-
-# Ray availability check
-RAY_AVAILABLE = False
-try:
-    # Just check if ray exists, specific tune components imported above
-    import ray 
-    RAY_AVAILABLE = True
-except ImportError:
-    RAY_AVAILABLE = False
 
 # Initialize logger globally (will be configured later)
 # Use specific logger name instead of __name__ for consistency
@@ -129,8 +128,9 @@ class TuneReportCallback(BaseCallback):
 
     def _get_current_reward_metrics(self) -> Optional[float]:
         """
-        Get the current reward metrics, prioritizing the SB3 logger.
-        Returns None if the primary metric ('rollout/ep_rew_mean') is not available.
+        Get the current reward metrics, prioritizing the SB3 logger,
+        and falling back to the Monitor wrapper's buffer.
+        Returns None if no completed episode rewards are found.
         """
         # Use the specific logger name
         callback_logger = logging.getLogger("rl_agent")
@@ -146,23 +146,37 @@ class TuneReportCallback(BaseCallback):
                      callback_logger.warning("Could not convert SB3 logger reward to float.")
                      reward_value = None # Treat conversion error as unavailable
 
-        # Method 2: Try to get directly from environment if logger failed
-        if reward_value is None and hasattr(self.model, "env"):
+        # Method 2: Fallback to Monitor buffer if SB3 logger failed
+        if reward_value is None and hasattr(self.training_env, "env_is_wrapped"):
+            # Check if env_is_wrapped exists (for VecEnv compatibility)
             try:
-                # Try to access VecEnv's episode rewards
-                if hasattr(self.model.env, "get_episode_rewards"):
-                    rewards = self.model.env.get_episode_rewards()
-                    if rewards:
-                        # Use the mean of recent episodes if available
-                        reward_value = float(np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards))
-                        callback_logger.debug(f"Using env episode rewards: {reward_value}")
+                # Check specifically for Monitor wrapper
+                # Note: env_is_wrapped returns a list of booleans per env
+                is_monitor_wrapped = self.training_env.env_is_wrapped(Monitor)[0]
+                if is_monitor_wrapped:
+                    # Access the info buffer from all monitored envs
+                    ep_info_buffers = self.training_env.get_attr('ep_info_buffer')
+                    all_rewards = []
+                    for buf in ep_info_buffers:
+                        # Each buffer contains dicts like {'r': reward, 'l': length, 't': time}
+                        all_rewards.extend([info['r'] for info in buf])
+
+                    if all_rewards:
+                        # Use the mean of all completed episode rewards found
+                        reward_value = float(np.mean(all_rewards))
+                        callback_logger.debug(f"Using Monitor ep_info_buffer rewards (found {len(all_rewards)} episodes): {reward_value}")
+                    else:
+                        callback_logger.debug("Monitor ep_info_buffer found but empty.")
+                else:
+                    callback_logger.debug("Environment is not wrapped with Monitor.")
+
             except (AttributeError, IndexError, ValueError, TypeError) as e:
-                callback_logger.debug(f"Could not get rewards from env directly or convert: {e}")
+                callback_logger.debug(f"Could not get rewards from Monitor buffer: {e}")
                 reward_value = None # Treat error as unavailable
 
-        # If reward_value is still None, it means neither reliable source had it.
+        # If reward_value is still None, it means neither source had completed episode info.
         if reward_value is None:
-            callback_logger.debug("No reward metric found from SB3 logger or env buffer yet.")
+            callback_logger.debug("No reward metric found from SB3 logger or Monitor buffer yet.")
             return None # Explicitly return None
 
         return reward_value # Return the found float value
@@ -1635,7 +1649,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
             trading_metrics = calculate_trading_metrics(portfolio_values)
             metrics.update(trading_metrics)
             create_evaluation_plots(
-                portfolio_values=portfolio_values,
+                portfolio_values=list(portfolio_values),
                 actions=actions,
                 rewards=rewards,
                 save_path=log_path
