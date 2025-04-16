@@ -284,6 +284,11 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     Args:
         config: Dictionary of hyperparameters from Ray Tune
     """
+    # --- Debug: Print received verbose setting ---
+    received_verbose = config.get("verbose", "Not Found")
+    print(f"[train_rl_agent_tune START] Received verbose setting: {received_verbose}", flush=True)
+    # ---------------------------------------------
+    
     # Ensure Ray is available
     if not RAY_AVAILABLE:
         raise ImportError("Ray Tune not found. Install with 'pip install ray[tune]'")
@@ -331,10 +336,20 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             tune.report(**initial_metrics)
     
     # Setup logger
+    # --- Modified setup_logger call for debugging --- 
+    log_level_to_set = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+    print(f"[train_rl_agent_tune] Attempting to set log level: {logging.getLevelName(log_level_to_set)}", flush=True)
     setup_logger(
         log_dir=log_dir,
-        log_level=logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO
+        log_level=log_level_to_set
     )
+    # --- Confirm logger level --- 
+    current_logger = logging.getLogger("rl_agent")
+    effective_level = current_logger.getEffectiveLevel()
+    print(f"[train_rl_agent_tune] Logger 'rl_agent' effective level set to: {logging.getLevelName(effective_level)}", flush=True)
+    current_logger.debug("[train_rl_agent_tune] This is a DEBUG message test after setup.")
+    current_logger.info("[train_rl_agent_tune] This is an INFO message test after setup.")
+    # --------------------------
     
     # Setup seed - important for reproducible results across trials
     seed = train_config.get("seed")
