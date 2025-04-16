@@ -486,16 +486,33 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     # Create a list of callbacks, including the Ray Tune reporter
     # EvalCallback is now handled separately or via Tune logic
     # Pass the trial's logger to the ResourceCheckCallback if used
+    
+    # --- Calculate eval_freq --- 
+    # Ensure evaluation happens at least after one full rollout or default freq
+    rollout_steps = n_steps * num_envs
+    base_eval_freq = train_config.get("eval_freq", 10000)
+    effective_eval_freq = max(base_eval_freq, rollout_steps) 
+    trial_logger.info(f"Calculated eval_freq: max({base_eval_freq}, {rollout_steps}) = {effective_eval_freq}")
+    # --------------------------
+    
+    # --- Set higher patience for Tune runs --- 
+    # Allow more time for initial learning before stopping
+    # tune_early_stopping_patience = train_config.get("early_stopping_patience", 50) # Increased default for Tune
+    # --- DISABLED FOR DEBUGGING --- 
+    tune_early_stopping_patience = 0 # Disable early stopping to check eval timing
+    trial_logger.info(f"Using early_stopping_patience for Tune: {tune_early_stopping_patience} (DISABLED FOR DEBUGGING)")
+    # --------------------------------------
+    
     callbacks = get_callback_list(
         eval_env=eval_env, # Pass eval_env if created
         log_dir=log_dir, # Main log dir for this trial
-        eval_freq=max(train_config.get("eval_freq", 10000), n_steps * 2), # Eval freq based on n_steps
+        eval_freq=effective_eval_freq, # Use calculated eval freq
         n_eval_episodes=train_config.get("n_eval_episodes", 5),
         save_freq=train_config.get("save_freq", 50000),
         keep_checkpoints=train_config.get("keep_checkpoints", 3),
         resource_check_freq=train_config.get("resource_check_freq", 5000),
         metrics_log_freq=train_config.get("metrics_log_freq", 1000),
-        early_stopping_patience=train_config.get("early_stopping_patience", 20), # Use config value
+        early_stopping_patience=tune_early_stopping_patience, # Use increased patience for Tune
         checkpoint_save_path=checkpoint_dir, # Use absolute checkpoint path
         model_name=train_config["model_type"],
         custom_callbacks=[TuneReportCallback()] # Add our reporting callback
@@ -593,6 +610,15 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
         except Exception as e:
             trial_logger.error(f"Error during final evaluation: {e}", exc_info=True)
+            
+    # --- Ensure eval_env is closed AFTER potential use in final eval ---
+    try:
+        if 'eval_env' in locals() and eval_env is not None and hasattr(eval_env, 'close'):
+            eval_env.close()
+            trial_logger.debug("Closed eval_env after final evaluation step.")
+    except Exception as close_err:
+        trial_logger.error(f"Error closing eval_env after final eval: {close_err}", exc_info=True)
+    # --------------------------------------------------------------------
 
     # --- Final Report ---
     # The TuneReportCallback should have reported the latest metrics during the last rollout.
@@ -610,10 +636,22 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     if hasattr(model, "logger") and hasattr(model.logger, "name_to_value"):
         final_reward_value = model.logger.name_to_value.get("rollout/ep_rew_mean")
         final_variance_value = model.logger.name_to_value.get("train/explained_variance")
-        if final_reward_value is not None:
-             final_summary_metrics["final_logger_mean_reward"] = float(final_reward_value)
-        if final_variance_value is not None:
-             final_summary_metrics["final_logger_explained_variance"] = float(final_variance_value)
+        
+        # Ensure values are floats, default to 0.0 if None
+        final_reward_value = float(final_reward_value) if final_reward_value is not None else 0.0
+        final_variance_value = float(final_variance_value) if final_variance_value is not None else 0.0
+        
+        final_summary_metrics["final_logger_mean_reward"] = final_reward_value
+        final_summary_metrics["final_logger_explained_variance"] = final_variance_value
+        
+        # Calculate and add combined score for the final report
+        # Create a temporary callback instance just to use the method
+        temp_callback = TuneReportCallback() 
+        final_combined_score = temp_callback._normalize_and_combine_metrics(
+            final_reward_value, final_variance_value
+        )
+        final_summary_metrics["eval/combined_score"] = final_combined_score
+        trial_logger.debug(f"Calculated final combined_score for summary report: {final_combined_score:.4f}")
 
     # Log the final summary
     trial_logger.info("Final Summary Metrics:")
