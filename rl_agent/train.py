@@ -339,10 +339,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     # --- Modified setup_logger call for debugging --- 
     log_level_to_set = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
     print(f"[train_rl_agent_tune] Attempting to set log level: {logging.getLevelName(log_level_to_set)}", flush=True)
+    # --- Pass console_level explicitly --- 
     setup_logger(
         log_dir=log_dir,
-        log_level=log_level_to_set
+        log_level=log_level_to_set,
+        console_level=log_level_to_set # Set console level same as file level
     )
+    # -----------------------------------
     # --- Confirm logger level --- 
     current_logger = logging.getLogger("rl_agent")
     effective_level = current_logger.getEffectiveLevel()
@@ -390,12 +393,15 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         def _init():
             # Setup logger inside subprocess
             process_log_path = os.path.join(log_dir)
+            # --- Ensure subprocess uses correct log level --- 
+            sub_log_level = logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO
             setup_logger(
                 log_dir=process_log_path,
-                log_level=logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO,
-                console_level=logging.INFO,  # Avoid console spam
+                log_level=sub_log_level, # Use correct level for file
+                console_level=logging.INFO,  # Keep subprocess console less verbose
                 log_filename=f"rl_agent_{rank}.log"  # Use different log files per process
             )
+            # -----------------------------------------------
             
             env_config = train_config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
