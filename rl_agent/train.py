@@ -15,7 +15,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # --- Third-Party Imports --- #
 import gymnasium as gym
@@ -776,6 +776,28 @@ def args_to_config(args) -> Dict[str, Any]:
     return vars(args)
 
 
+def linear_schedule(initial_value: float) -> Callable[[float], float]:
+    """
+    Linear learning rate schedule.
+
+    :param initial_value: Initial learning rate.
+    :return: schedule that computes
+      current learning rate depending on remaining progress
+    """
+    def func(progress_remaining: float) -> float:
+        """
+        Progress will decrease from 1 (beginning) to 0.
+
+        :param progress_remaining: (float) Remaining progress.
+        :return: (float) current learning rate
+        """
+        # Simple linear decay to almost zero (add small epsilon if needed)
+        # Example: return max(progress_remaining * initial_value, 1e-6)
+        return progress_remaining * initial_value
+
+    return func
+
+
 def create_env(
     config: Dict[str, Any],
     data_override: Optional[pd.DataFrame] = None,
@@ -905,8 +927,11 @@ def create_model(
         model = DQN(**model_kwargs)
 
     elif model_type == "ppo":
+        lr = config["learning_rate"]
+        lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
         model_kwargs.update({
             "policy": ActorCriticPolicy,
+            "learning_rate": lr_schedule, # Use schedule
             "n_steps": config["n_steps"],
             "batch_size": config["batch_size"],
             "n_epochs": config["n_epochs"],
@@ -919,8 +944,11 @@ def create_model(
         model = PPO(**model_kwargs)
 
     elif model_type == "a2c":
+        lr = config["learning_rate"]
+        lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
         model_kwargs.update({
             "policy": ActorCriticPolicy,
+            "learning_rate": lr_schedule, # Use schedule
             "n_steps": config["n_steps"],
             "ent_coef": float(config["ent_coef"]),
             "vf_coef": config["vf_coef"],
@@ -931,6 +959,8 @@ def create_model(
         model = A2C(**model_kwargs)
 
     elif model_type == "sac":
+        lr = config["learning_rate"]
+        lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
         ent_coef_value = config.get("ent_coef", "auto")
         if isinstance(ent_coef_value, str) and ent_coef_value.lower() == 'auto':
             sac_ent_coef = 'auto'
@@ -940,6 +970,7 @@ def create_model(
 
         model_kwargs.update({
             "policy": SacMlpPolicy,
+            "learning_rate": lr_schedule, # Use schedule
             "buffer_size": config["buffer_size"],
             "batch_size": config["batch_size"],
             "learning_starts": config["learning_starts"],
@@ -968,6 +999,8 @@ def create_model(
         model = QRDQN(**model_kwargs)
 
     elif model_type == "recurrentppo":
+        lr = config["learning_rate"]
+        lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
         policy_kwargs["lstm_hidden_size"] = config.get("lstm_hidden_size", 128)
         policy_kwargs["n_lstm_layers"] = config.get("n_lstm_layers", 1)
         shared_lstm_mode = config.get("shared_lstm", "shared")
@@ -979,6 +1012,7 @@ def create_model(
 
         model_kwargs.update({
             "policy": "MlpLstmPolicy",
+            "learning_rate": lr_schedule, # Use schedule
             "n_steps": config["n_steps"],
             "batch_size": config["batch_size"],
             "n_epochs": config["n_epochs"],
