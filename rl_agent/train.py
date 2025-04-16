@@ -136,6 +136,14 @@ class TuneReportCallback(BaseCallback):
         callback_logger = logging.getLogger("rl_agent")
         callback_logger.debug(f"Rollout end at step {self.num_timesteps}. Attempting to report.")
 
+        # --- Add detailed debug log --- 
+        if self.logger and hasattr(self.logger, "name_to_value"):
+            available_keys = list(self.logger.name_to_value.keys())
+            callback_logger.debug(f"Keys available in self.logger.name_to_value at rollout end: {available_keys}")
+        else:
+            callback_logger.debug("self.logger or self.logger.name_to_value not available at rollout end.")
+        # --- End detailed debug log ---
+
         # Try to get the reward value - should be available now
         # --- FIX: Replace non-existent method call with direct logger access ---
         reward_value = None 
