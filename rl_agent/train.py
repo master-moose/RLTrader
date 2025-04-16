@@ -182,6 +182,8 @@ class TuneReportCallback(BaseCallback):
     def _on_step(self) -> bool:
         """Report metrics to Ray Tune only when key metrics are available."""
         global_logger = logging.getLogger("rl_agent")
+        # Increase logging frequency slightly for debugging
+        log_debug_frequency = 500
 
         # Try to get the reward value
         reward_value = self._get_current_reward_metrics()
@@ -189,7 +191,7 @@ class TuneReportCallback(BaseCallback):
         # --- Only report if reward_value is available ---
         if reward_value is None:
             # Log that we are skipping the report because the key metric is missing
-            if self.num_timesteps % 1000 == 0: # Log periodically to avoid spam
+            if self.num_timesteps % log_debug_frequency == 0: # Log periodically to avoid spam
                  global_logger.debug(f"Skipping Ray Tune report at step {self.num_timesteps}: rollout/ep_rew_mean not yet available.")
             return True # Continue training
 
@@ -197,6 +199,18 @@ class TuneReportCallback(BaseCallback):
         # Check if we're at a new timestep to report
         if self.num_timesteps <= self.last_reported_timestep:
              return True # Already reported for this step
+
+        # --- Detailed Debug Logging --- #
+        if self.num_timesteps % log_debug_frequency == 0:
+            global_logger.debug(f"Step {self.num_timesteps}: Attempting to report.")
+            if self.logger and hasattr(self.logger, 'name_to_value'):
+                raw_reward = self.logger.name_to_value.get("rollout/ep_rew_mean", "Not Found")
+                global_logger.debug(f"Step {self.num_timesteps}: Raw ep_rew_mean from logger: {raw_reward} (type: {type(raw_reward)})" )
+                raw_variance = self.logger.name_to_value.get("train/explained_variance", "Not Found")
+                global_logger.debug(f"Step {self.num_timesteps}: Raw explained_variance from logger: {raw_variance} (type: {type(raw_variance)})" )
+            else:
+                global_logger.debug(f"Step {self.num_timesteps}: SB3 logger or name_to_value not available for raw logging.")
+        # --- End Detailed Debug Logging --- #
 
         # Prepare metrics dictionary
         metrics_to_report = {}
