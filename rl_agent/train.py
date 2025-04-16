@@ -137,7 +137,24 @@ class TuneReportCallback(BaseCallback):
         callback_logger.debug(f"Rollout end at step {self.num_timesteps}. Attempting to report.")
 
         # Try to get the reward value - should be available now
-        reward_value = self._get_current_reward_metrics()
+        # --- FIX: Replace non-existent method call with direct logger access ---
+        reward_value = None 
+        if self.logger and hasattr(self.logger, "name_to_value"):
+            if "rollout/ep_rew_mean" in self.logger.name_to_value:
+                try:
+                    raw_reward = self.logger.name_to_value["rollout/ep_rew_mean"]
+                    reward_value = float(raw_reward)
+                    callback_logger.debug(f"Found rollout/ep_rew_mean: {reward_value}")
+                except (ValueError, TypeError):
+                    callback_logger.warning(
+                        f"Could not convert rollout/ep_rew_mean '{raw_reward}' to float."
+                    )
+                    reward_value = None # Ensure it's None if conversion fails
+            else:
+                callback_logger.debug("rollout/ep_rew_mean not found in SB3 logger at rollout end.")
+        else:
+            callback_logger.debug("SB3 self.logger or name_to_value not available for reward.")
+        # --- END FIX ---
 
         # --- Handle missing reward metric --- 
         if reward_value is None:
