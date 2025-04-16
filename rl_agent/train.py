@@ -495,6 +495,36 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
              try:
                  # Report failure and potentially some last metrics if available
                  failure_metrics = {"training_failure": True, "timesteps": getattr(model, 'num_timesteps', 0)}
+                 
+                 # --- Attempt to get last metrics and calculate combined score ---
+                 last_reward = 0.0
+                 last_variance = 0.0
+                 if hasattr(model, "logger") and hasattr(model.logger, "name_to_value"):
+                     last_reward = model.logger.name_to_value.get("rollout/ep_rew_mean", 0.0)
+                     last_variance = model.logger.name_to_value.get("train/explained_variance", 0.0)
+                     # Ensure float conversion
+                     try:
+                         last_reward = float(last_reward)
+                     except (ValueError, TypeError):
+                         last_reward = 0.0
+                     try:
+                         last_variance = float(last_variance)
+                     except (ValueError, TypeError):
+                         last_variance = 0.0
+                 
+                 # Calculate combined score using a temp callback instance
+                 temp_callback = TuneReportCallback() 
+                 combined_score = temp_callback._normalize_and_combine_metrics(
+                     last_reward, last_variance
+                 )
+                 
+                 # Add required metrics to the report
+                 failure_metrics["eval/mean_reward"] = last_reward
+                 failure_metrics["eval/explained_variance"] = last_variance
+                 failure_metrics["eval/combined_score"] = combined_score
+                 trial_logger.info(f"Reporting failure with metrics: {failure_metrics}")
+                 # --- End metric calculation for failure report ---
+
                  if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
                      ray.air.session.report(failure_metrics)
                  else:
