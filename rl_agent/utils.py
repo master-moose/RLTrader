@@ -196,7 +196,7 @@ def check_resources(
             logger.info(
                 f"GPU Memory: {resources['gpu_memory_used']:.1f}MB / "
                 f"{resources['gpu_memory_total']:.1f}MB "
-                f"({resources['gpu_utilization']:.1f}%)"
+                f"({resources.get('gpu_utilization', 'N/A'):.1f}%)"
             )
 
     # Check for high memory usage
@@ -215,8 +215,10 @@ def check_resources(
             memory_freed = (memory.used - memory_after.used) / (1024 ** 3)  # GB
 
             if logger:
-                logger.info(f"GC freed {memory_freed:.2f}GB. "
-                            f"Mem now: {memory_after.percent:.1f}%")
+                logger.info(
+                    f"GC freed {memory_freed:.2f}GB. "
+                    f"Mem now: {memory_after.percent:.1f}%"
+                )
 
             resources["memory_after_gc"] = memory_after.percent
             resources["memory_freed_gb"] = memory_freed
@@ -224,8 +226,9 @@ def check_resources(
     return resources
 
 
-def save_config(config: Dict[str, Any], log_dir: str,
-                  filename: str = "config.json") -> None:
+def save_config(
+    config: Dict[str, Any], log_dir: str, filename: str = "config.json"
+) -> None:
     """
     Save configuration to a JSON file.
 
@@ -255,7 +258,7 @@ def save_config(config: Dict[str, Any], log_dir: str,
 
     # Save to file
     config_path = os.path.join(log_dir, filename)
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding='utf-8') as f:
         json.dump(config_to_save, f, indent=4)
 
 
@@ -269,7 +272,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     Returns:
         Configuration dictionary
     """
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding='utf-8') as f:
         config = json.load(f)
 
     return config
@@ -327,9 +330,11 @@ def create_evaluation_plots(
 
         # Add returns to the first plot
         ax_returns = axes[0].twinx()
-        ax_returns.plot(steps[1:], cumulative_returns,
-                        label="Cumulative Return", color="green",
-                        linestyle="--", linewidth=1.5)
+        ax_returns.plot(
+            steps[1:], cumulative_returns,
+            label="Cumulative Return", color="green",
+            linestyle="--", linewidth=1.5
+        )
         ax_returns.set_ylabel("Cumulative Return (%)", fontsize=12)
         ax_returns.legend(loc="upper right")
 
@@ -345,8 +350,9 @@ def create_evaluation_plots(
         action_colors = {0: "red", 1: "gray", 2: "green"}
 
         # Count actions
-        action_counts = {action: actions.count(action)
-                         for action in set(actions)}
+        action_counts = {
+            action: actions.count(action) for action in set(actions)
+        }
 
         # Create action array for plotting
         action_array = np.array(actions)
@@ -366,14 +372,16 @@ def create_evaluation_plots(
         axes[1].set_title("Actions Taken by Agent", fontsize=14)
         axes[1].set_ylabel("Action", fontsize=12)
         axes[1].set_yticks(list(sorted(set(actions))))
-        axes[1].set_yticklabels([action_labels.get(a, a)
-                                 for a in sorted(set(actions))])
+        axes[1].set_yticklabels([
+            action_labels.get(a, a) for a in sorted(set(actions))
+        ])
         axes[1].legend(loc="upper right")
         axes[1].grid(True)
 
     # Plot rewards or positions in the third subplot
     if rewards:
-        axes[2].plot(steps[:len(rewards)], rewards, label="Reward",
+        reward_steps = steps[:len(rewards)]
+        axes[2].plot(reward_steps, rewards, label="Reward",
                      color="purple", linewidth=1.5)
         axes[2].set_title("Rewards", fontsize=14)
         axes[2].set_ylabel("Reward", fontsize=12)
@@ -384,16 +392,19 @@ def create_evaluation_plots(
         # Plot cumulative rewards
         ax_cum_rewards = axes[2].twinx()
         cum_rewards = np.cumsum(rewards)
-        ax_cum_rewards.plot(steps[:len(rewards)], cum_rewards,
-                            label="Cumulative Reward", color="orange",
-                            linestyle="--", linewidth=1.5)
+        ax_cum_rewards.plot(
+            reward_steps, cum_rewards,
+            label="Cumulative Reward", color="orange",
+            linestyle="--", linewidth=1.5
+        )
         ax_cum_rewards.set_ylabel("Cumulative Reward", fontsize=12)
         ax_cum_rewards.legend(loc="upper right")
 
     # Add positions if available
     if positions:
-        if len(rewards) == 0:  # Only if we haven't plotted rewards
-            axes[2].plot(steps[:len(positions)], positions, label="Position",
+        position_steps = steps[:len(positions)]
+        if not rewards:  # Only if we haven't plotted rewards
+            axes[2].plot(position_steps, positions, label="Position",
                          color="brown", linewidth=1.5)
             axes[2].set_title("Positions", fontsize=14)
             axes[2].set_ylabel("Position", fontsize=12)
@@ -403,8 +414,13 @@ def create_evaluation_plots(
         else:
             # Add positions to the rewards plot
             ax_pos = axes[2].twinx()
-            ax_pos.plot(steps[:len(positions)], positions, label="Position",
-                        color="brown", linestyle=":", linewidth=1.5)
+            # Offset the axis slightly if rewards were plotted
+            spine_offset = 60
+            ax_pos.spines["right"].set_position(("axes", 1.0 + spine_offset / 72.0))
+            ax_pos.plot(
+                position_steps, positions, label="Position",
+                color="brown", linestyle=":", linewidth=1.5
+            )
             ax_pos.set_ylabel("Position", fontsize=12)
             ax_pos.legend(loc="lower right")
 
@@ -528,6 +544,9 @@ def calculate_max_drawdown(values: List[float]) -> float:
     Returns:
         Maximum drawdown as a decimal
     """
+    if not values:
+        return 0.0
+
     max_so_far = values[0]
     max_drawdown = 0
 

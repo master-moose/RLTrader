@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import time
+import traceback  # Added for potential use
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # --- Third-Party Imports --- #
@@ -23,24 +24,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-# --- Ray Imports (with availability check) --- #
-RAY_AVAILABLE = False
-try:
-    import ray
-    from ray import tune
-    from ray.tune.schedulers import ASHAScheduler
-    from ray.tune.search.optuna import OptunaSearch
-    from ray.tune.search.hyperopt import HyperOptSearch
-    RAY_AVAILABLE = True
-except ImportError:
-    # Detailed error handling in run_tune_sweep.py
-    pass
-
-# --- Stable Baselines3 Imports --- # 
+# --- Stable Baselines3 Imports --- #
 from stable_baselines3 import A2C, DQN, PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.logger import Logger as SB3Logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
 from stable_baselines3.common.vec_env import (
@@ -49,10 +38,21 @@ from stable_baselines3.common.vec_env import (
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.logger import Logger as SB3Logger # Explicit import
 
 # --- SB3 Contrib Imports --- #
 from sb3_contrib import QRDQN, RecurrentPPO
+
+# --- Ray Imports (with availability check) --- #
+RAY_AVAILABLE = False
+try:
+    import ray
+    from ray import tune
+    # Unused imports removed: ASHAScheduler, OptunaSearch, HyperOptSearch
+    from ray.tune import CLIReporter  # Keep CLIReporter
+    RAY_AVAILABLE = True
+except ImportError:
+    # Detailed error handling in run_tune_sweep.py
+    pass
 
 # --- Local Module Imports --- #
 # Add parent directory to path *before* attempting local imports
@@ -73,7 +73,7 @@ from rl_agent.utils import (
 )
 
 
-# --- Global Settings --- # 
+# --- Global Settings --- #
 
 # Initialize logger globally (will be configured later)
 # Use specific logger name instead of __name__ for consistency
@@ -275,14 +275,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         "eval/combined_score": 0.5,
         "config": train_config
     }
-    if RAY_AVAILABLE:
+    if RAY_AVAILABLE and tune.is_session_enabled():
         trial_logger.info("Reporting initial metrics to Ray Tune")
         try:
-            if hasattr(ray, "air") and hasattr(ray.air, "session") \
-               and ray.air.session.is_active():
-                ray.air.session.report(initial_metrics)
-            else:
-                tune.report(**initial_metrics)
+            tune.report(**initial_metrics)
         except Exception as report_err:
             trial_logger.warning(f"Initial report failed: {report_err}")
 
@@ -550,7 +546,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         trial_logger.info(f"  {k}: {v}")
 
     if RAY_AVAILABLE and tune.is_session_enabled():
-        try: tune.report(**final_metrics); trial_logger.info("Reported final metrics via tune.report")
+        try: tune.report(**final_summary_metrics); trial_logger.info("Reported final metrics via tune.report")
         except Exception as re: trial_logger.warning(f"Failed final tune report: {re}")
 
 # --- Argument Parsing --- #
@@ -1280,7 +1276,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
                 clip_obs=10., gamma=config["gamma"], training=False
             )
 
-    # --- Model Creation / Loading --- #
+    # --- Model Creation --- #
     if config.get("load_model"):
         load_path = config["load_model"]
         train_logger.info(f"Loading model from: {load_path}")
@@ -1354,15 +1350,19 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
                      "eval/explained_variance": 0.0, "eval/combined_score": 0.5}
     if hasattr(model, 'logger') and hasattr(model.logger, 'name_to_value'):
         log_vals = model.logger.name_to_value
-        reward = log_vals.get("rollout/ep_rew_mean", 0.0)
-        variance = log_vals.get("train/explained_variance", 0.0)
-        try: reward = float(reward); final_metrics["eval/mean_reward"] = reward
-        except (ValueError, TypeError): pass
-        try: variance = float(variance); final_metrics["eval/explained_variance"] = variance
-        except (ValueError, TypeError): pass
-        callback = TuneReportCallback()
-        combined = callback._normalize_and_combine_metrics(reward, variance)
-        final_metrics["eval/combined_score"] = float(combined)
+        final_reward = log_vals.get("rollout/ep_rew_mean", 0.0)
+        final_variance = log_vals.get("train/explained_variance", 0.0)
+        try: final_reward = float(final_reward)
+        except (ValueError, TypeError): final_reward = 0.0
+        try: final_variance = float(final_variance)
+        except (ValueError, TypeError): final_variance = 0.0
+
+        final_metrics["eval/mean_reward"] = final_reward
+        final_metrics["eval/explained_variance"] = final_variance
+
+        temp_cb = TuneReportCallback()
+        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance)
+        final_metrics["eval/combined_score"] = float(final_combined)
 
     if RAY_AVAILABLE and tune.is_session_enabled():
         try: tune.report(**final_metrics); train_logger.info("Reported final metrics via tune.report")

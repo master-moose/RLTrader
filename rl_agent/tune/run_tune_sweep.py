@@ -180,34 +180,39 @@ def define_search_space() -> Dict[str, Any]:
     """Define the hyperparameter search space for Ray Tune"""
     
     # Focus on stability parameters as requested in requirements
+    # Refined based on previous sweep results (50/50 terminated, best reward -24k)
     search_space = {
-        # Learning rates to try (log scale from 1e-5 to 1e-3)
-        # Use tune.loguniform for Ray's internal handling, the Optuna conversion happens internally
-        "learning_rate": tune.loguniform(1e-5, 1e-3),
-        
-        # Discount factors to try
-        "gamma": tune.choice([0.9, 0.95, 0.99, 0.995, 0.999]),
-        
-        # PPO n_steps (horizon length) values to try
-        "n_steps": tune.choice([512, 1024, 2048, 4096, 8192]),
+        # Learning rates to try (log scale)
+        # Narrowed range around previous best (1.7e-4)
+        "learning_rate": tune.loguniform(5e-5, 5e-4),
+
+        # Discount factors to try - removed extremes
+        "gamma": tune.choice([0.95, 0.99, 0.995]),
+
+        # PPO n_steps (horizon length) - re-explore slightly larger
+        "n_steps": tune.choice([1024, 2048, 4096]),
 
         # --- Additional RecurrentPPO Parameters ---
-        # Use tune.loguniform for Ray's internal handling, the Optuna conversion happens internally
-        "ent_coef": tune.loguniform(1e-4, 0.05),      # Entropy coefficient
-        # Use tune.uniform for Ray's internal handling, the Optuna conversion happens internally
-        "vf_coef": tune.uniform(0.3, 0.7),         # Value function coefficient
-        "clip_range": tune.choice([0.1, 0.2, 0.3]),  # PPO clip range
-        "gae_lambda": tune.choice([0.9, 0.95, 0.98, 0.99]), # GAE lambda
-        "n_epochs": tune.choice([5, 10, 15, 20]),       # PPO epochs per update
-        "max_grad_norm": tune.choice([0.5, 1.0, 2.0]), # Gradient clipping norm
+        # Entropy coefficient - slightly reduced upper bound
+        "ent_coef": tune.loguniform(1e-4, 0.01),
+        # Value function coefficient (no change)
+        "vf_coef": tune.uniform(0.3, 0.7),
+        # PPO clip range - removed 0.3 as potentially too high
+        "clip_range": tune.choice([0.1, 0.2]),
+        # GAE lambda - removed 0.99
+        "gae_lambda": tune.choice([0.9, 0.95, 0.98]),
+        # PPO epochs per update - reduced range, high epochs might overfit
+        "n_epochs": tune.choice([5, 10]),
+        # Gradient clipping norm - removed 2.0
+        "max_grad_norm": tune.choice([0.5, 1.0]),
 
-        # --- Reward Component Weights ---
-        # Use tune.uniform for Ray's internal handling, the Optuna conversion happens internally
-        "drawdown_penalty_weight": tune.uniform(0.0, 2.0), # Explore penalties
-        "fee_penalty_weight": tune.uniform(0.0, 5.0),    # Explore fee penalties (0 means no fee penalty)
-        "idle_penalty_weight": tune.uniform(0.0, 0.5),   # Explore small idle penalties
-        "profit_bonus_weight": tune.uniform(0.0, 2.0),   # Explore profit incentives
-        "trade_penalty_weight": tune.uniform(0.0, 1.0),  # Explore small penalties per trade
+        # --- Reward Component Weights --- #
+        # Reduced upper bounds significantly based on previous high values
+        "drawdown_penalty_weight": tune.uniform(0.0, 1.0),
+        "fee_penalty_weight": tune.uniform(0.0, 1.5),
+        "idle_penalty_weight": tune.uniform(0.0, 0.1),
+        "profit_bonus_weight": tune.uniform(0.0, 1.5),
+        "trade_penalty_weight": tune.uniform(0.0, 0.2),
     }
     
     return search_space
