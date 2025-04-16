@@ -63,7 +63,8 @@ def setup_logger(
     
     # Configure logger
     logger = logging.getLogger("rl_agent")
-    logger.setLevel(logging.DEBUG)
+    # Set logger level based on the file log level argument
+    logger.setLevel(log_level)
     
     # Remove existing handlers if any
     if logger.handlers:
