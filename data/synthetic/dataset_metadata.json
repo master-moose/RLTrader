@@ -1,14 +1,14 @@
 {
-  "creation_date": "2025-04-09T12:24:17.993018",
+  "creation_date": "2025-04-15T17:06:31.599876",
   "timeframes": [
     "15m",
     "4h",
     "1d"
   ],
   "rows_per_timeframe": {
-    "15m": 1500000,
-    "4h": 93750,
-    "1d": 15625
+    "15m": 525600,
+    "4h": 32850,
+    "1d": 5475
   },
   "columns": {
     "15m": [
@@ -45,7 +45,9 @@
       "return",
       "log_return",
       "high_low_range",
-      "body_size"
+      "body_size",
+      "true_volatility",
+      "market_regime"
     ],
     "4h": [
       "open",
@@ -81,7 +83,9 @@
       "return",
       "log_return",
       "high_low_range",
-      "body_size"
+      "body_size",
+      "true_volatility",
+      "market_regime"
     ],
     "1d": [
       "open",
@@ -117,7 +121,9 @@
       "return",
       "log_return",
       "high_low_range",
-      "body_size"
+      "body_size",
+      "true_volatility",
+      "market_regime"
     ]
   }
 }

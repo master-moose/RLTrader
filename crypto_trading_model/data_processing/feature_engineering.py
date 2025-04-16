@@ -332,7 +332,7 @@ def calculate_multi_timeframe_signal(data_dict, primary_tf='15m', threshold_pct=
                         resampled.loc[segment] = signal.iloc[i]
                 
                 # Fill any remaining NaN values with forward fill
-                aligned_signals[tf] = resampled.fillna(method='ffill')
+                aligned_signals[tf] = resampled.ffill()
                 
             elif reverse_ratio_key in timeframe_ratios:
                 # For lower timeframes to higher (should be rare), use downsampling

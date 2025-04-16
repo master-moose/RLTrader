@@ -1,0 +1,20 @@
+{
+    "num_samples": 525600,
+    "output_dir": "data/synthetic",
+    "base_price": 10000.0,
+    "base_volatility": 0.002,
+    "regime_distribution": {
+        "uptrend": 0.35,
+        "downtrend": 0.25,
+        "ranging": 0.25,
+        "volatility_expansion": 0.1,
+        "volatility_contraction": 0.05
+    },
+    "include_indicators": true,
+    "train_ratio": 0.7,
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "shuffle": false,
+    "seed": 42,
+    "comments": "This configuration generates 15 years of 15-minute data with realistic market regimes and dynamics."
+} 
