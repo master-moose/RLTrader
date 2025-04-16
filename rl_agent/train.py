@@ -120,9 +120,8 @@ class TuneReportCallback(BaseCallback):
         normalized_reward = np.tanh(reward / 1000.0)
         # Clip variance
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-        # Combine scores: map [-1, 1] to [0, 2], sum, divide by 4 -> [0, 1]
-        combined_score = ((normalized_reward + 1.0) +
-                          (normalized_variance + 1.0)) / 4.0
+        # Combine scores: 70% reward, 30% variance, shifted to [0, 1]
+        combined_score = (0.7 * normalized_reward + 0.3 * normalized_variance + 1.0) / 2.0
         return combined_score
 
     def _on_step(self) -> bool:
