@@ -193,26 +193,26 @@ def define_search_space() -> Dict[str, Any]:
         "n_steps": tune.choice([1024, 2048, 4096]),
 
         # --- Additional RecurrentPPO Parameters ---
-        # Entropy coefficient - slightly reduced upper bound
-        "ent_coef": tune.loguniform(1e-4, 0.05),
-        # Value function coefficient (no change)
-        "vf_coef": tune.uniform(0.3, 0.7),
+        # Entropy coefficient - Widen range slightly higher
+        "ent_coef": tune.loguniform(5e-4, 0.05),
+        # Value function coefficient - Give slightly more weight
+        "vf_coef": tune.uniform(0.4, 0.8),
         # PPO clip range - removed 0.3 as potentially too high
         "clip_range": tune.choice([0.1, 0.2]),
         # GAE lambda - removed 0.99
         "gae_lambda": tune.choice([0.9, 0.95, 0.98]),
-        # PPO epochs per update - reduced range, high epochs might overfit
-        "n_epochs": tune.choice([5, 10]),
+        # PPO epochs per update - Reduced range to try improving stability
+        "n_epochs": tune.choice([3, 5, 8]),
         # Gradient clipping norm - removed 2.0
         "max_grad_norm": tune.choice([0.5, 1.0]),
 
-        # --- Reward Component Weights --- #
-        # Reduced upper bounds significantly based on previous high values
-        "drawdown_penalty_weight": tune.uniform(0.0, 1.0),
-        "fee_penalty_weight": tune.uniform(0.0, 1.5),
-        "idle_penalty_weight": 0.0, # Set idle penalty to 0
-        "profit_bonus_weight": tune.uniform(0.0, 1.5),
-        "trade_penalty_weight": tune.uniform(0.1, 0.5),
+        # --- Reward Component Weights (Focus on stability and profit) --- #
+        # Reduced penalty ranges further
+        "drawdown_penalty_weight": tune.uniform(0.0, 0.5),
+        "fee_penalty_weight": tune.uniform(0.0, 0.5),
+        "idle_penalty_weight": 0.0, # Keep idle penalty at 0
+        "profit_bonus_weight": tune.uniform(0.5, 1.5), # Keep rewarding profit
+        "trade_penalty_weight": tune.uniform(0.0, 0.2), # Significantly reduced trade penalty
     }
     
     return search_space
