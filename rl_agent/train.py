@@ -169,27 +169,12 @@ class TuneReportCallback(BaseCallback):
             )
 
 
-        # --- Fetch latest explained variance directly from SB3 logger ---
-        variance_value = 0.0 # Default variance
-        logged_variance = None # Initialize logged_variance
-        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
-            # Use the name_to_value dictionary with .get() for safety
-            logged_variance = self.logger.name_to_value.get("train/explained_variance", None)
-            if logged_variance is not None:
-                try:
-                    variance_value = float(logged_variance)
-                    callback_logger.debug(f"Fetched variance from logger dict: {variance_value:.4f}")
-                except (ValueError, TypeError):
-                     callback_logger.warning(f"Could not convert logged variance '{logged_variance}' to float.")
-                     variance_value = 0.0 # Fallback if conversion fails
-            else:
-                callback_logger.debug("Could not find 'train/explained_variance' in logger.name_to_value.")
-        else:
-             callback_logger.warning("SB3 logger or name_to_value dict not available in callback to fetch variance.")
+        # --- Use the explained variance stored from _on_step --- #
+        variance_value = self.last_explained_variance # Use the value stored in _on_step
+        callback_logger.debug(f"Using stored variance from _on_step: {variance_value:.4f}")
 
 
         # --- Prepare and Report Metrics ---
-        # Use the fetched variance_value
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
 
         metrics_to_report = {
@@ -533,13 +518,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         try: final_variance = float(final_variance)
         except (ValueError, TypeError): final_variance = 0.0
 
-    final_summary_metrics["final_logger_mean_reward"] = final_reward
-    final_summary_metrics["final_logger_explained_variance"] = final_variance
+        final_summary_metrics["final_logger_mean_reward"] = final_reward
+        final_summary_metrics["final_logger_explained_variance"] = final_variance
 
-    temp_cb = TuneReportCallback()
-    final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance)
-    final_summary_metrics["eval/combined_score"] = final_combined
-    trial_logger.debug(f"Final combined score for summary: {final_combined:.4f}")
+        temp_cb = TuneReportCallback()
+        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance)
+        final_summary_metrics["eval/combined_score"] = final_combined
+        trial_logger.debug(f"Final combined score for summary: {final_combined:.4f}")
 
     trial_logger.info("Final Summary Metrics:")
     for k, v in final_summary_metrics.items():
