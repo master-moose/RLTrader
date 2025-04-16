@@ -309,13 +309,22 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     model_name = f"{train_config['model_type']}_{trial_id}"
     train_config["model_name"] = model_name
     
-    # Set up directories
-    log_dir = os.path.join(train_config.get("log_dir", "./logs"), model_name)
-    checkpoint_dir = os.path.join(train_config.get("checkpoint_dir", "./checkpoints"), model_name)
+    # --- Use Absolute Paths for Logging --- 
+    # Get the base log directory from config (should be absolute path from tune script)
+    # Default to an absolute path in the current working dir if somehow missing
+    base_log_dir = train_config.get("log_dir", os.path.abspath("./logs")) 
+    log_dir = os.path.join(base_log_dir, model_name)
+    
+    # Checkpoint dir can remain relative to the trial dir if needed, or make absolute
+    # Let's make checkpoint dir absolute as well for consistency
+    base_checkpoint_dir = train_config.get("checkpoint_dir", os.path.abspath("./checkpoints"))
+    checkpoint_dir = os.path.join(base_checkpoint_dir, model_name)
+    # ---------------------------------------
+
     ensure_dir_exists(log_dir)
     ensure_dir_exists(checkpoint_dir)
-    train_config["log_dir"] = log_dir
-    train_config["checkpoint_dir"] = checkpoint_dir
+    train_config["log_dir"] = log_dir # Store the absolute path back in config
+    train_config["checkpoint_dir"] = checkpoint_dir # Store the absolute path back
     
     # Report initial metrics to ensure they exist
     # This provides a default value for combined_score before any training happens
@@ -391,16 +400,20 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     # Function to create a single env instance
     def make_single_env(rank: int, base_seed: Optional[int]):
         def _init():
-            # Setup logger inside subprocess
-            process_log_path = os.path.join(log_dir)
+            # --- Use Absolute Path for Subprocess Logging --- 
+            # Get the absolute log_dir from the config (set above)
+            # abs_log_dir = train_config['log_dir'] # No longer needed here
+            # -----------------------------------------------
+            # Setup logger inside subprocess - REMOVED for simplification
+            # process_log_path = os.path.join(log_dir) 
             # --- Ensure subprocess uses correct log level --- 
-            sub_log_level = logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO
-            setup_logger(
-                log_dir=process_log_path,
-                log_level=sub_log_level, # Use correct level for file
-                console_level=logging.INFO,  # Keep subprocess console less verbose
-                log_filename=f"rl_agent_{rank}.log"  # Use different log files per process
-            )
+            # sub_log_level = logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO
+            # setup_logger(
+            #     log_dir=abs_log_dir, 
+            #     log_level=sub_log_level, 
+            #     console_level=logging.INFO,  
+            #     log_filename=f"rl_agent_{rank}.log"  
+            # )
             # -----------------------------------------------
             
             env_config = train_config.copy()
