@@ -49,13 +49,18 @@ from stable_baselines3.common.vec_env import (
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import Logger as SB3Logger # Explicit import
 
 # --- SB3 Contrib Imports --- #
 from sb3_contrib import QRDQN, RecurrentPPO
 
 # --- Local Module Imports --- #
 # Add parent directory to path *before* attempting local imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure this runs only once or is handled carefully if script is imported
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent_dir not in sys.path:
+    sys.path.append(_parent_dir)
+
 from rl_agent.callbacks import get_callback_list
 from rl_agent.data.data_loader import DataLoader
 from rl_agent.environment import TradingEnvironment
@@ -1579,7 +1584,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
             norm_obs=should_norm_obs,
             norm_reward=False,
             clip_obs=10.,
-            gamma=config["gamma"],
+            gamma=train_config["gamma"],
             training=False
         )
 
@@ -1631,7 +1636,7 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
                 portfolio_values=list(portfolio_values),
                 actions=actions,
                 rewards=rewards,
-                save_path=log_path
+                save_path=os.path.join(log_path, "final_eval_plots.png")
             )
         except Exception as e:
             logger.warning(f"Error calculating advanced metrics: {e}")
