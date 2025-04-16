@@ -16,7 +16,6 @@ import os
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
-import traceback
 
 # Add parent directory to path *before* attempting local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -73,7 +72,8 @@ except ImportError:
     RAY_AVAILABLE = False
 
 # Initialize logger globally (will be configured later)
-logger = logging.getLogger(__name__)
+# Use specific logger name instead of __name__ for consistency
+logger = logging.getLogger("rl_agent")
 
 
 # --- Ray Tune Callback Class --- #
@@ -82,23 +82,18 @@ class TuneReportCallback(BaseCallback):
     """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
     def __init__(self):
         super().__init__(verbose=0)
-        self.last_reported_timestep = -1  # Track last report
-        # Remove episode tracking variables:
-        # self.episode_rewards = []
-        # self.last_episode_rewards = []
+        # Removed self.last_reported_timestep as reporting is now per rollout
 
     def _on_init(self) -> None:
         """Ensure the logger is available."""
+        # Use the specific logger name
+        callback_logger = logging.getLogger("rl_agent")
         # Use self.logger which is automatically set by BaseCallback
         if self.logger is None:
-            # Use the logger instance configured elsewhere in the script
-            global_logger = logging.getLogger("rl_agent")
-            global_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
+            callback_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
 
-        # Set up initial logging
-        global_logger = logging.getLogger("rl_agent")
         # Modify log message
-        global_logger.info("TuneReportCallback initialized - will report metrics when available.")
+        callback_logger.info("TuneReportCallback initialized - will report metrics at rollout end.")
 
     def _normalize_and_combine_metrics(self, reward, explained_variance):
         """
@@ -132,20 +127,13 @@ class TuneReportCallback(BaseCallback):
 
         return combined_score
 
-    # Remove _on_rollout_end method entirely
-    # def _on_rollout_end(self) -> None:
-    #     """
-    #     Capture episode rewards at the end of each rollout.
-    #     This ensures we have the latest episode rewards.
-    #     """
-    #     ... (removed code) ...
-
     def _get_current_reward_metrics(self) -> Optional[float]:
         """
         Get the current reward metrics, prioritizing the SB3 logger.
         Returns None if the primary metric ('rollout/ep_rew_mean') is not available.
         """
-        global_logger = logging.getLogger("rl_agent")
+        # Use the specific logger name
+        callback_logger = logging.getLogger("rl_agent")
         reward_value = None
 
         # Method 1: Try to get from SB3 logger (Primary Method)
@@ -153,9 +141,9 @@ class TuneReportCallback(BaseCallback):
             if "rollout/ep_rew_mean" in self.model.logger.name_to_value:
                 try:
                     reward_value = float(self.model.logger.name_to_value["rollout/ep_rew_mean"])
-                    global_logger.debug(f"Using SB3 logger rewards: {reward_value}")
+                    callback_logger.debug(f"Using SB3 logger rewards: {reward_value}")
                 except (ValueError, TypeError):
-                     global_logger.warning("Could not convert SB3 logger reward to float.")
+                     callback_logger.warning("Could not convert SB3 logger reward to float.")
                      reward_value = None # Treat conversion error as unavailable
 
         # Method 2: Try to get directly from environment if logger failed
@@ -167,112 +155,97 @@ class TuneReportCallback(BaseCallback):
                     if rewards:
                         # Use the mean of recent episodes if available
                         reward_value = float(np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards))
-                        global_logger.debug(f"Using env episode rewards: {reward_value}")
+                        callback_logger.debug(f"Using env episode rewards: {reward_value}")
             except (AttributeError, IndexError, ValueError, TypeError) as e:
-                global_logger.debug(f"Could not get rewards from env directly or convert: {e}")
+                callback_logger.debug(f"Could not get rewards from env directly or convert: {e}")
                 reward_value = None # Treat error as unavailable
 
         # If reward_value is still None, it means neither reliable source had it.
         if reward_value is None:
-            global_logger.debug("No reward metric found from SB3 logger or env buffer yet.")
+            callback_logger.debug("No reward metric found from SB3 logger or env buffer yet.")
             return None # Explicitly return None
 
         return reward_value # Return the found float value
 
-    def _on_step(self) -> bool:
-        """Report metrics to Ray Tune only when key metrics are available."""
-        global_logger = logging.getLogger("rl_agent")
-        # Increase logging frequency slightly for debugging
-        log_debug_frequency = 500
+    def _on_rollout_end(self) -> None:
+        """
+        This method is called at the end of each rollout.
+        We report metrics here as SB3 logger values like 'rollout/ep_rew_mean'
+        are typically updated after the rollout finishes.
+        """
+        # Use the specific logger name
+        callback_logger = logging.getLogger("rl_agent")
+        callback_logger.debug(f"Rollout end at step {self.num_timesteps}. Attempting to report.")
 
-        # Try to get the reward value
+        # Try to get the reward value - should be available now
         reward_value = self._get_current_reward_metrics()
 
         # --- Only report if reward_value is available ---
         if reward_value is None:
-            # Log that we are skipping the report because the key metric is missing
-            if self.num_timesteps % log_debug_frequency == 0: # Log periodically to avoid spam
-                 global_logger.debug(f"Skipping Ray Tune report at step {self.num_timesteps}: rollout/ep_rew_mean not yet available.")
-            return True # Continue training
+            callback_logger.warning(f"Skipping Ray Tune report at rollout end (step {self.num_timesteps}): rollout/ep_rew_mean still not available.")
+            return # Do nothing if the key metric is missing
 
-        # --- Proceed with reporting if reward_value is valid ---
-        # Check if we're at a new timestep to report
-        if self.num_timesteps <= self.last_reported_timestep:
-             return True # Already reported for this step
-
-        # --- Detailed Debug Logging --- #
-        if self.num_timesteps % log_debug_frequency == 0:
-            global_logger.debug(f"Step {self.num_timesteps}: Attempting to report.")
-            if self.logger and hasattr(self.logger, 'name_to_value'):
-                raw_reward = self.logger.name_to_value.get("rollout/ep_rew_mean", "Not Found")
-                global_logger.debug(f"Step {self.num_timesteps}: Raw ep_rew_mean from logger: {raw_reward} (type: {type(raw_reward)})" )
-                raw_variance = self.logger.name_to_value.get("train/explained_variance", "Not Found")
-                global_logger.debug(f"Step {self.num_timesteps}: Raw explained_variance from logger: {raw_variance} (type: {type(raw_variance)})" )
-            else:
-                global_logger.debug(f"Step {self.num_timesteps}: SB3 logger or name_to_value not available for raw logging.")
-        # --- End Detailed Debug Logging --- #
-
-        # Prepare metrics dictionary
-        metrics_to_report = {}
-        metrics_to_report["timesteps"] = self.num_timesteps
-        metrics_to_report["training_iteration"] = self.num_timesteps
-
-        # Add the validated reward
-        metrics_to_report["eval/mean_reward"] = float(reward_value)
-
-        # Get variance metrics from logger if available, default to 0.0
+        # --- Proceed with reporting ---
+        # Get variance metrics from SB3 logger if available, default to 0.0
         variance_value = 0.0
         if self.logger and hasattr(self.logger, "name_to_value"):
             if "train/explained_variance" in self.logger.name_to_value:
                  try:
                      variance_value = float(self.logger.name_to_value["train/explained_variance"])
+                     callback_logger.debug(f"Found explained_variance: {variance_value}")
                  except (ValueError, TypeError):
+                     callback_logger.warning("Could not convert explained_variance to float, using 0.0")
                      variance_value = 0.0 # Default on conversion error
+            else:
+                 callback_logger.debug("train/explained_variance not found in SB3 logger.")
+        else:
+             callback_logger.debug("SB3 self.logger or name_to_value not available for variance.")
 
+        # Prepare metrics dictionary
+        metrics_to_report = {}
+        metrics_to_report["timesteps"] = self.num_timesteps
+        metrics_to_report["training_iteration"] = self.num_timesteps # Ray Tune often uses this
+        metrics_to_report["eval/mean_reward"] = float(reward_value)
         metrics_to_report["eval/explained_variance"] = float(variance_value)
 
         # Calculate combined score using the valid reward
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
         metrics_to_report["eval/combined_score"] = float(combined_score)
 
-        # Add other useful metrics if available
+        # Add other useful metrics if available from SB3 logger
         if self.logger and hasattr(self.logger, "name_to_value"):
             other_metrics = ["rollout/ep_len_mean", "time/fps"]
             for key in other_metrics:
                 if key in self.logger.name_to_value:
                     value = self.logger.name_to_value[key]
-                    # Ensure value is scalar (int or float) before reporting
-                    if isinstance(value, (int, float, np.number)):
+                    if isinstance(value, (int, float, np.number)): # Ensure scalar
                         try:
                             metrics_to_report[key] = float(value)
                         except (ValueError, TypeError):
-                            pass # Skip if cannot convert
+                             callback_logger.warning(f"Could not convert metric '{key}' to float.")
 
         # Log the metrics being reported
-        global_logger.debug(f"Reporting metrics: reward={reward_value:.4f}, variance={variance_value:.4f}, combined={combined_score:.4f}")
+        callback_logger.debug(f"Reporting metrics at rollout end (step {self.num_timesteps}): reward={reward_value:.4f}, variance={variance_value:.4f}, combined={combined_score:.4f}")
 
         # Report to Ray Tune
         try:
             if RAY_AVAILABLE:
-                # Use session.report for Ray >= 2.0 (preferred)
-                if hasattr(ray, "air") and hasattr(ray.air, "session") \
-                   and ray.air.session.is_active():
+                if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
                     ray.air.session.report(metrics_to_report)
                 else:
-                    # Fallback for older Ray or direct tune usage without AIR session
                     tune.report(**metrics_to_report)
-
-                self.last_reported_timestep = self.num_timesteps  # Update only on successful report
-                global_logger.debug(f"Reported metrics to Ray Tune at timestep {self.num_timesteps}")
+                callback_logger.debug(f"Successfully reported metrics to Ray Tune at timestep {self.num_timesteps}")
             else:
-                # Log warning if Ray is somehow unavailable here
-                global_logger.warning("Ray is not available during tune.report call.")
-
+                callback_logger.warning("Ray is not available during tune.report call.")
         except Exception as e:
-            global_logger.error(f"Error during tune.report: {e}", exc_info=True)
-            # We'll continue training even if reporting fails
+            callback_logger.error(f"Error during tune.report at rollout end: {e}", exc_info=True)
 
-        return True  # Continue training
+    def _on_step(self) -> bool:
+        """
+        Called on every step. We no longer report metrics here.
+        We only need to return True to continue training.
+        """
+        return True
 
 
 # --- Ray Tune Trainable Function --- #
@@ -280,44 +253,54 @@ class TuneReportCallback(BaseCallback):
 def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     """
     Ray Tune trainable function for training an RL agent.
-    
+
     Args:
         config: Dictionary of hyperparameters from Ray Tune
     """
-    # --- Debug: Print received verbose setting ---
-    received_verbose = config.get("verbose", "Not Found")
-    print(f"[train_rl_agent_tune START] Received verbose setting: {received_verbose}", flush=True)
-    # ---------------------------------------------
-    
+    # --- Remove Debug Prints ---
+    # received_verbose = config.get("verbose", "Not Found")
+    # print(f"[train_rl_agent_tune START] Received verbose setting: {received_verbose}", flush=True)
+    # --------------------------
+
     # Ensure Ray is available
     if not RAY_AVAILABLE:
         raise ImportError("Ray Tune not found. Install with 'pip install ray[tune]'")
-    
+
     # Create a copy of the config to avoid modifying the original
     train_config = config.copy()
-    
+
     # Set up some defaults if not provided
     train_config.setdefault("model_type", "recurrentppo")
-    train_config.setdefault("verbose", 1)
-    
+    train_config.setdefault("verbose", 1) # Default verbosity
+
     # Generate a consistent name for this trial
     if "trial_id" in config:
         trial_id = config["trial_id"]
     else:
-        trial_id = tune.get_trial_id()
-    
+        # Get trial ID safely
+        try:
+            trial_id = tune.get_trial_id()
+        except Exception: # Handle cases outside a Tune run
+            trial_id = f"standalone_{int(time.time())}"
+
     model_name = f"{train_config['model_type']}_{trial_id}"
     train_config["model_name"] = model_name
-    
-    # --- Use Absolute Paths for Logging --- 
+
+    # --- Use Absolute Paths for Logging ---
     # Get the base log directory from config (should be absolute path from tune script)
     # Default to an absolute path in the current working dir if somehow missing
-    base_log_dir = train_config.get("log_dir", os.path.abspath("./logs")) 
-    log_dir = os.path.join(base_log_dir, model_name)
-    
-    # Checkpoint dir can remain relative to the trial dir if needed, or make absolute
-    # Let's make checkpoint dir absolute as well for consistency
-    base_checkpoint_dir = train_config.get("checkpoint_dir", os.path.abspath("./checkpoints"))
+    # Make sure the default uses the Ray trial directory if possible
+    try:
+        ray_trial_dir = tune.get_trial_dir()
+        default_base_log_dir = ray_trial_dir # Log inside the trial dir by default
+    except Exception:
+        default_base_log_dir = os.path.abspath("./logs") # Fallback
+
+    base_log_dir = train_config.get("log_dir", default_base_log_dir)
+    log_dir = os.path.join(base_log_dir, model_name) # Specific log dir for this model instance
+
+    # Checkpoint dir uses the same base as logs by default
+    base_checkpoint_dir = train_config.get("checkpoint_dir", base_log_dir)
     checkpoint_dir = os.path.join(base_checkpoint_dir, model_name)
     # ---------------------------------------
 
@@ -325,109 +308,110 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     ensure_dir_exists(checkpoint_dir)
     train_config["log_dir"] = log_dir # Store the absolute path back in config
     train_config["checkpoint_dir"] = checkpoint_dir # Store the absolute path back
-    
-    # Report initial metrics to ensure they exist
-    # This provides a default value for combined_score before any training happens
+
+    # --- Setup logger for this specific trial ---
+    log_level_to_set = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+    # Use the configured absolute log_dir
+    setup_logger(
+        log_dir=log_dir,
+        log_level=log_level_to_set,
+        console_level=log_level_to_set # Match console level for main trial process
+    )
+    # Use the specific logger name
+    trial_logger = logging.getLogger("rl_agent")
+    # -------------------------------------------
+
+    # --- Remove Debug Prints ---
+    # print(f"[train_rl_agent_tune] Attempting to set log level: {logging.getLevelName(log_level_to_set)}", flush=True)
+    # current_logger = logging.getLogger("rl_agent")
+    # effective_level = current_logger.getEffectiveLevel()
+    # print(f"[train_rl_agent_tune] Logger 'rl_agent' effective level set to: {logging.getLevelName(effective_level)}", flush=True)
+    # current_logger.debug("[train_rl_agent_tune] This is a DEBUG message test after setup.")
+    # current_logger.info("[train_rl_agent_tune] This is an INFO message test after setup.")
+    # --------------------------
+
+    # Report initial metrics (optional but can be helpful)
     initial_metrics = {
         "timesteps": 0,
         "training_iteration": 0,
         "eval/mean_reward": 0.0,
         "eval/explained_variance": 0.0,
         "eval/combined_score": 0.5,  # Default middle value
-        "early_training": True       # Flag to indicate this is pre-training data
+        "config": train_config # Report initial config
     }
-    
     if RAY_AVAILABLE:
-        logger.info("Reporting initial metrics to Ray Tune")
-        if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
-            ray.air.session.report(initial_metrics)
-        else:
-            tune.report(**initial_metrics)
-    
-    # Setup logger
-    # --- Modified setup_logger call for debugging --- 
-    log_level_to_set = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
-    print(f"[train_rl_agent_tune] Attempting to set log level: {logging.getLevelName(log_level_to_set)}", flush=True)
-    # --- Pass console_level explicitly --- 
-    setup_logger(
-        log_dir=log_dir,
-        log_level=log_level_to_set,
-        console_level=log_level_to_set # Set console level same as file level
-    )
-    # -----------------------------------
-    # --- Confirm logger level --- 
-    current_logger = logging.getLogger("rl_agent")
-    effective_level = current_logger.getEffectiveLevel()
-    print(f"[train_rl_agent_tune] Logger 'rl_agent' effective level set to: {logging.getLevelName(effective_level)}", flush=True)
-    current_logger.debug("[train_rl_agent_tune] This is a DEBUG message test after setup.")
-    current_logger.info("[train_rl_agent_tune] This is an INFO message test after setup.")
-    # --------------------------
-    
+        trial_logger.info("Reporting initial metrics to Ray Tune")
+        try:
+            if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
+                ray.air.session.report(initial_metrics)
+            else:
+                tune.report(**initial_metrics)
+        except Exception as report_err:
+            trial_logger.warning(f"Could not report initial metrics: {report_err}")
+
     # Setup seed - important for reproducible results across trials
     seed = train_config.get("seed")
     if seed is None:
         # If no seed provided, derive one from trial_id to ensure consistency
         seed = abs(hash(trial_id)) % (2**32)
         train_config["seed"] = seed
-    
     set_seeds(seed)
-    
+
     # Log the configuration
-    logger.info(f"Starting Ray Tune trial with ID: {trial_id}")
-    logger.info("Configuration:")
-    for key, value in train_config.items():
-        logger.info(f"  {key}: {value}")
-    
-    # Setup SB3 logger
-    sb3_logger_instance = setup_sb3_logger(log_dir=log_dir)
-    
+    trial_logger.info(f"Starting Ray Tune trial with ID: {trial_id}")
+    trial_logger.info("Full Configuration for this trial:")
+    for key, value in sorted(train_config.items()): # Sort for readability
+        trial_logger.info(f"  {key}: {value}")
+
+    # Setup SB3 logger (writes to subfolder within log_dir)
+    # Note: SB3 logger is separate from standard Python logger
+    sb3_log_dir = os.path.join(log_dir, "sb3_logs")
+    ensure_dir_exists(sb3_log_dir)
+    sb3_logger_instance = setup_sb3_logger(log_dir=sb3_log_dir)
+
     # --- Calculate dependent parameters if needed --- #
-    
     # Ensure n_steps and batch_size are set appropriately
-    # batch_size should typically be n_steps * num_envs or a divisor of that
     num_envs = train_config.get("num_envs", 8)
     n_steps = train_config.get("n_steps", 2048)
-    
-    # Ensure batch_size is a divisor of n_steps * num_envs
     total_steps = n_steps * num_envs
     if "batch_size" not in train_config:
-        train_config["batch_size"] = min(total_steps, 2048)  # Default that works well
-        logger.info(f"Setting batch_size to {train_config['batch_size']} based on n_steps={n_steps} and num_envs={num_envs}")
-    
+        # Default batch_size for PPO/RecurrentPPO often min(total_steps, 2048) or n_steps * num_envs
+        train_config["batch_size"] = min(total_steps, 4096) # Allow larger batches
+        trial_logger.info(f"Setting batch_size to {train_config['batch_size']} based on n_steps={n_steps} and num_envs={num_envs}")
+    else:
+        # Ensure provided batch_size is valid
+        if train_config["batch_size"] > total_steps:
+             trial_logger.warning(f"Config batch_size ({train_config['batch_size']}) > n_steps*num_envs ({total_steps}). Clipping to {total_steps}.")
+             train_config["batch_size"] = total_steps
+        elif total_steps % train_config["batch_size"] != 0:
+             trial_logger.warning(f"n_steps*num_envs ({total_steps}) is not divisible by batch_size ({train_config['batch_size']}). This might cause issues with PPO updates.")
+             # Consider adjusting batch_size to a divisor if this is critical
+
     # --- Environment Creation --- #
-    logger.info(f"Creating {num_envs} parallel environment(s)...")
-    
+    trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
+
     # Function to create a single env instance
     def make_single_env(rank: int, base_seed: Optional[int]):
         def _init():
-            # --- Use Absolute Path for Subprocess Logging --- 
-            # Get the absolute log_dir from the config (set above)
-            # abs_log_dir = train_config['log_dir'] # No longer needed here
-            # -----------------------------------------------
-            # Setup logger inside subprocess - REMOVED for simplification
-            # process_log_path = os.path.join(log_dir) 
-            # --- Ensure subprocess uses correct log level --- 
-            # sub_log_level = logging.DEBUG if train_config.get("verbose", 1) >= 2 else logging.INFO
-            # setup_logger(
-            #     log_dir=abs_log_dir, 
-            #     log_level=sub_log_level, 
-            #     console_level=logging.INFO,  
-            #     log_filename=f"rl_agent_{rank}.log"  
-            # )
-            # -----------------------------------------------
-            
+            # --- Subprocess Logging Removed ---
+            # Subprocesses will now use the standard logger if needed,
+            # but we don't explicitly configure handlers here. Ray might
+            # capture stdout/stderr.
+
             env_config = train_config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
+            # Use the specific logger name if env needs logging
+            env_logger = logging.getLogger("rl_agent.environment")
             env = create_env(config=env_config, is_eval=False)
-            
-            # Use a different Monitor file per process
+
+            # Use a different Monitor file per process, relative to trial's log_dir
             monitor_log_path = os.path.join(log_dir, f'monitor_{rank}.csv')
-            os.makedirs(os.path.dirname(monitor_log_path), exist_ok=True)
+            ensure_dir_exists(os.path.dirname(monitor_log_path)) # Ensure dir exists
             env = Monitor(env, filename=monitor_log_path)
             return env
         return _init
-    
+
     # Create vectorized environment
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
@@ -437,7 +421,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         vec_env_cls=vec_env_cls,
         env_kwargs=None
     )
-    
+
     # Apply VecNormalize
     norm_obs_setting = train_config.get("norm_obs", "auto").lower()
     if norm_obs_setting == "auto":
@@ -445,191 +429,205 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         features = train_config.get("features", [])
         if isinstance(features, str):
             features = features.split(",")
-        
-        # Check if features contain _scaled suffix
         has_scaled_features = any("_scaled" in feature for feature in features)
         should_norm_obs = not has_scaled_features
-        logger.info(f"Auto-detected {'pre-scaled' if has_scaled_features else 'raw'} features. Setting norm_obs={should_norm_obs}")
+        trial_logger.info(f"Auto-detected {'pre-scaled' if has_scaled_features else 'raw'} features. Setting norm_obs={should_norm_obs}")
     else:
         should_norm_obs = norm_obs_setting == "true"
-        logger.info(f"Using explicit norm_obs={should_norm_obs} from config")
-    
+        trial_logger.info(f"Using explicit norm_obs={should_norm_obs} from config")
+
     train_env = VecNormalize(
         train_env,
         norm_obs=should_norm_obs,
-        norm_reward=False,
+        norm_reward=False, # Usually False for RL training
         clip_obs=10.,
         gamma=train_config["gamma"]
     )
-    
+
     # Create validation environment if specified
     eval_env = None
     if train_config.get("val_data_path"):
-        logger.info(f"Creating validation env: {train_config['val_data_path']}")
+        trial_logger.info(f"Creating validation env: {train_config['val_data_path']}")
         eval_env_config = train_config.copy()
-        
+
+        # Use a single DummyVecEnv for validation
         eval_env = make_vec_env(
-            env_id=make_single_env(rank=0, base_seed=seed),
-            n_envs=1,  # Use single env for validation
+            env_id=make_single_env(rank=0, base_seed=seed + num_envs), # Use different seed offset
+            n_envs=1,
             seed=None,
             vec_env_cls=DummyVecEnv,
             env_kwargs=None
         )
-        
-        # Apply VecNormalize to eval_env
+
+        # Apply VecNormalize to eval_env, reusing train_env stats
+        # Important: We need to load stats from train_env IF they exist later
+        # For now, create a wrapper, stats will be loaded if model continues
         eval_env = VecNormalize(
             eval_env,
-            norm_obs=should_norm_obs,
+            norm_obs=should_norm_obs, # Use same setting
             norm_reward=False,
             clip_obs=10.,
             gamma=train_config["gamma"],
-            training=False
+            training=False # Set training=False for evaluation
         )
-    
+
     # --- Model Creation --- #
-    logger.info(f"Creating new {train_config['model_type']} model")
+    trial_logger.info(f"Creating new {train_config['model_type']} model")
     model = create_model(env=train_env, config=train_config)
-    
-    # Set logger for the model
+
+    # Set the SB3 logger for the model
     model.set_logger(sb3_logger_instance)
-    
+
     # --- Callbacks --- #
     # Create a list of callbacks, including the Ray Tune reporter
-    # --- Disable eval_env for now ---
-    eval_env = None 
-    # -------------------------------
+    # EvalCallback is now handled separately or via Tune logic
+    # Pass the trial's logger to the ResourceCheckCallback if used
     callbacks = get_callback_list(
-        eval_env=eval_env, # Pass None to disable EvalCallback
-        log_dir=log_dir,
-        eval_freq=max(train_config.get("eval_freq", 10000), 5000),
+        eval_env=eval_env, # Pass eval_env if created
+        log_dir=log_dir, # Main log dir for this trial
+        eval_freq=max(train_config.get("eval_freq", 10000), n_steps * 2), # Eval freq based on n_steps
         n_eval_episodes=train_config.get("n_eval_episodes", 5),
         save_freq=train_config.get("save_freq", 50000),
         keep_checkpoints=train_config.get("keep_checkpoints", 3),
         resource_check_freq=train_config.get("resource_check_freq", 5000),
         metrics_log_freq=train_config.get("metrics_log_freq", 1000),
-        early_stopping_patience=max(20, train_config.get("early_stopping_patience", 10)),
-        checkpoint_save_path=checkpoint_dir,
+        early_stopping_patience=train_config.get("early_stopping_patience", 20), # Use config value
+        checkpoint_save_path=checkpoint_dir, # Use absolute checkpoint path
         model_name=train_config["model_type"],
-        custom_callbacks=[TuneReportCallback()]
+        custom_callbacks=[TuneReportCallback()] # Add our reporting callback
     )
-    
+
     # --- Training --- #
-    logger.info(f"Starting training: {train_config['total_timesteps']} timesteps...")
+    trial_logger.info(f"Starting training: {train_config['total_timesteps']} timesteps...")
     training_start_time = time.time()
     try:
         model.learn(
             total_timesteps=train_config["total_timesteps"],
             callback=callbacks,
-            reset_num_timesteps=not train_config.get("continue_training", False)
+            reset_num_timesteps=not train_config.get("continue_training", False) # Handle continuation
         )
         training_time = time.time() - training_start_time
-        logger.info(f"Training completed in {training_time:.2f} seconds")
+        trial_logger.info(f"Training loop finished in {training_time:.2f} seconds")
     except Exception as e:
-        logger.error(f"Error during training: {e}")
-        logger.error(traceback.format_exc())
+        trial_logger.error(f"Error during model.learn: {e}", exc_info=True)
         # Report failure to Ray Tune
         if RAY_AVAILABLE:
-            tune.report(training_iteration=model.num_timesteps, training_failure=True)
-        raise
+             try:
+                 # Report failure and potentially some last metrics if available
+                 failure_metrics = {"training_failure": True, "timesteps": getattr(model, 'num_timesteps', 0)}
+                 if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
+                     ray.air.session.report(failure_metrics)
+                 else:
+                     tune.report(**failure_metrics)
+             except Exception as report_err:
+                 trial_logger.error(f"Could not report training failure to Ray Tune: {report_err}")
+        raise # Re-raise the exception to stop the trial
     finally:
-        # Close environments
-        if 'train_env' in locals() and hasattr(train_env, 'close'):
-            train_env.close()
-        if 'eval_env' in locals() and eval_env is not None and hasattr(eval_env, 'close'):
-            eval_env.close()
-    
+        # --- Graceful Environment Closure ---
+        trial_logger.info("Closing environments...")
+        try:
+            if 'train_env' in locals() and hasattr(train_env, 'close'):
+                train_env.close()
+                trial_logger.debug("Closed train_env.")
+            else:
+                 trial_logger.debug("train_env not found or no close method.")
+        except Exception as close_err:
+            trial_logger.error(f"Error closing train_env: {close_err}", exc_info=True)
+
+        try:
+            if 'eval_env' in locals() and eval_env is not None and hasattr(eval_env, 'close'):
+                eval_env.close()
+                trial_logger.debug("Closed eval_env.")
+            else:
+                trial_logger.debug("eval_env not found, None, or no close method.")
+        except Exception as close_err:
+            trial_logger.error(f"Error closing eval_env: {close_err}", exc_info=True)
+        trial_logger.info("Environment closure attempt finished.")
+        # ------------------------------------
+
     training_time = time.time() - training_start_time
-    
-    # --- Final Evaluation ---
-    logger.info("Performing final evaluation...")
-    # If we have an eval env, run a final evaluation
+    trial_logger.info(f"Total training time: {training_time:.2f} seconds")
+
+    # --- Final Evaluation (Optional - consider if EvalCallback sufficient) ---
+    trial_logger.info("Performing final evaluation (if eval_env exists)...")
     final_eval_metrics = {}
     if eval_env is not None:
         try:
-            mean_reward, _, _, _ = evaluate_model(
+            # Ensure eval_env VecNormalize stats match train_env if needed
+            # This is tricky - best handled by EvalCallback saving/loading norm stats
+            # Or, simply use the eval_env as is for a final check
+            mean_reward, portfolio_values, actions, rewards = evaluate_model(
                 model=model,
-                env=eval_env,
+                env=eval_env, # Use the already created eval_env
                 config=train_config,
                 n_episodes=train_config.get("n_eval_episodes", 5),
                 deterministic=True
             )
             final_eval_metrics["final_eval_mean_reward"] = mean_reward
-            logger.info(f"Final evaluation mean reward: {mean_reward:.4f}")
+            trial_logger.info(f"Final evaluation mean reward: {mean_reward:.4f}")
+
+            # Optionally calculate and save final metrics/plots
+            if portfolio_values is not None and len(portfolio_values) > 10:
+                 final_metrics_path = os.path.join(log_dir, "final_eval_metrics")
+                 ensure_dir_exists(final_metrics_path)
+                 try:
+                     trading_metrics = calculate_trading_metrics(list(portfolio_values)) # Cast just in case
+                     final_eval_metrics.update(trading_metrics)
+                     create_evaluation_plots(
+                         portfolio_values=list(portfolio_values),
+                         actions=actions,
+                         rewards=rewards,
+                         save_path=os.path.join(final_metrics_path, "final_eval_plots.png")
+                     )
+                     # Save metrics dict
+                     with open(os.path.join(final_metrics_path, "final_trading_metrics.json"), 'w') as f:
+                         json.dump({k: float(v) if isinstance(v, np.number) else v for k, v in trading_metrics.items()}, f, indent=2)
+
+                     trial_logger.info(f"Saved final evaluation plots and metrics to {final_metrics_path}")
+                 except Exception as plot_err:
+                     trial_logger.warning(f"Could not generate/save final eval plots/metrics: {plot_err}")
+
         except Exception as e:
-            logger.error(f"Error during final evaluation: {e}")
-    
+            trial_logger.error(f"Error during final evaluation: {e}", exc_info=True)
+
     # --- Final Report ---
-    # Prepare metrics to report to Ray Tune
-    metrics = {
-        "training_time": training_time,
-        "timesteps": model.num_timesteps,
-        "training_iteration": model.num_timesteps,
-        **final_eval_metrics
+    # The TuneReportCallback should have reported the latest metrics during the last rollout.
+    # We can report some final summary stats here if needed, but avoid overwriting
+    # the primary optimization metrics reported by the callback.
+    final_summary_metrics = {
+        "training_time_total": training_time,
+        "final_timesteps": getattr(model, 'num_timesteps', 0),
+        **final_eval_metrics # Include final eval stats if calculated
     }
-    
-    # Collect metrics from various sources to ensure we have the best values
-    reward_value = None
-    variance_value = None
-    
-    # Source 1: Check the model's logger (Primary source now)
+
+    # Collect final metrics from SB3 logger as fallback/confirmation
+    final_reward_value = None
+    final_variance_value = None
     if hasattr(model, "logger") and hasattr(model.logger, "name_to_value"):
-        if "rollout/ep_rew_mean" in model.logger.name_to_value:
-            try:
-                reward_value = float(model.logger.name_to_value["rollout/ep_rew_mean"])
-                logger.info(f"Using final rewards from model logger: {reward_value:.4f}")
-            except (ValueError, TypeError):
-                 reward_value = None # Handle potential non-float values
+        final_reward_value = model.logger.name_to_value.get("rollout/ep_rew_mean")
+        final_variance_value = model.logger.name_to_value.get("train/explained_variance")
+        if final_reward_value is not None:
+             final_summary_metrics["final_logger_mean_reward"] = float(final_reward_value)
+        if final_variance_value is not None:
+             final_summary_metrics["final_logger_explained_variance"] = float(final_variance_value)
 
-        if "train/explained_variance" in model.logger.name_to_value:
-             try:
-                 variance_value = float(model.logger.name_to_value["train/explained_variance"])
-                 logger.info(f"Using final explained variance from model logger: {variance_value:.4f}")
-             except (ValueError, TypeError):
-                 variance_value = None
+    # Log the final summary
+    trial_logger.info("Final Summary Metrics:")
+    for k, v in final_summary_metrics.items():
+        trial_logger.info(f"  {k}: {v}")
 
-    # Source 2: Check the environment directly (Fallback)
-    if reward_value is None and hasattr(model, "env"):
-        try:
-            if hasattr(model.env, "get_episode_rewards"):
-                rewards = model.env.get_episode_rewards()
-                if rewards:
-                    reward_value = float(np.mean(rewards[-10:]) if len(rewards) >= 10 else np.mean(rewards))
-                    logger.info(f"Using final rewards from environment: {reward_value:.4f}")
-        except (AttributeError, IndexError, ValueError, TypeError) as e:
-            logger.warning(f"Could not get final rewards from environment: {e}")
-            reward_value = None
-
-    # Fallback values if needed
-    if reward_value is None:
-        # Use final eval reward if other sources failed
-        reward_value = final_eval_metrics.get("final_eval_mean_reward", 0.0)
-        logger.warning(f"No reward metric found from logger/env, using final eval: {reward_value:.4f}")
-
-    if variance_value is None:
-        variance_value = 0.0 # Default variance if not found
-        logger.warning("No explained variance metric found, using 0.0")
-
-    # Add the evaluation metrics (ensure they are floats)
-    metrics["eval/mean_reward"] = float(reward_value)
-    metrics["eval/explained_variance"] = float(variance_value)
-
-    # Create a callback instance just to use the normalization method
-    # Note: Need to instantiate it here as it's not passed directly
-    temp_callback = TuneReportCallback()
-    combined_score = temp_callback._normalize_and_combine_metrics(reward_value, variance_value)
-    metrics["eval/combined_score"] = float(combined_score)
-
-    logger.info(f"Final metrics - reward: {reward_value:.4f}, variance: {variance_value:.4f}, combined: {combined_score:.4f}")
-    
-    # Final report to Ray Tune
+    # Final report to Ray Tune (only summary/non-overlapping metrics)
     if RAY_AVAILABLE:
-        logger.info("Sending final report to Ray Tune")
-        if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
-            ray.air.session.report(metrics)
-        else:
-            tune.report(**metrics)
-    
-    return model, metrics
+        trial_logger.info("Sending final summary report to Ray Tune")
+        try:
+            if hasattr(ray, "air") and hasattr(ray.air, "session") and ray.air.session.is_active():
+                ray.air.session.report(final_summary_metrics)
+            else:
+                tune.report(**final_summary_metrics)
+        except Exception as report_err:
+             trial_logger.warning(f"Could not report final summary metrics: {report_err}")
+
+    # No explicit return needed for Tune trainables
 
 # --- Argument Parsing --- #
 
