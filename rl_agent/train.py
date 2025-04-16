@@ -144,16 +144,17 @@ class TuneReportCallback(BaseCallback):
     def _on_rollout_end(self) -> None:
         """
         Report metrics at the end of each rollout.
-        Uses ep_rew_mean from ep_info_buffer and last stored explained_variance.
+        Uses ep_rew_mean from ep_info_buffer and fetches the most recent
+        explained_variance logged by SB3.
         """
         callback_logger = logging.getLogger("rl_agent")
         callback_logger.debug(
             f"Rollout end at step {self.num_timesteps}. Attempting report."
         )
+        reward_value = 0.0  # Default reward
 
-        # --- Calculate ep_rew_mean from ep_info_buffer ---
-        reward_value = 0.0
-        ep_rewards = []
+        # --- Get Mean Reward from Monitor Buffer ---
+        # (Keep existing reward fetching logic)
         if hasattr(self.model, "ep_info_buffer") and \
            len(self.model.ep_info_buffer) > 0:
             ep_rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
@@ -162,64 +163,59 @@ class TuneReportCallback(BaseCallback):
                 callback_logger.debug(
                     f"Mean reward ({len(ep_rewards)} eps): {reward_value:.4f}"
                 )
-            else:
-                callback_logger.debug("ep_info_buffer empty. Reward = 0.0")
         else:
             callback_logger.debug(
                 f"No finished eps in rollout (step {self.num_timesteps}). R=0.0"
             )
 
-        # --- Use last stored explained variance ---
-        variance_value = self.last_explained_variance
-        callback_logger.debug(f"Using last variance from _on_step: {variance_value:.4f}")
+
+        # --- Fetch latest explained variance directly from SB3 logger ---
+        variance_value = 0.0 # Default variance
+        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            # Use get_log_value which retrieves the last recorded value for the key
+            logged_variance = self.logger.get_log_value("train/explained_variance")
+            if logged_variance is not None:
+                try:
+                    variance_value = float(logged_variance)
+                    callback_logger.debug(f"Fetched variance from logger: {variance_value:.4f}")
+                except (ValueError, TypeError):
+                     callback_logger.warning(f"Could not convert logged variance '{logged_variance}' to float.")
+                     variance_value = 0.0 # Fallback if conversion fails
+            else:
+                callback_logger.debug("Could not find 'train/explained_variance' in logger values.")
+        else:
+             callback_logger.warning("SB3 logger not available in callback to fetch variance.")
+
 
         # --- Prepare and Report Metrics ---
+        # Use the fetched variance_value
+        combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
+
         metrics_to_report = {
+            "eval/mean_reward": reward_value,
+            "eval/explained_variance": variance_value, # Report the fetched variance
+            "eval/combined_score": combined_score,
             "timesteps": self.num_timesteps,
-            "training_iteration": self.num_timesteps,
-            "eval/mean_reward": float(reward_value),
-            "eval/explained_variance": float(variance_value)
         }
-
-        combined_score = self._normalize_and_combine_metrics(
-            reward_value, variance_value
-        )
-        metrics_to_report["eval/combined_score"] = float(combined_score)
-
-        # Add other useful metrics from SB3 logger if available
-        if self.logger and hasattr(self.logger, "name_to_value"):
-            other_metrics = ["rollout/ep_len_mean", "time/fps"]
-            for key in other_metrics:
-                if key in self.logger.name_to_value:
-                    value = self.logger.name_to_value[key]
-                    if isinstance(value, (int, float, np.number)):
-                        try:
-                            metrics_to_report[key] = float(value)
-                        except (ValueError, TypeError):
-                            callback_logger.warning(f"Cannot convert {key}")
-
         callback_logger.debug(
-            f"Reporting (step {self.num_timesteps}): "
-            f"reward={reward_value:.4f}, var={variance_value:.4f}, "
-            f"combined={combined_score:.4f}"
-        )
+             f"Reporting (step {self.num_timesteps}): "
+             f"reward={reward_value:.4f}, var={variance_value:.4f}, "
+             f"combined={combined_score:.4f}"
+         )
 
-        try:
-            if RAY_AVAILABLE:
-                if hasattr(ray, "air") and hasattr(ray.air, "session") \
-                   and ray.air.session.is_active():
-                    ray.air.session.report(metrics_to_report)
-                else:
-                    tune.report(**metrics_to_report)
+        # Report to Ray Tune
+        if RAY_AVAILABLE and tune.is_session_enabled():
+            try:
+                tune.report(**metrics_to_report)
                 callback_logger.debug(
                     f"Reported to Ray Tune at step {self.num_timesteps}"
                 )
-            else:
-                callback_logger.warning("Ray not available for tune.report.")
-        except Exception as e:
-            callback_logger.error(
-                f"Error during tune.report: {e}", exc_info=True
-            )
+            except Exception as e:
+                callback_logger.error(
+                    f"Error reporting to Ray Tune at step {self.num_timesteps}: {e}"
+                )
+        else:
+             callback_logger.debug("Ray Tune session not enabled, skipping report.")
 
 # --- Ray Tune Trainable Function --- #
 
