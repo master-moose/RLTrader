@@ -171,20 +171,21 @@ class TuneReportCallback(BaseCallback):
 
         # --- Fetch latest explained variance directly from SB3 logger ---
         variance_value = 0.0 # Default variance
+        logged_variance = None # Initialize logged_variance
         if self.logger is not None and hasattr(self.logger, 'name_to_value'):
-            # Use get_log_value which retrieves the last recorded value for the key
-            logged_variance = self.logger.get_log_value("train/explained_variance")
+            # Use the name_to_value dictionary with .get() for safety
+            logged_variance = self.logger.name_to_value.get("train/explained_variance", None)
             if logged_variance is not None:
                 try:
                     variance_value = float(logged_variance)
-                    callback_logger.debug(f"Fetched variance from logger: {variance_value:.4f}")
+                    callback_logger.debug(f"Fetched variance from logger dict: {variance_value:.4f}")
                 except (ValueError, TypeError):
                      callback_logger.warning(f"Could not convert logged variance '{logged_variance}' to float.")
                      variance_value = 0.0 # Fallback if conversion fails
             else:
-                callback_logger.debug("Could not find 'train/explained_variance' in logger values.")
+                callback_logger.debug("Could not find 'train/explained_variance' in logger.name_to_value.")
         else:
-             callback_logger.warning("SB3 logger not available in callback to fetch variance.")
+             callback_logger.warning("SB3 logger or name_to_value dict not available in callback to fetch variance.")
 
 
         # --- Prepare and Report Metrics ---
