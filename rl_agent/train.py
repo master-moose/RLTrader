@@ -82,7 +82,7 @@ class TuneReportCallback(BaseCallback):
     def __init__(self):
         super().__init__(verbose=0)
         # Removed self.last_reported_timestep as reporting is now per rollout
-
+        
     def _on_init(self) -> None:
         """Ensure the logger is available."""
         # Use the specific logger name
@@ -90,18 +90,18 @@ class TuneReportCallback(BaseCallback):
         # Use self.logger which is automatically set by BaseCallback
         if self.logger is None:
             callback_logger.warning("SB3 logger not available in TuneReportCallback's logger attribute.")
-
+        
         # Modify log message
         callback_logger.info("TuneReportCallback initialized - will report metrics at rollout end.")
 
     def _normalize_and_combine_metrics(self, reward, explained_variance):
         """
         Create a normalized combined score that equally weights reward and explained variance.
-
+        
         Args:
             reward: The mean reward value, can be very large or small
             explained_variance: The explained variance, typically between -1 and 1
-
+        
         Returns:
             A combined normalized score between 0 and 1 (higher is better)
         """
@@ -111,19 +111,19 @@ class TuneReportCallback(BaseCallback):
             return 0.5 # Return neutral score if reward is unavailable
         if explained_variance is None or not isinstance(explained_variance, (int, float, np.number)):
             explained_variance = 0.0 # Default variance to 0 if unavailable
-
+            
         # Use tanh to normalize reward to [-1, 1] range regardless of magnitude
         # Scale factor of 1000 helps with gradual scaling for typical reward ranges
         normalized_reward = np.tanh(reward / 1000.0)
-
+        
         # Explained variance is typically between -1 and 1 already
         # Clip it just to be safe
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-
+        
         # Calculate combined score (equal weight to both normalized metrics)
         # We add 1 to each to get values in [0, 2] range, then divide by 4 to get [0, 1]
         combined_score = ((normalized_reward + 1.0) + (normalized_variance + 1.0)) / 4.0
-
+        
         return combined_score
 
     def _on_rollout_end(self) -> None:
@@ -142,11 +142,11 @@ class TuneReportCallback(BaseCallback):
         if hasattr(self.model, "ep_info_buffer") and len(self.model.ep_info_buffer) > 0:
             ep_rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
             if ep_rewards:
-                 reward_value = float(np.mean(ep_rewards))
-                 callback_logger.debug(f"Calculated mean reward from ep_info_buffer ({len(ep_rewards)} episodes): {reward_value:.4f}")
+                reward_value = float(np.mean(ep_rewards))
+                callback_logger.debug(f"Calculated mean reward from ep_info_buffer ({len(ep_rewards)} episodes): {reward_value:.4f}")
             else:
-                 callback_logger.debug("ep_info_buffer found but contained no rewards ('r' key). Defaulting reward to 0.0")
-                 reward_value = 0.0
+                callback_logger.debug("ep_info_buffer found but contained no rewards ('r' key). Defaulting reward to 0.0")
+                reward_value = 0.0
         else:
             # This happens if no episodes finish during the current rollout
             callback_logger.debug(f"No episodes finished in this rollout (step {self.num_timesteps}). Reporting reward as 0.0")
@@ -174,11 +174,11 @@ class TuneReportCallback(BaseCallback):
         metrics_to_report["training_iteration"] = self.num_timesteps # Ray Tune often uses this
         metrics_to_report["eval/mean_reward"] = float(reward_value)
         metrics_to_report["eval/explained_variance"] = float(variance_value)
-
+        
         # Calculate combined score using the (potentially default) reward and variance
         combined_score = self._normalize_and_combine_metrics(reward_value, variance_value)
         metrics_to_report["eval/combined_score"] = float(combined_score)
-
+        
         # Add other useful metrics if available from SB3 logger
         if self.logger and hasattr(self.logger, "name_to_value"):
             other_metrics = ["rollout/ep_len_mean", "time/fps"]
@@ -189,7 +189,7 @@ class TuneReportCallback(BaseCallback):
                         try:
                             metrics_to_report[key] = float(value)
                         except (ValueError, TypeError):
-                             callback_logger.warning(f"Could not convert metric '{key}' to float.")
+                            callback_logger.warning(f"Could not convert metric '{key}' to float.")
 
         # Log the metrics being reported
         callback_logger.debug(f"Reporting metrics at rollout end (step {self.num_timesteps}): reward={reward_value:.4f}, variance={variance_value:.4f}, combined={combined_score:.4f}")
@@ -220,7 +220,7 @@ class TuneReportCallback(BaseCallback):
 def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     """
     Ray Tune trainable function for training an RL agent.
-
+    
     Args:
         config: Dictionary of hyperparameters from Ray Tune
     """
@@ -232,14 +232,14 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     # Ensure Ray is available
     if not RAY_AVAILABLE:
         raise ImportError("Ray Tune not found. Install with 'pip install ray[tune]'")
-
+    
     # Create a copy of the config to avoid modifying the original
     train_config = config.copy()
-
+    
     # Set up some defaults if not provided
     train_config.setdefault("model_type", "recurrentppo")
     train_config.setdefault("verbose", 1) # Default verbosity
-
+    
     # Generate a consistent name for this trial
     if "trial_id" in config:
         trial_id = config["trial_id"]
@@ -249,10 +249,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             trial_id = tune.get_trial_id()
         except Exception: # Handle cases outside a Tune run
             trial_id = f"standalone_{int(time.time())}"
-
+    
     model_name = f"{train_config['model_type']}_{trial_id}"
     train_config["model_name"] = model_name
-
+    
     # --- Use Absolute Paths for Logging ---
     # Get the base log directory from config (should be absolute path from tune script)
     # Default to an absolute path in the current working dir if somehow missing
@@ -315,7 +315,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                 tune.report(**initial_metrics)
         except Exception as report_err:
             trial_logger.warning(f"Could not report initial metrics: {report_err}")
-
+    
     # Setup seed - important for reproducible results across trials
     seed = train_config.get("seed")
     if seed is None:
@@ -323,7 +323,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         seed = abs(hash(trial_id)) % (2**32)
         train_config["seed"] = seed
     set_seeds(seed)
-
+    
     # Log the configuration
     trial_logger.info(f"Starting Ray Tune trial with ID: {trial_id}")
     trial_logger.info("Full Configuration for this trial:")
@@ -335,7 +335,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     sb3_log_dir = os.path.join(log_dir, "sb3_logs")
     ensure_dir_exists(sb3_log_dir)
     sb3_logger_instance = setup_sb3_logger(log_dir=sb3_log_dir)
-
+    
     # --- Calculate dependent parameters if needed --- #
     # Ensure n_steps and batch_size are set appropriately
     num_envs = train_config.get("num_envs", 8)
@@ -353,10 +353,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         elif total_steps % train_config["batch_size"] != 0:
              trial_logger.warning(f"n_steps*num_envs ({total_steps}) is not divisible by batch_size ({train_config['batch_size']}). This might cause issues with PPO updates.")
              # Consider adjusting batch_size to a divisor if this is critical
-
+    
     # --- Environment Creation --- #
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
-
+    
     # Function to create a single env instance
     def make_single_env(rank: int, base_seed: Optional[int]):
         def _init():
@@ -364,21 +364,21 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             # Subprocesses will now use the standard logger if needed,
             # but we don't explicitly configure handlers here. Ray might
             # capture stdout/stderr.
-
+            
             env_config = train_config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
             # Use the specific logger name if env needs logging
             env_logger = logging.getLogger("rl_agent.environment")
             env = create_env(config=env_config, is_eval=False)
-
+            
             # Use a different Monitor file per process, relative to trial's log_dir
             monitor_log_path = os.path.join(log_dir, f'monitor_{rank}.csv')
             ensure_dir_exists(os.path.dirname(monitor_log_path)) # Ensure dir exists
             env = Monitor(env, filename=monitor_log_path)
             return env
         return _init
-
+    
     # Create vectorized environment
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
@@ -388,7 +388,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         vec_env_cls=vec_env_cls,
         env_kwargs=None
     )
-
+    
     # Apply VecNormalize
     norm_obs_setting = train_config.get("norm_obs", "auto").lower()
     if norm_obs_setting == "auto":
@@ -402,7 +402,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     else:
         should_norm_obs = norm_obs_setting == "true"
         trial_logger.info(f"Using explicit norm_obs={should_norm_obs} from config")
-
+    
     train_env = VecNormalize(
         train_env,
         norm_obs=should_norm_obs,
@@ -410,13 +410,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         clip_obs=10.,
         gamma=train_config["gamma"]
     )
-
+    
     # Create validation environment if specified
     eval_env = None
     if train_config.get("val_data_path"):
         trial_logger.info(f"Creating validation env: {train_config['val_data_path']}")
         eval_env_config = train_config.copy()
-
+        
         # Use a single DummyVecEnv for validation
         eval_env = make_vec_env(
             env_id=make_single_env(rank=0, base_seed=seed + num_envs), # Use different seed offset
@@ -425,7 +425,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             vec_env_cls=DummyVecEnv,
             env_kwargs=None
         )
-
+        
         # Apply VecNormalize to eval_env, reusing train_env stats
         # Important: We need to load stats from train_env IF they exist later
         # For now, create a wrapper, stats will be loaded if model continues
@@ -437,14 +437,14 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             gamma=train_config["gamma"],
             training=False # Set training=False for evaluation
         )
-
+    
     # --- Model Creation --- #
     trial_logger.info(f"Creating new {train_config['model_type']} model")
     model = create_model(env=train_env, config=train_config)
-
+    
     # Set the SB3 logger for the model
     model.set_logger(sb3_logger_instance)
-
+    
     # --- Callbacks --- #
     # Create a list of callbacks, including the Ray Tune reporter
     # EvalCallback is now handled separately or via Tune logic
@@ -480,7 +480,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         model_name=train_config["model_type"],
         custom_callbacks=[TuneReportCallback()] # Add our reporting callback
     )
-
+    
     # --- Training --- #
     trial_logger.info(f"Starting training: {train_config['total_timesteps']} timesteps...")
     training_start_time = time.time()
@@ -544,7 +544,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                 train_env.close()
                 trial_logger.debug("Closed train_env.")
             else:
-                 trial_logger.debug("train_env not found or no close method.")
+                trial_logger.debug("train_env not found or no close method.")
         except Exception as close_err:
             trial_logger.error(f"Error closing train_env: {close_err}", exc_info=True)
 
@@ -558,10 +558,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             trial_logger.error(f"Error closing eval_env: {close_err}", exc_info=True)
         trial_logger.info("Environment closure attempt finished.")
         # ------------------------------------
-
+    
     training_time = time.time() - training_start_time
     trial_logger.info(f"Total training time: {training_time:.2f} seconds")
-
+    
     # --- Final Evaluation (Optional - consider if EvalCallback sufficient) ---
     trial_logger.info("Performing final evaluation (if eval_env exists)...")
     final_eval_metrics = {}
@@ -660,8 +660,8 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             else:
                 tune.report(**final_summary_metrics)
         except Exception as report_err:
-             trial_logger.warning(f"Could not report final summary metrics: {report_err}")
-
+            trial_logger.warning(f"Could not report final summary metrics: {report_err}")
+    
     # No explicit return needed for Tune trainables
 
 # --- Argument Parsing --- #
