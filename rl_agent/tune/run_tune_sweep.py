@@ -251,15 +251,17 @@ def run_tune_experiment(args):
     print(f"Setting verbosity level for trials: {base_config['verbose']}")
     # ---------------------------------------------------
 
-    # Calculate appropriate num_envs based on CPUs per trial
-    # RecurrentPPO is limited by available CPU cores
-    cpus_available = args.cpus_per_trial
-    # Reserve 1 CPU for the main process, use the rest for environments
-    # At least 1 environment, max 8 environments
-    num_envs = max(1, min(8, int(cpus_available - 1)))
-    base_config["num_envs"] = num_envs
-    print(f"Setting num_envs={num_envs} based on cpus_per_trial={cpus_available}")
-    
+    # --- Explicitly set num_envs based on cpus_per_trial ---
+    # Remove the potentially inaccurate comment from DEFAULT_CONFIG
+    if "# num_envs is calculated dynamically based on available CPUs" in DEFAULT_CONFIG:
+        del DEFAULT_CONFIG["# num_envs is calculated dynamically based on available CPUs"] # Or adjust comment if needed
+
+    cpus_per_trial_arg = getattr(args, 'cpus_per_trial', 1.0) # Default to 1 if not provided
+    num_envs_to_set = max(1, int(cpus_per_trial_arg))
+    base_config["num_envs"] = num_envs_to_set
+    print(f"INFO: Explicitly setting num_envs to {num_envs_to_set} based on --cpus_per_trial={cpus_per_trial_arg}")
+    # -------------------------------------------------------
+
     # Ensure Ray results directory exists
     ensure_dir_exists(args.local_dir)
     

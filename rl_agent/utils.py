@@ -8,18 +8,17 @@ This module contains various utility functions for resource monitoring,
 data visualization, file management, and other helper functions.
 """
 
-import os
 import gc
-import time
 import json
 import logging
-import psutil
-import numpy as np
-from typing import Dict, Any, List, Optional, Union, Tuple
+import os
 import random
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
+import psutil
 import seaborn as sns
 from stable_baselines3.common.logger import configure
 
@@ -166,8 +165,12 @@ def check_resources(
     # GPU usage if available
     if TORCH_AVAILABLE and torch.cuda.is_available():
         resources["gpu_count"] = torch.cuda.device_count()
-        resources["gpu_memory_allocated"] = torch.cuda.memory_allocated(0) / (1024 ** 2)  # MB
-        resources["gpu_memory_reserved"] = torch.cuda.memory_reserved(0) / (1024 ** 2)    # MB
+        resources["gpu_memory_allocated"] = (
+            torch.cuda.memory_allocated(0) / (1024 ** 2)  # MB
+        )
+        resources["gpu_memory_reserved"] = (
+            torch.cuda.memory_reserved(0) / (1024 ** 2)    # MB
+        )
         
         if GPUTIL_AVAILABLE:
             try:
@@ -184,13 +187,17 @@ def check_resources(
     # Log resource information
     if logger:
         logger.info(f"CPU Usage: {cpu_percent:.1f}%")
-        logger.info(f"Memory Usage: {memory.percent:.1f}% "
-                   f"({memory.used/(1024**3):.1f}GB / {memory.total/(1024**3):.1f}GB)")
+        logger.info(
+            f"Memory Usage: {memory.percent:.1f}% "
+            f"({memory.used/(1024**3):.1f}GB / {memory.total/(1024**3):.1f}GB)"
+        )
         
         if "gpu_memory_used" in resources:
-            logger.info(f"GPU Memory: {resources['gpu_memory_used']:.1f}MB / "
-                       f"{resources['gpu_memory_total']:.1f}MB "
-                       f"({resources['gpu_utilization']:.1f}%)")
+            logger.info(
+                f"GPU Memory: {resources['gpu_memory_used']:.1f}MB / "
+                f"{resources['gpu_memory_total']:.1f}MB "
+                f"({resources['gpu_utilization']:.1f}%)"
+            )
     
     # Check for high memory usage
     if memory.percent > warning_threshold * 100:
@@ -449,7 +456,8 @@ def calculate_trading_metrics(
     # Sharpe ratio
     daily_risk_free = (1 + risk_free_rate) ** (1 / 252) - 1
     excess_returns = returns - daily_risk_free
-    sharpe_ratio = np.mean(excess_returns) / (np.std(excess_returns) + 1e-10) * np.sqrt(252)
+    sharpe_ratio = (np.mean(excess_returns) / 
+                    (np.std(excess_returns) + 1e-10) * np.sqrt(252))
     metrics["sharpe_ratio"] = sharpe_ratio
     
     # Maximum drawdown
@@ -485,7 +493,8 @@ def calculate_trading_metrics(
         
         # Alpha (Jensen's alpha)
         benchmark_return = np.mean(benchmark_returns) * 252
-        expected_return = daily_risk_free * 252 + beta * (benchmark_return - daily_risk_free * 252)
+        expected_return = (daily_risk_free * 252 + beta * 
+                           (benchmark_return - daily_risk_free * 252))
         alpha = annualized_return - expected_return
         metrics["alpha"] = alpha
         
@@ -579,4 +588,4 @@ def set_seeds(seed: int) -> None:
             # Potentially add these for full determinism (can impact performance)
             # torch.backends.cudnn.deterministic = True
             # torch.backends.cudnn.benchmark = False
-    logger.info(f"Set random seed to {seed}") 
+    logger.info(f"Set random seed to {seed}")
