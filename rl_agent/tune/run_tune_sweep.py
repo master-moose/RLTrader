@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
     "model_type": "recurrentppo",
     
     # Features - keeping OHLCV features fixed as requested
-    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled",
+    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,rsi_14,macd_hist,ema_9,ema_21",
     
     # Reward structure - simplified as requested
     "portfolio_change_weight": 1.0,
@@ -210,7 +210,7 @@ def define_search_space() -> Dict[str, Any]:
         # Reduced upper bounds significantly based on previous high values
         "drawdown_penalty_weight": tune.uniform(0.0, 1.0),
         "fee_penalty_weight": tune.uniform(0.0, 1.5),
-        "idle_penalty_weight": tune.uniform(0.0, 0.1),
+        "idle_penalty_weight": 0.0, # Set idle penalty to 0
         "profit_bonus_weight": tune.uniform(0.0, 1.5),
         "trade_penalty_weight": tune.uniform(0.0, 0.2),
     }
