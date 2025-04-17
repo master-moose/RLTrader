@@ -8,7 +8,7 @@ compatible with the OpenAI Gym interface.
 from gymnasium import Env, spaces
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Union, Optional, Any
+from typing import List, Optional
 import matplotlib.pyplot as plt
 import logging
 
@@ -139,8 +139,10 @@ class TradingEnvironment(Env):
         # Data preprocessing
         for feature in self.features:
             if feature not in self.data.columns:
-                raise ValueError(f"Feature '{feature}' not found in data columns: "
-                               f"{data.columns.tolist()}")
+                raise ValueError(
+                    f"Feature '{feature}' not found in data columns: "
+                    f"{data.columns.tolist()}"
+                )
         
         # Define action and observation spaces
         self.action_space = spaces.Discrete(3)  # 0: Sell, 1: Hold, 2: Buy
@@ -151,9 +153,9 @@ class TradingEnvironment(Env):
         total_space_dim = feature_space_dim + account_space_dim
         
         self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(total_space_dim,), # Use the calculated total dimension
+            low=-np.inf,
+            high=np.inf,
+            shape=(total_space_dim,),  # Use the calculated total dimension
             dtype=np.float32
         )
         
@@ -161,12 +163,14 @@ class TradingEnvironment(Env):
         if max_steps is None:
             self.max_steps = len(self.data) - self.sequence_length - 1
         else:
-            self.max_steps = min(max_steps, 
+            self.max_steps = min(max_steps,
                                  len(self.data) - self.sequence_length - 1)
         
-        logger.info(f"Created TradingEnvironment with {len(self.data)} data points, "
-                   f"{len(self.features)} features, and sequence length "
-                   f"{self.sequence_length}")
+        logger.info(
+            f"Created TradingEnvironment with {len(self.data)} data points, "
+            f"{len(self.features)} features, and sequence length "
+            f"{self.sequence_length}"
+        )
         
         # Initialize state
         self.reset()
@@ -214,10 +218,10 @@ class TradingEnvironment(Env):
         self.total_buys = 0
         self.total_sells = 0
         self.total_holds = 0
-        self.max_drawdown = 0.0 # Reset max drawdown
+        self.max_drawdown = 0.0  # Reset max drawdown
 
         # --- Initialize new state variables --- <<< MOVED BEFORE _get_info()
-        self.step_returns = [] # For Sharpe ratio calculation
+        self.step_returns = []  # For Sharpe ratio calculation
         self.episode_start_price = self.data['close'].iloc[self.current_step]
         self.consecutive_holds = 0
         self.consecutive_buys = 0 # Track consecutive buys for consistency penalty
@@ -263,7 +267,10 @@ class TradingEnvironment(Env):
             Tuple of (observation, reward, terminated, truncated, info)
         """
         # --- Log state at the very beginning of the step ---
-        # logger.info(f"STEP ENTRY (Step {self.current_step}): Balance={self.balance:.2f}, Shares={self.shares_held:.6f}") # Silenced
+        # logger.info(
+        #     f"STEP ENTRY (Step {self.current_step}): Balance={self.balance:.2f}, "
+        #     f"Shares={self.shares_held:.6f}"
+        # ) # Silenced
         # --------------------------------------------------
         # Record previous portfolio value
         prev_portfolio_value = self.portfolio_value
@@ -274,11 +281,19 @@ class TradingEnvironment(Env):
 
         # --- Update portfolio and check drawdown BEFORE incrementing step ---
         # Log state BEFORE update
-        # logger.info(f"PRE-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}") # Silenced
+        # logger.info(
+        #     f"PRE-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, "
+        #     f"Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, PV={self.portfolio_value:.2f}, "
+        #     f"MaxPV={self.max_portfolio_value:.2f}"
+        # ) # Silenced
         # Update portfolio value using price at the current step (t)
         self._update_portfolio_value() # Uses self.current_step
         # Log state AFTER update
-        # logger.info(f"POST-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, AssetValue={self.asset_value:.2f}, PV={self.portfolio_value:.2f}") # Silenced
+        # logger.info(
+        #     f"POST-UPDATE (Step {self.current_step}): Price={self.data['close'].iloc[self.current_step]:.2f}, "
+        #     f"Balance={self.balance:.2f}, Shares={self.shares_held:.6f}, AssetValue={self.asset_value:.2f}, "
+        #     f"PV={self.portfolio_value:.2f}"
+        # ) # Silenced
 
         # Update max portfolio value based on value at step t
         self.max_portfolio_value = max(self.max_portfolio_value, 
@@ -291,7 +306,10 @@ class TradingEnvironment(Env):
                                / self.max_portfolio_value
         self.max_drawdown = max(self.max_drawdown, current_drawdown)
         # Log drawdown calculation
-        # logger.info(f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, Drawdown={current_drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}") # Silenced
+        # logger.info(
+        #     f"DRAWDOWN CALC (Step {self.current_step}): PV={self.portfolio_value:.2f}, MaxPV={self.max_portfolio_value:.2f}, "
+        #     f"Drawdown={current_drawdown:.4f}, MaxDrawdown={self.max_drawdown:.4f}"
+        # ) # Silenced
 
         # Check for early stopping based on drawdown at step t
         drawdown_terminated = False # Flag specific to drawdown termination
@@ -432,9 +450,15 @@ class TradingEnvironment(Env):
                 # Update balance and shares
                 self.balance += sell_amount - fee
                 # --- Log intermediate state --- #
-                logger.debug(f"_take_action (Sell): Post-update Balance={self.balance:.4f}, Shares=0, Fee={fee:.4f}")
+                logger.debug(
+                    f"_take_action (Sell): Post-update Balance={self.balance:.4f}, "
+                    f"Shares=0, Fee={fee:.4f}"
+                )
                 if not np.isfinite(self.balance):
-                    logger.error(f"_take_action (Sell): Balance became non-finite! {self.balance}")
+                    logger.error(
+                        f"_take_action (Sell): Balance became non-finite! "
+                        f"{self.balance}"
+                    )
                 # --- End log --- #
                 
                 # Log sell
@@ -450,16 +474,20 @@ class TradingEnvironment(Env):
                 self.trades.append(sell_info)
                 self.sell_prices.append(current_price)
                 
-                logger.debug(f"Step {self.current_step}: Sold {self.shares_held:.6f} shares @ "
-                           f"{current_price:.2f} (Amt: {sell_amount:.2f}, Fee: {fee:.2f}) -> "
-                           f"Bal: {self.balance:.2f}")
+                logger.debug(
+                    f"Step {self.current_step}: Sold {self.shares_held:.6f} shares @ "
+                    f"{current_price:.2f} (Amt: {sell_amount:.2f}, Fee: {fee:.2f}) -> "
+                    f"Bal: {self.balance:.2f}"
+                )
                 
                 self.shares_held = 0
                 self.asset_value = 0
             else:
                 # Log failed sell attempt
                 self.failed_sells += 1
-                logger.debug(f"Step {self.current_step}: Attempted Sell, but no shares held.")
+                logger.debug(
+                    f"Step {self.current_step}: Attempted Sell, but no shares held."
+                )
                 # We didn't increment total_sells or total_trades, so no need to decrement.
 
         elif action == 2:  # Buy
@@ -467,7 +495,10 @@ class TradingEnvironment(Env):
                 # <<< ADDED CHECK: Prevent buying if already holding shares >>>
                 if self.shares_held > ZERO_THRESHOLD:
                     self.failed_buys += 1 # Increment failed buy counter
-                    logger.debug(f"Step {self.current_step}: Attempted Buy, but already holding {self.shares_held:.6f} shares. Holding.")
+                    logger.debug(
+                        f"Step {self.current_step}: Attempted Buy, but already holding "
+                        f"{self.shares_held:.6f} shares. Holding."
+                    )
                     return # Exit the function, action becomes Hold # Keep return to prevent execution
                 # <<< END ADDED CHECK >>>
 
@@ -478,7 +509,11 @@ class TradingEnvironment(Env):
                 min_trade_value = self.initial_balance * 0.005 # Minimum 0.5% of initial balance
                 if invest_amount < min_trade_value:
                     self.failed_buys += 1
-                    logger.debug(f"Step {self.current_step}: Attempted Buy. Invest amount {invest_amount:.2f} < min trade value {min_trade_value:.2f}. Holding.")
+                    logger.debug(
+                        f"Step {self.current_step}: Attempted Buy. Invest amount "
+                        f"{invest_amount:.2f} < min trade value {min_trade_value:.2f}. "
+                        f"Holding."
+                    )
                     return # Treat as Hold
                 # <<< END ADDED CHECK >>>
 
@@ -509,9 +544,17 @@ class TradingEnvironment(Env):
                     self.balance = max(0, self.balance) 
                     self.asset_value = self.shares_held * current_price
                     # --- Log intermediate state --- #
-                    logger.debug(f"_take_action (Buy): Post-update Balance={self.balance:.4f}, Shares={self.shares_held:.8f}, AssetVal={self.asset_value:.4f}, Fee={fee:.4f}")
+                    logger.debug(
+                        f"_take_action (Buy): Post-update Balance={self.balance:.4f}, "
+                        f"Shares={self.shares_held:.8f}, AssetVal={self.asset_value:.4f}, "
+                        f"Fee={fee:.4f}"
+                    )
                     if not np.isfinite(self.balance) or not np.isfinite(self.shares_held) or not np.isfinite(self.asset_value):
-                        logger.error(f"_take_action (Buy): State became non-finite! Bal={self.balance}, Shares={self.shares_held}, AssetVal={self.asset_value}")
+                        logger.error(
+                            f"_take_action (Buy): State became non-finite! "
+                            f"Bal={self.balance}, Shares={self.shares_held}, "
+                            f"AssetVal={self.asset_value}"
+                        )
                     # --- End log --- #
                     
                     # Record buy price
@@ -530,19 +573,26 @@ class TradingEnvironment(Env):
                     }
                     self.trades.append(buy_info)
                     
-                    logger.debug(f"Step {self.current_step}: Bought {self.shares_held:.6f} shares @ "
-                               f"{current_price:.2f} (Cost: {buy_cost:.2f}, Fee: {fee:.2f}) -> "
-                               f"Bal: {self.balance:.2f}")
+                    logger.debug(
+                        f"Step {self.current_step}: Bought {self.shares_held:.6f} shares @ "
+                        f"{current_price:.2f} (Cost: {buy_cost:.2f}, Fee: {fee:.2f}) -> "
+                        f"Bal: {self.balance:.2f}"
+                    )
                 else:
                     # --- Buy Failed (Insufficient funds for meaningful amount OR price too low) ---
                     self.failed_buys += 1 # Increment failed buy counter
-                    logger.debug(f"Step {self.current_step}: Attempted Buy. Bal: {self.balance:.2f}, "
-                               f"Price: {current_price:.2f}, MaxPos: {self.max_position:.2f}. "
-                               f"Calculated shares {shares_to_buy:.8f} <= threshold. Holding.")
+                    logger.debug(
+                        f"Step {self.current_step}: Attempted Buy. Bal: {self.balance:.2f}, "
+                        f"Price: {current_price:.2f}, MaxPos: {self.max_position:.2f}. "
+                        f"Calculated shares {shares_to_buy:.8f} <= threshold. Holding."
+                    )
             else:
                 # --- Buy Failed (Zero balance) ---
                 self.failed_buys += 1 # Increment failed buy counter
-                logger.debug(f"Step {self.current_step}: Attempted Buy, but balance is {self.balance:.2f}. Holding.")
+                logger.debug(
+                    f"Step {self.current_step}: Attempted Buy, but balance is "
+                    f"{self.balance:.2f}. Holding."
+                )
     
     def _update_portfolio_value(self):
         """Update the portfolio value based on current balance and asset prices."""
@@ -559,8 +609,10 @@ class TradingEnvironment(Env):
         # Check for non-finite values immediately after calculation
         if not np.isfinite(self.asset_value) or not np.isfinite(self.portfolio_value):
             logger.error(
-                f"_update_portfolio_value: NON-FINITE VALUE DETECTED! (Step {self.current_step})"
-                f" Price={current_price:.4f}, Shares={self.shares_held:.8f}, Balance={self.balance:.4f}"
+                f"_update_portfolio_value: NON-FINITE VALUE DETECTED! "
+                f"(Step {self.current_step})"
+                f" Price={current_price:.4f}, Shares={self.shares_held:.8f}, "
+                f"Balance={self.balance:.4f}"
                 f" -> AssetVal={self.asset_value}, PortVal={self.portfolio_value}"
             )
         # --- END DETAILED LOGGING --- #
@@ -642,10 +694,10 @@ class TradingEnvironment(Env):
         if action in [0, 2]: # REMOVED: and fee_paid_this_step > 1e-9
             trade_penalty = -1.0
         
-        # <<< ADDED DEBUG LOG >>>
+        # <<< REMOVE DEBUG LOG >>>
         calculated_trade_penalty = trade_penalty * self.trade_penalty_weight
-        logger.debug(f"_calculate_reward: Trade Penalty Calc - Action={action}, BasePenalty={trade_penalty}, Weight={self.trade_penalty_weight:.6f}, Result={calculated_trade_penalty:.6f}")
-        # <<< END ADDED DEBUG LOG >>>
+        # logger.debug(f"_calculate_reward: Trade Penalty Calc - Action={action}, BasePenalty={trade_penalty}, Weight={self.trade_penalty_weight:.6f}, Result={calculated_trade_penalty:.6f}")
+        # <<< END REMOVE DEBUG LOG >>>
         
         reward_components['trade_penalty'] = calculated_trade_penalty # Use the calculated value
         # --- END NEW --- #
@@ -691,7 +743,9 @@ class TradingEnvironment(Env):
         # Always log for debugging purposes for now
         component_str = ', '.join([f"{k}: {v:.4f}" for k, v in reward_components.items()
                                   if k not in ['raw_total', 'total_reward'] and abs(v) > 1e-6]) # Only log non-zero components
-        logger.debug(f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}")
+        logger.debug(
+            f"Step {self.current_step} (EpStep {self.episode_step}) Action {action} -> Reward: {reward_components['total_reward']:.4f} | Components: {component_str}"
+        )
 
         return reward_components
     
@@ -839,9 +893,9 @@ class TradingEnvironment(Env):
             if len(portfolio_returns) > 1:
                 mean_portfolio_return = np.mean(portfolio_returns)
                 std_portfolio_return = np.std(portfolio_returns)
-                # <<< ADDED DEBUG LOG >>>
-                logger.debug(f"_get_info: Sharpe Calculation Inputs - MeanReturn={mean_portfolio_return:.6f}, StdReturn={std_portfolio_return:.6f}")
-                # <<< END ADDED DEBUG LOG >>>
+                # <<< REMOVE DEBUG LOG >>>
+                # logger.debug(f"_get_info: Sharpe Calculation Inputs - MeanReturn={mean_portfolio_return:.6f}, StdReturn={std_portfolio_return:.6f}")
+                # <<< END REMOVE DEBUG LOG >>>
                 if std_portfolio_return > 1e-9:
                     # Optional annualization (sqrt(252) for daily)
                     # info['sharpe_ratio_episode'] = (mean_portfolio_return / std_portfolio_return) * np.sqrt(252)
