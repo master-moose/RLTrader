@@ -547,36 +547,52 @@ class BestModelCallback(EvalCallback):
         self.patience = patience
         self.no_improvement_count = 0
         self.best_mean_reward = -np.inf
+
+        # --- Added Debug Log ---
+        logger.info(f"BestModelCallback initialized: eval_freq={self.eval_freq}, patience={self.patience}")
+        # -----------------------
     
     def _on_step(self) -> bool:
-        """
-        Run evaluation and check for early stopping.
-        
-        Returns:
-            Whether training should continue
-        """
+        # --- Added Debug Log ---
+        logger.debug(f"BestModelCallback _on_step START: n_calls={self.n_calls}, eval_freq={self.eval_freq}, last_mean_reward={self.last_mean_reward}")
+        # -----------------------
+
         continue_training = super()._on_step()
-        
+
+        # --- Added Debug Log ---
+        logger.debug(f"BestModelCallback _on_step AFTER super: continue={continue_training}, last_mean_reward={self.last_mean_reward}, no_improvement_count={self.no_improvement_count}")
+        # -----------------------
+
         # Check for early stopping if patience is set
         if continue_training and self.patience > 0 and \
-           self.last_mean_reward is not None:
-            if self.last_mean_reward > self.best_mean_reward:
-                self.best_mean_reward = self.last_mean_reward
+           self.last_mean_reward is not None and \
+           not np.isinf(self.last_mean_reward): # Check if eval has run at least once
+
+            # Note: self.last_mean_reward is updated by super()._on_step() only if eval runs
+            # We need to compare with the *previous* best mean reward
+            current_eval_reward = self.last_mean_reward # Reward from the *most recent* evaluation
+
+            if current_eval_reward > self.best_mean_reward:
+                # --- Added Debug Log ---
+                logger.debug(f"Evaluation improved: {current_eval_reward:.4f} > {self.best_mean_reward:.4f}. Resetting patience.")
+                # -----------------------
+                self.best_mean_reward = current_eval_reward
                 self.no_improvement_count = 0
             else:
                 self.no_improvement_count += 1
-                
+                # --- Added Debug Log ---
+                logger.debug(f"Evaluation did not improve ({current_eval_reward:.4f} <= {self.best_mean_reward:.4f}). Patience count: {self.no_improvement_count}/{self.patience}")
+                # -----------------------
+
                 if self.verbose > 0:
-                    logger.info(f"No improvement in evaluation for "
-                               f"{self.no_improvement_count} consecutive evaluations.")
-                
+                     # Keep existing info log for clarity
+                     logger.info(f"No improvement in evaluation for {self.no_improvement_count} consecutive evaluations.")
+
                 if self.no_improvement_count >= self.patience:
                     if self.verbose > 0:
-                        logger.info(f"Early stopping triggered after "
-                                   f"{self.no_improvement_count} evaluations "
-                                   f"without improvement.")
+                        logger.info(f"Early stopping triggered after {self.no_improvement_count} evaluations without improvement.")
                     return False  # Stop training
-        
+
         return continue_training
 
 
