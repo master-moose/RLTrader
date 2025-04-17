@@ -92,7 +92,7 @@ DEFAULT_CONFIG = {
     
     # Trading environment parameters
     "initial_balance": 10000.0,
-    "commission": 0.00075,
+    "commission": 0.0, # Updated to 0.0% Maker fee (BNB Discount)
     "reward_scaling": 1.0,
     
     # Other fixed params

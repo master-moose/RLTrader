@@ -493,7 +493,8 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         early_stopping_patience=tune_early_stopping_patience,
         checkpoint_save_path=checkpoint_dir,
         model_name=train_config["model_type"],
-        custom_callbacks=[TuneReportCallback()] # Add our reporter
+        custom_callbacks=[TuneReportCallback()],
+        curriculum_duration_fraction=0.0
     )
 
     # --- Training Loop --- #
@@ -722,8 +723,8 @@ def parse_args():
         help="Max position size as fraction of balance (0.0-1.0)"
     )
     env.add_argument(
-        "--commission", type=float, default=0.001,
-        help="Trading commission percentage (0.001 = 0.1%)"
+        "--commission", type=float, default=0.0, # Updated to 0.0% Maker fee (BNB Discount)
+        help="Trading commission percentage (0.0 = 0.0%)"
     )
     env.add_argument(
         "--max_steps", type=int, default=100000,
@@ -1417,7 +1418,8 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         early_stopping_patience=config["early_stopping_patience"],
         checkpoint_save_path=checkpoint_dir,
         model_name=config["model_type"],
-        custom_callbacks=[]
+        custom_callbacks=[],
+        curriculum_duration_fraction=0.0
     )
 
     # --- Training --- #
