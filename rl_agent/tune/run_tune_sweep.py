@@ -195,7 +195,7 @@ def define_search_space() -> Dict[str, Any]:
 
         # --- Additional RecurrentPPO Parameters ---
         # Entropy coefficient - Widen range slightly higher
-        "ent_coef": tune.loguniform(5e-4, 0.05),
+        "ent_coef": tune.loguniform(5e-3, 0.05),
         # Value function coefficient - Give slightly more weight
         "vf_coef": tune.uniform(0.4, 0.8),
         # PPO clip range - removed 0.3 as potentially too high
