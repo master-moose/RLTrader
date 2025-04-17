@@ -1304,7 +1304,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         keep_checkpoints=config["keep_checkpoints"],
         resource_check_freq=config["resource_check_freq"],
         metrics_log_freq=config["metrics_log_freq"],
-        early_stopping_patience=max(20, config["early_stopping_patience"]),
+        early_stopping_patience=config["early_stopping_patience"],
         checkpoint_save_path=checkpoint_dir,
         model_name=config["model_type"],
         custom_callbacks=[]
