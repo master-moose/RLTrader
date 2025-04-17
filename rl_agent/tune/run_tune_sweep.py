@@ -209,10 +209,10 @@ def define_search_space() -> Dict[str, Any]:
 
         # --- Reward Component Weights (Focus on stability and profit) --- #
         # INCREASED PENALTY RANGES SIGNIFICANTLY
-        "drawdown_penalty_weight": tune.uniform(0.5, 5.0), # Increased upper bound
-        "fee_penalty_weight": tune.uniform(0.5, 5.0),       # Increased upper bound
+        "drawdown_penalty_weight": tune.uniform(0.5, 2.0), # Reduced upper bound
+        "fee_penalty_weight": tune.uniform(0.5, 2.0),       # Reduced upper bound
         "idle_penalty_weight": 0.0, # Keep idle penalty at 0
-        "profit_bonus_weight": tune.uniform(0.5, 1.5), # Keep rewarding profit
+        "profit_bonus_weight": tune.uniform(0.75, 2.0), # Shifted range slightly higher
         "trade_penalty_weight": tune.uniform(0.1, 1.0),  # Increased range
     }
     
