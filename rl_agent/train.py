@@ -1377,20 +1377,29 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 def main():
     """Main function: parse args, setup, run train/eval."""
     args = parse_args()
-    config = args_to_config(args)
+    config = args_to_config(args) # Get config from args FIRST
 
     # --- Config Loading --- #
     if args.load_config is not None:
         if os.path.exists(args.load_config):
             print(f"Loading configuration from {args.load_config}")
             file_config = load_config(args.load_config)
-            cli_overrides = {k: v for k, v in vars(args).items() if v is not None and (not isinstance(v, bool) or v is True)}
-            if 'features' in cli_overrides and isinstance(cli_overrides['features'], list): pass
-            elif 'features' in file_config and isinstance(file_config['features'], str): file_config['features'] = file_config['features'].split(',')
-            file_config.update(cli_overrides)
-            config = file_config
-        else: print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
-    if 'features' in config and isinstance(config['features'], str): config['features'] = config['features'].split(',')
+            # Update the initial config with values from the loaded file
+            # This ensures file values overwrite defaults from args
+            config.update(file_config)
+            # Optional: Re-apply explicit CLI args if needed, but usually file takes precedence
+            # cli_overrides = {k: v for k, v in vars(args).items() if # logic to detect non-default CLI args}
+            # config.update(cli_overrides)
+            print(f"Config updated with values from {args.load_config}")
+        else:
+            print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
+
+    # Ensure features are a list (might be redundant now, but safe)
+    if 'features' in config and isinstance(config['features'], str):
+        config['features'] = config['features'].split(',')
+    elif 'features' in config and isinstance(config['features'], list):
+         # Ensure items are strings if read from JSON as list
+         config['features'] = [str(f) for f in config['features']]
 
     # --- Directory Setup --- #
     log_base_dir, model_name = config["log_dir"], config["model_name"]
