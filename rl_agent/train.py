@@ -1531,6 +1531,13 @@ def main():
     args = parse_args()
     config = args_to_config(args) # Get config from args FIRST
 
+    # <<< ADD EARLY DEBUG PRINTS >>>
+    print("\\n--- EARLY Debug ---")
+    print(f"IMMEDIATELY after parse_args, args.eval_only: {args.eval_only}")
+    print(f"IMMEDIATELY after args_to_config, config['eval_only']: {config.get('eval_only')}")
+    print("--- End EARLY Debug ---\\n")
+    # <<< END EARLY DEBUG PRINTS >>>
+
     # --- Config Loading --- #
     if args.load_config is not None:
         if os.path.exists(args.load_config):
