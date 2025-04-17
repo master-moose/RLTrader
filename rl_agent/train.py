@@ -1206,11 +1206,19 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     num_envs = config.get("num_envs", 1)
     train_logger.info(f"Creating {num_envs} parallel environment(s)...")
     base_seed = config.get("seed")
+    if base_seed is None:
+        base_seed = int(time.time()) # Generate a default seed if missing
+        train_logger.warning(f"Seed not found in config, using default seed: {base_seed}")
+        config["seed"] = base_seed # Optionally update config dict
+        set_seeds(base_seed) # Set seed explicitly if it was missing
 
     def make_single_train_env(rank: int, base_seed_val: Optional[int]):
         def _init():
             env_config = config.copy()
-            env_config["seed"] = base_seed_val + rank if base_seed_val is not None else None
+            instance_seed = base_seed_val
+            if instance_seed is not None:
+                 instance_seed += rank
+            env_config["seed"] = instance_seed
             env = create_env(config=env_config, is_eval=False)
             monitor_log = os.path.join(log_path, f'monitor_train_{rank}.csv')
             os.makedirs(os.path.dirname(monitor_log), exist_ok=True)
@@ -1220,7 +1228,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
-        env_id=make_single_train_env(rank=0, base_seed_val=base_seed),
+        env_id=make_single_train_env(rank=0, base_seed_val=base_seed), # Pass the potentially generated base_seed
         n_envs=num_envs, seed=None, vec_env_cls=vec_env_cls, env_kwargs=None
     )
 
@@ -1254,28 +1262,11 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     eval_env = None
     if config.get("val_data_path"):
         train_logger.info(f"Creating validation env: {config['val_data_path']}")
+        eval_env_seed_val = base_seed + num_envs if base_seed is not None else None
         eval_env = make_vec_env(
-            env_id=make_single_train_env(rank=0, base_seed_val=base_seed + num_envs),
+            env_id=make_single_train_env(rank=0, base_seed_val=eval_env_seed_val), # Use corrected seed value
             n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
-        if vec_normalize_stats_path:
-            train_logger.info("Applying loaded VecNorm stats to eval_env.")
-            eval_env = VecNormalize.load(vec_normalize_stats_path, eval_env)
-            eval_env.training = False; eval_env.norm_reward = False
-        else:
-            train_logger.info("Applying new VecNorm wrapper to eval_env.")
-            norm_obs_setting = config.get("norm_obs", "auto").lower()
-            if norm_obs_setting == "auto":
-                features = config.get("features", [])
-                if isinstance(features, str): features = features.split(",")
-                has_scaled = any("_scaled" in f for f in features)
-                should_norm_obs = not has_scaled
-            else: should_norm_obs = norm_obs_setting == "true"
-            train_logger.info(f"Eval VecNorm: norm_obs={should_norm_obs}")
-            eval_env = VecNormalize(
-                eval_env, norm_obs=should_norm_obs, norm_reward=False,
-                clip_obs=10., gamma=config["gamma"], training=False
-            )
 
     # --- Model Creation --- #
     if config.get("load_model"):
