@@ -617,8 +617,8 @@ class TradingEnvironment(Env):
             mean_return = np.mean(window_returns)
             std_return = np.std(window_returns)
             if std_return > ZERO_THRESHOLD:
-                 # Simple Sharpe (no risk-free rate)
-                 sharpe_ratio_rolling = mean_return / std_return
+                # Simple Sharpe (no risk-free rate)
+                sharpe_ratio_rolling = mean_return / std_return
         reward_components['sharpe_reward'] = sharpe_ratio_rolling * self.sharpe_reward_weight
 
         # 4. Fee Penalty (Re-enabled)
@@ -840,7 +840,7 @@ class TradingEnvironment(Env):
                 else:
                     info['sharpe_ratio_episode'] = 0.0
             else:
-                 info['sharpe_ratio_episode'] = 0.0
+                info['sharpe_ratio_episode'] = 0.0
                  
             # Rolling Sharpe (based on step returns used in reward)
             # This reflects the Sharpe value used in the reward calculation
@@ -849,12 +849,12 @@ class TradingEnvironment(Env):
                 mean_return = np.mean(window_returns)
                 std_return = np.std(window_returns)
                 if std_return > 1e-9:
-                     sharpe_ratio_rolling = mean_return / std_return
-                     info['sharpe_ratio_rolling'] = sharpe_ratio_rolling
+                    sharpe_ratio_rolling = mean_return / std_return
+                    info['sharpe_ratio_rolling'] = sharpe_ratio_rolling
                 else:
                     info['sharpe_ratio_rolling'] = 0.0
             else:
-                 info['sharpe_ratio_rolling'] = 0.0 # Not enough data yet
+                info['sharpe_ratio_rolling'] = 0.0 # Not enough data yet
         else:
             info['episode_return'] = 0.0
             info['sharpe_ratio_episode'] = 0.0
