@@ -641,7 +641,13 @@ class TradingEnvironment(Env):
         # Apply penalty if a buy (2) or sell (0) was the action
         if action in [0, 2]: # REMOVED: and fee_paid_this_step > 1e-9
             trade_penalty = -1.0
-        reward_components['trade_penalty'] = trade_penalty * self.trade_penalty_weight
+        
+        # <<< ADDED DEBUG LOG >>>
+        calculated_trade_penalty = trade_penalty * self.trade_penalty_weight
+        logger.debug(f"_calculate_reward: Trade Penalty Calc - Action={action}, BasePenalty={trade_penalty}, Weight={self.trade_penalty_weight:.6f}, Result={calculated_trade_penalty:.6f}")
+        # <<< END ADDED DEBUG LOG >>>
+        
+        reward_components['trade_penalty'] = calculated_trade_penalty # Use the calculated value
         # --- END NEW --- #
 
         # 7. Idle Penalty (Re-enabled)
@@ -833,6 +839,9 @@ class TradingEnvironment(Env):
             if len(portfolio_returns) > 1:
                 mean_portfolio_return = np.mean(portfolio_returns)
                 std_portfolio_return = np.std(portfolio_returns)
+                # <<< ADDED DEBUG LOG >>>
+                logger.debug(f"_get_info: Sharpe Calculation Inputs - MeanReturn={mean_portfolio_return:.6f}, StdReturn={std_portfolio_return:.6f}")
+                # <<< END ADDED DEBUG LOG >>>
                 if std_portfolio_return > 1e-9:
                     # Optional annualization (sqrt(252) for daily)
                     # info['sharpe_ratio_episode'] = (mean_portfolio_return / std_portfolio_return) * np.sqrt(252)
