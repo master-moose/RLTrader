@@ -638,8 +638,8 @@ class TradingEnvironment(Env):
 
         # --- NEW: 6. Direct Trade Penalty --- #
         trade_penalty = 0.0
-        # Apply penalty if a buy (2) or sell (0) occurred AND a fee was paid (indicating success)
-        if action in [0, 2] and fee_paid_this_step > 1e-9: 
+        # Apply penalty if a buy (2) or sell (0) was the action
+        if action in [0, 2]: # REMOVED: and fee_paid_this_step > 1e-9
             trade_penalty = -1.0
         reward_components['trade_penalty'] = trade_penalty * self.trade_penalty_weight
         # --- END NEW --- #
