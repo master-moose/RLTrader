@@ -380,13 +380,14 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     # --- Environment Creation --- #
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
 
-    def make_single_env(rank: int, base_seed: Optional[int]):
+    def make_single_env(rank: int, base_seed: Optional[int], is_eval_flag: bool = False):
         def _init():
             env_config = train_config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
-            env = create_env(config=env_config, is_eval=False)
-            monitor_log_path = os.path.join(log_dir, f'monitor_{rank}.csv')
+            env = create_env(config=env_config, is_eval=is_eval_flag)
+            log_suffix = f'monitor_eval_{rank}.csv' if is_eval_flag else f'monitor_{rank}.csv'
+            monitor_log_path = os.path.join(log_dir, log_suffix)
             ensure_dir_exists(os.path.dirname(monitor_log_path))
             env = Monitor(env, filename=monitor_log_path)
             return env
@@ -394,7 +395,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
-        env_id=make_single_env(rank=0, base_seed=seed),
+        env_id=make_single_env(rank=0, base_seed=seed, is_eval_flag=False),
         n_envs=num_envs,
         seed=None,
         vec_env_cls=vec_env_cls,
@@ -431,7 +432,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         eval_env_seed_val = seed + num_envs if seed is not None else None
         # Step 1: Create the base DummyVecEnv for evaluation
         raw_eval_env = make_vec_env(
-            env_id=make_single_env(rank=0, base_seed_val=eval_env_seed_val),
+            env_id=make_single_env(rank=0, base_seed=eval_env_seed_val, is_eval_flag=True),
             n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
 
