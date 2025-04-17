@@ -1539,6 +1539,11 @@ def main():
             if args.eval_freq is not None:
                  config['eval_freq'] = args.eval_freq
                  print(f"  Overriding eval_freq -> {config['eval_freq']}")
+            # <<< FIX: Ensure eval_only from CLI overrides file config >>>
+            if args.eval_only:
+                config['eval_only'] = True
+                print(f"  Ensuring eval_only is set to True based on CLI flag.")
+            # <<< END FIX >>>
 
         else:
             print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
@@ -1558,12 +1563,12 @@ def main():
     ensure_dir_exists(os.path.join(ckpt_base_dir, model_name))
 
     # --- Mode Selection --- #
-    # <<< ADD DEBUG PRINTS >>>
-    print("\\n--- Debugging Mode Selection ---")
-    print(f"Value of args.eval_only: {args.eval_only}")
-    print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
-    print("--- End Debugging ---\\n")
-    # <<< END DEBUG PRINTS >>>
+    # <<< REMOVE DEBUG PRINTS >>>
+    # print("\\n--- Debugging Mode Selection ---")
+    # print(f"Value of args.eval_only: {args.eval_only}")
+    # print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
+    # print("--- End Debugging ---\\n")
+    # <<< END REMOVE DEBUG PRINTS >>>
     if config.get("eval_only", False):
         print("Running in Evaluation-Only Mode")
         if config.get("load_model") is None: print("Error: --load_model required for eval"); sys.exit(1)
