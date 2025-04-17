@@ -181,6 +181,7 @@ def define_search_space() -> Dict[str, Any]:
     
     # Focus on stability parameters as requested in requirements
     # Refined based on previous sweep results (50/50 terminated, best reward -24k)
+    # Further refined based on long run showing extreme drawdowns
     search_space = {
         # Learning rates to try (log scale)
         # Narrowed range around previous best (1.7e-4)
@@ -207,12 +208,12 @@ def define_search_space() -> Dict[str, Any]:
         "max_grad_norm": tune.choice([0.5, 1.0]),
 
         # --- Reward Component Weights (Focus on stability and profit) --- #
-        # Reduced penalty ranges further
-        "drawdown_penalty_weight": tune.uniform(0.0, 0.5),
-        "fee_penalty_weight": tune.uniform(0.0, 0.5),
+        # INCREASED PENALTY RANGES SIGNIFICANTLY
+        "drawdown_penalty_weight": tune.uniform(0.5, 5.0), # Increased upper bound
+        "fee_penalty_weight": tune.uniform(0.5, 5.0),       # Increased upper bound
         "idle_penalty_weight": 0.0, # Keep idle penalty at 0
         "profit_bonus_weight": tune.uniform(0.5, 1.5), # Keep rewarding profit
-        "trade_penalty_weight": tune.uniform(0.0, 0.2), # Significantly reduced trade penalty
+        "trade_penalty_weight": tune.uniform(0.1, 1.0),  # Increased range
     }
     
     return search_space
