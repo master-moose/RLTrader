@@ -1270,8 +1270,11 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     """
     log_path = os.path.join(config["log_dir"], config["model_name"])
     ensure_dir_exists(log_path)
-    log_level = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
-    setup_logger(log_dir=log_path, log_level=log_level)
+    # Determine console level based on verbose setting
+    console_log_level = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
+    # Always set file level to DEBUG
+    file_log_level = logging.DEBUG 
+    setup_logger(log_dir=log_path, log_level=file_log_level, console_level=console_log_level)
     train_logger = logging.getLogger("rl_agent")
 
     sb3_log_path = os.path.join(log_path, "sb3_logs")
