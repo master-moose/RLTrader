@@ -1302,6 +1302,10 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     file_log_level = logging.DEBUG 
     setup_logger(log_dir=log_path, log_level=file_log_level, console_level=console_log_level)
     train_logger = logging.getLogger("rl_agent")
+    
+    # <<< Ensure environment logger inherits the DEBUG level >>>
+    logging.getLogger("rl_agent.environment").setLevel(logging.DEBUG)
+    # <<< End change >>>
 
     sb3_log_path = os.path.join(log_path, "sb3_logs")
     ensure_dir_exists(sb3_log_path)
@@ -1554,6 +1558,12 @@ def main():
     ensure_dir_exists(os.path.join(ckpt_base_dir, model_name))
 
     # --- Mode Selection --- #
+    # <<< ADD DEBUG PRINTS >>>
+    print("\\n--- Debugging Mode Selection ---")
+    print(f"Value of args.eval_only: {args.eval_only}")
+    print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
+    print("--- End Debugging ---\\n")
+    # <<< END DEBUG PRINTS >>>
     if config.get("eval_only", False):
         print("Running in Evaluation-Only Mode")
         if config.get("load_model") is None: print("Error: --load_model required for eval"); sys.exit(1)
