@@ -499,7 +499,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     model = create_model(env=train_env, config=train_config)
     model.set_logger(sb3_logger_instance)
 
-    # --- Callbacks Setup ---
+    # --- Callbacks Setup --- #
     rollout_steps = n_steps * num_envs
     base_eval_freq = train_config.get("eval_freq", 10000)
     effective_eval_freq = max(base_eval_freq, rollout_steps)
@@ -1522,15 +1522,26 @@ def main():
     # --- Config Loading --- #
     if args.load_config is not None:
         if os.path.exists(args.load_config):
-            print(f"Loading configuration from {args.load_config}")
+            print(f"Loading configuration from: {args.load_config}")
             file_config = load_config(args.load_config)
-            # Update the initial config with values from the loaded file
             # This ensures file values overwrite defaults from args
             config.update(file_config)
-            # Optional: Re-apply explicit CLI args if needed, but usually file takes precedence
-            # cli_overrides = {k: v for k, v in vars(args).items() if # logic to detect non-default CLI args}
-            # config.update(cli_overrides)
             print(f"Config updated with values from {args.load_config}")
+
+            # --- <<< START EDIT >>> ---
+            # Explicitly re-apply run-control args from CLI over loaded config
+            print("Applying CLI overrides for run control parameters...")
+            if args.total_timesteps is not None:
+                 config['total_timesteps'] = args.total_timesteps
+                 print(f"  Overriding total_timesteps -> {config['total_timesteps']}")
+            if args.eval_freq is not None:
+                 config['eval_freq'] = args.eval_freq
+                 print(f"  Overriding eval_freq -> {config['eval_freq']}")
+            # Always respect the CLI flag for early stopping
+            config['no_early_stopping'] = args.no_early_stopping
+            print(f"  Overriding no_early_stopping -> {config['no_early_stopping']}")
+            # --- <<< END EDIT >>> ---
+
         else:
             print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
 
