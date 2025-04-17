@@ -1203,14 +1203,14 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     check_resources(train_logger)
 
     # --- Environment Creation --- #
-    # --- FIX: Override num_envs for non-tune runs ---
-    is_tune_run = RAY_AVAILABLE and tune.is_session_enabled()
-    if not is_tune_run:
-        if config.get("num_envs", 1) != 1:
-            train_logger.warning(f"Overriding num_envs from config ({config.get('num_envs')}) to 1 for standalone run.")
-        config["num_envs"] = 1 # Force 1 env for standalone runs
-    num_envs = config.get("num_envs", 1)
-    # -------------------------------------------------
+    # --- Restore: Allow num_envs from config for non-tune runs ---
+    # is_tune_run = RAY_AVAILABLE and tune.is_session_enabled()
+    # if not is_tune_run:
+    #     if config.get("num_envs", 1) != 1:
+    #         train_logger.warning(f"Overriding num_envs from config ({config.get('num_envs')}) to 1 for standalone run.")
+    #     config["num_envs"] = 1 # Force 1 env for standalone runs
+    num_envs = config.get("num_envs", 1) # Get num_envs from config (or default to 1)
+    # -----------------------------------------------------------
     train_logger.info(f"Creating {num_envs} parallel environment(s)...")
     base_seed = config.get("seed")
     if base_seed is None:
