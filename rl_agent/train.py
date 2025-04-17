@@ -1248,6 +1248,14 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
                  "lstm_dqn": DQN, "qrdqn": QRDQN, "recurrentppo": RecurrentPPO}
     model = model_cls[config["model_type"]].load(model_path, env=test_env)
 
+    # <<< FIX: Explicitly set a new logger for evaluation >>>
+    eval_sb3_log_path = os.path.join(log_path, "sb3_eval_logs")
+    ensure_dir_exists(eval_sb3_log_path)
+    eval_sb3_logger = setup_sb3_logger(log_dir=eval_sb3_log_path, use_tensorboard=False) # Don't need TB for basic eval logs
+    model.set_logger(eval_sb3_logger)
+    eval_logger.info(f"Set new SB3 logger for evaluation model: {eval_sb3_log_path}")
+    # <<< END FIX >>>
+
     n_eval = config.get("n_eval_episodes", 5)
     eval_logger.info(f"Starting evaluation for {n_eval} episodes")
     mean_reward, portfolio_values, actions, rewards = evaluate_model(
