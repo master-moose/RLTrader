@@ -365,25 +365,48 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         gamma=train_config["gamma"]
     )
 
-    # --- Validation Environment Setup ---
+    # --- Validation Environment Setup --- #
     eval_env = None
     if train_config.get("val_data_path"):
         trial_logger.info(f"Creating validation env: {train_config['val_data_path']}")
-        eval_env = make_vec_env(
-            env_id=make_single_env(rank=0, base_seed=seed + num_envs),
-            n_envs=1,
-            seed=None,
-            vec_env_cls=DummyVecEnv,
-            env_kwargs=None
+        eval_env_seed_val = seed + num_envs if seed is not None else None
+        # Step 1: Create the base DummyVecEnv for evaluation
+        raw_eval_env = make_vec_env(
+            env_id=make_single_env(rank=0, base_seed_val=eval_env_seed_val),
+            n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
-        eval_env = VecNormalize(
-            eval_env,
-            norm_obs=should_norm_obs,
-            norm_reward=False,
-            clip_obs=10.,
-            gamma=train_config["gamma"],
-            training=False
-        )
+
+        # Step 2: Apply VecNormalize wrapper, mirroring train_env setup
+        if config.get("load_model"):
+            potential_stats = config["load_model"].replace(".zip", "_vecnormalize.pkl")
+            if os.path.exists(potential_stats):
+                trial_logger.info(f"Loading VecNorm stats: {potential_stats}")
+                eval_env = VecNormalize.load(potential_stats, raw_eval_env)
+                # Ensure it's set to inference mode
+                eval_env.training = False
+                eval_env.norm_reward = False
+            else:
+                trial_logger.warning("VecNorm stats not found. Creating fresh wrapper.")
+                norm_obs_setting = config.get("norm_obs", "auto").lower()
+                if norm_obs_setting == "auto":
+                    features = config.get("features", [])
+                    if isinstance(features, str): features = features.split(",")
+                    has_scaled = any("_scaled" in f for f in features)
+                    should_norm_obs = not has_scaled
+                else: should_norm_obs = norm_obs_setting == "true"
+                trial_logger.info(f"Eval VecNorm: norm_obs={should_norm_obs}")
+                eval_env = VecNormalize(
+                    raw_eval_env, # Wrap the raw eval env
+                    norm_obs=should_norm_obs,
+                    norm_reward=False, # Never normalize rewards for eval
+                    clip_obs=10.,
+                    gamma=config["gamma"],
+                    training=False # Set to False for evaluation
+                )
+        else:
+            trial_logger.warning("No load_model specified, skipping VecNorm for eval_env.")
+
+        trial_logger.info(f"Validation env wrapped with VecNormalize: {eval_env}")
 
     # --- Model Creation --- #
     trial_logger.info(f"Creating new {train_config['model_type']} model")
@@ -1270,10 +1293,39 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
     if config.get("val_data_path"):
         train_logger.info(f"Creating validation env: {config['val_data_path']}")
         eval_env_seed_val = base_seed + num_envs if base_seed is not None else None
-        eval_env = make_vec_env(
-            env_id=make_single_train_env(rank=0, base_seed_val=eval_env_seed_val), # Use corrected seed value
+        # Step 1: Create the base DummyVecEnv for evaluation
+        raw_eval_env = make_vec_env(
+            env_id=make_single_train_env(rank=0, base_seed_val=eval_env_seed_val),
             n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
+
+        # Step 2: Apply VecNormalize wrapper, mirroring train_env setup
+        if vec_normalize_stats_path:
+            train_logger.info("Applying loaded VecNorm stats to eval_env.")
+            eval_env = VecNormalize.load(vec_normalize_stats_path, raw_eval_env)
+            # Ensure it's set to inference mode
+            eval_env.training = False
+            eval_env.norm_reward = False
+        else:
+            train_logger.info("Applying new VecNorm wrapper to eval_env.")
+            # Determine norm_obs setting based on config (same logic as for train_env)
+            norm_obs_setting = config.get("norm_obs", "auto").lower()
+            if norm_obs_setting == "auto":
+                features = config.get("features", [])
+                if isinstance(features, str): features = features.split(",")
+                has_scaled = any("_scaled" in f for f in features)
+                should_norm_obs = not has_scaled
+            else: should_norm_obs = norm_obs_setting == "true"
+            train_logger.info(f"Eval VecNorm: norm_obs={should_norm_obs}")
+            eval_env = VecNormalize(
+                raw_eval_env, # Wrap the raw eval env
+                norm_obs=should_norm_obs,
+                norm_reward=False, # Never normalize rewards for eval
+                clip_obs=10.,
+                gamma=config["gamma"],
+                training=False # Set to False for evaluation
+            )
+        train_logger.info(f"Validation env wrapped with VecNormalize: {eval_env}")
 
     # --- Model Creation --- #
     if config.get("load_model"):
