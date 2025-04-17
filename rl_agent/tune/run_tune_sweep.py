@@ -210,7 +210,7 @@ def define_search_space() -> Dict[str, Any]:
         # Added portfolio_change_weight tuning
         "portfolio_change_weight": tune.uniform(1.0, 5.0),
         # Dramatically reduced trade penalty
-        "drawdown_penalty_weight": tune.uniform(0.5, 2.0), # Reduced upper bound
+        "drawdown_penalty_weight": tune.uniform(0.1, 0.5), # Reduced upper bound significantly
         "fee_penalty_weight": tune.uniform(0.5, 2.0),       # Reduced upper bound
         "idle_penalty_weight": 0.0, # Keep idle penalty at 0
         "profit_bonus_weight": tune.uniform(0.5, 1.5), # Reduced upper bound back
