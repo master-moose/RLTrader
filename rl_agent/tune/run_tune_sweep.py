@@ -63,7 +63,6 @@ DEFAULT_CONFIG = {
     "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,rsi_14_scaled,macd_hist_scaled,ema_9_scaled,ema_21_scaled",
     
     # Reward structure - simplified as requested
-    "portfolio_change_weight": 1.0,
     "drawdown_penalty_weight": 0.0,
     "sharpe_reward_weight": 0.0,
     "fee_penalty_weight": 0.0,
@@ -208,12 +207,14 @@ def define_search_space() -> Dict[str, Any]:
         "max_grad_norm": tune.choice([0.5, 1.0]),
 
         # --- Reward Component Weights (Focus on stability and profit) --- #
-        # INCREASED PENALTY RANGES SIGNIFICANTLY
+        # Added portfolio_change_weight tuning
+        "portfolio_change_weight": tune.uniform(1.0, 5.0),
+        # Dramatically reduced trade penalty
         "drawdown_penalty_weight": tune.uniform(0.5, 2.0), # Reduced upper bound
         "fee_penalty_weight": tune.uniform(0.5, 2.0),       # Reduced upper bound
         "idle_penalty_weight": 0.0, # Keep idle penalty at 0
         "profit_bonus_weight": tune.uniform(0.5, 1.5), # Reduced upper bound back
-        "trade_penalty_weight": tune.uniform(0.5, 3.0),  # Increased range significantly
+        "trade_penalty_weight": tune.uniform(0.01, 0.5),  # Dramatically reduced range
     }
     
     return search_space
