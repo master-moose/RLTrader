@@ -295,8 +295,8 @@ class TradingEnvironment(Env):
 
         # Check for early stopping based on drawdown at step t
         drawdown_terminated = False # Flag specific to drawdown termination
-        # Using 0.95 as a slightly less aggressive threshold
-        if self.max_drawdown > 0.95:
+        # Using 0.50 as the new termination threshold
+        if self.max_drawdown > 0.50:
             drawdown_terminated = True
             # Log termination reason later in the step
 
@@ -335,7 +335,7 @@ class TradingEnvironment(Env):
         termination_reason = "None"
         if terminated:
             if drawdown_terminated:
-                termination_reason = f"Drawdown > 95% ({self.max_drawdown:.2%})"
+                termination_reason = f"Drawdown > 50% ({self.max_drawdown:.2%})"
             elif is_end_of_data:
                 termination_reason = "End of Data"
         elif truncated:

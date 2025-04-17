@@ -212,8 +212,8 @@ def define_search_space() -> Dict[str, Any]:
         "drawdown_penalty_weight": tune.uniform(0.5, 2.0), # Reduced upper bound
         "fee_penalty_weight": tune.uniform(0.5, 2.0),       # Reduced upper bound
         "idle_penalty_weight": 0.0, # Keep idle penalty at 0
-        "profit_bonus_weight": tune.uniform(0.75, 2.0), # Shifted range slightly higher
-        "trade_penalty_weight": tune.uniform(0.1, 1.0),  # Increased range
+        "profit_bonus_weight": tune.uniform(0.5, 1.5), # Reduced upper bound back
+        "trade_penalty_weight": tune.uniform(0.5, 3.0),  # Increased range significantly
     }
     
     return search_space
