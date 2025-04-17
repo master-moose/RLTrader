@@ -197,7 +197,7 @@ def define_search_space() -> Dict[str, Any]:
         # Entropy coefficient - Widen range slightly higher
         "ent_coef": tune.loguniform(5e-3, 0.05),
         # Value function coefficient - Give slightly more weight
-        "vf_coef": tune.uniform(0.4, 0.8),
+        "vf_coef": tune.uniform(0.5, 1.0),
         # PPO clip range - removed 0.3 as potentially too high
         "clip_range": tune.choice([0.1, 0.2]),
         # GAE lambda - removed 0.99
