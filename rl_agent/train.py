@@ -1528,8 +1528,6 @@ def main():
             config.update(file_config)
             print(f"Config updated with values from {args.load_config}")
 
-            # --- <<< START EDIT >>> ---
-            # Explicitly re-apply run-control args from CLI over loaded config
             print("Applying CLI overrides for run control parameters...")
             if args.total_timesteps is not None:
                  config['total_timesteps'] = args.total_timesteps
@@ -1537,10 +1535,6 @@ def main():
             if args.eval_freq is not None:
                  config['eval_freq'] = args.eval_freq
                  print(f"  Overriding eval_freq -> {config['eval_freq']}")
-            # Always respect the CLI flag for early stopping
-            config['no_early_stopping'] = args.no_early_stopping
-            print(f"  Overriding no_early_stopping -> {config['no_early_stopping']}")
-            # --- <<< END EDIT >>> ---
 
         else:
             print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
