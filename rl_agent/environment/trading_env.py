@@ -636,6 +636,7 @@ class TradingEnvironment(Env):
         #          consistency_penalty = -1.0
         # reward_components['consistency_penalty'] = consistency_penalty * self.consistency_penalty_weight
 
+        logger.debug(f"TRADE_PENALTY_CHECK: self.trade_penalty_weight = {self.trade_penalty_weight}") # ADDED
         # --- NEW: 6. Direct Trade Penalty --- #
         trade_penalty = 0.0
         # Apply penalty if a buy (2) or sell (0) was the action
