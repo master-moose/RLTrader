@@ -88,9 +88,10 @@ class TuneReportCallback(BaseCallback):
     def __init__(self):
         super().__init__(verbose=0)
         self.last_explained_variance = 0.0 # Store last known variance
-        self.last_max_drawdown = 0.0 # Store last known max drawdown from env info
         self.last_sharpe_ratio = 0.0 # Store last known sharpe ratio from env info
         self.last_episode_return = 0.0 # Store last known episode return from env info
+        self.last_calmar_ratio = 0.0 # Store last known calmar ratio
+        self.last_sortino_ratio = 0.0 # Store last known sortino ratio
 
     def _on_init(self) -> None:
         """Ensure the logger is available."""
@@ -103,16 +104,17 @@ class TuneReportCallback(BaseCallback):
             "TuneReportCallback initialized - reporting metrics at rollout end."
         )
 
-    def _normalize_and_combine_metrics(self, reward, explained_variance, max_drawdown, sharpe_ratio, episode_return):
+    def _normalize_and_combine_metrics(self, reward, explained_variance, sharpe_ratio, episode_return, calmar_ratio, sortino_ratio):
         """
-        Create a normalized combined score weighting reward, variance, drawdown, sharpe, and episode return.
+        Create a normalized combined score weighting various performance metrics.
 
         Args:
             reward: The mean reward value.
-            explained_variance: Explained variance, typically between -1 and 1.
-            max_drawdown: Maximum drawdown in the episode (0 to 1).
+            explained_variance: Explained variance (-1 to 1).
             sharpe_ratio: Sharpe ratio for the episode.
-            episode_return: Episode return as a fraction of initial balance.
+            episode_return: Episode return as a fraction.
+            calmar_ratio: Calmar ratio for the episode.
+            sortino_ratio: Sortino ratio for the episode.
 
         Returns:
             A combined normalized score between 0 and 1 (higher is better).
@@ -122,45 +124,40 @@ class TuneReportCallback(BaseCallback):
             reward = 0.0
         if explained_variance is None or not isinstance(explained_variance, (int, float, np.number)):
             explained_variance = 0.0
-        if max_drawdown is None or not isinstance(max_drawdown, (int, float, np.number)) or not (0.0 <= max_drawdown <= 1.0):
-            max_drawdown = 1.0 # Penalize fully if invalid
         if sharpe_ratio is None or not isinstance(sharpe_ratio, (int, float, np.number)) or not np.isfinite(sharpe_ratio):
             sharpe_ratio = 0.0 # Neutral Sharpe if invalid/infinite
         if episode_return is None or not isinstance(episode_return, (int, float, np.number)) or not np.isfinite(episode_return):
             episode_return = 0.0 # Neutral return if invalid/infinite
+        if calmar_ratio is None or not isinstance(calmar_ratio, (int, float, np.number)) or not np.isfinite(calmar_ratio):
+            calmar_ratio = 0.0 # Neutral Calmar if invalid/infinite
+        if sortino_ratio is None or not isinstance(sortino_ratio, (int, float, np.number)) or not np.isfinite(sortino_ratio):
+            sortino_ratio = 0.0 # Neutral Sortino if invalid/infinite
 
         # --- Normalization (aiming for values roughly in [-1, 1]) --- #
-        # Normalize reward using tanh, scale denominator as needed
         normalized_reward = np.tanh(reward / 1000.0)
-
-        # Clip variance to [-1, 1]
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-
-        # Normalize Sharpe ratio using tanh (e.g., assuming typical range -5 to 5)
-        # Adjust the divisor (e.g., 5.0) based on expected Sharpe range
-        normalized_sharpe = np.tanh(sharpe_ratio / 5.0)
-
-        # Max drawdown is already 0-1, higher is worse. We want to reward (1 - drawdown).
-        normalized_drawdown_component = 1.0 - max_drawdown
-
-        # Normalize episode return (fractional) using tanh
+        normalized_sharpe = np.tanh(sharpe_ratio / 5.0) # Divisor 5 assumes typical range -5 to 5
         normalized_return = np.tanh(episode_return / 2.0) # Scale by 2
+        normalized_calmar = np.tanh(calmar_ratio / 2.0) # Divisor 2 assumes typical range -2 to 2
+        normalized_sortino = np.tanh(sortino_ratio / 3.0) # Divisor 3 assumes typical range -3 to 3
 
         # --- Weighted Combination --- #
-        # Define weights (ensure they sum to 1.0 or normalize later)
+        # Adjusted weights for new set of metrics
         w_reward = 0.25
-        w_variance = 0.10
-        w_sharpe = 0.25
-        w_drawdown = 0.20
-        w_return = 0.20 # Weight for episode return
+        w_variance = 0.10 # Reduced weight for variance
+        w_sharpe = 0.15
+        w_sortino = 0.25
+        w_calmar = 0.25
+        w_return = 0.0 # Removing direct return weight, focus on risk-adjusted
 
         # Calculate weighted sum
         combined_score_raw = (
             w_reward * normalized_reward
             + w_variance * normalized_variance
             + w_sharpe * normalized_sharpe
-            + w_drawdown * normalized_drawdown_component
-            + w_return * normalized_return # Add return component
+            + w_return * normalized_return
+            + w_calmar * normalized_calmar   # Added Calmar
+            + w_sortino * normalized_sortino # Added Sortino
         )
 
         # --- Shift to [0, 1] range --- #
@@ -175,7 +172,7 @@ class TuneReportCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         """
-        Update the last known metrics (variance, drawdown, sharpe) after each training step.
+        Update the last known metrics (variance, sharpe, return) after each training step.
         Try fetching directly from the logger's internal dictionary or locals.
         Also fetches risk metrics from the environment info dictionary.
         """
@@ -198,22 +195,12 @@ class TuneReportCallback(BaseCallback):
                             except (ValueError, TypeError, KeyError):
                                 pass
 
-        # --- Update Drawdown, Sharpe, and Return from Env Info --- #
+        # --- Update Sharpe, Return, and Calmar/Sortino from Env Info --- #
         if hasattr(self, 'locals') and self.locals and 'infos' in self.locals and self.locals['infos']:
             # Assuming VecEnv, get info from the first environment
             info = self.locals['infos'][0]
 
-            # Get max_drawdown (key name from TradingEnvironment)
-            if 'max_drawdown' in info:
-                try:
-                    drawdown_val = float(info['max_drawdown'])
-                    if 0.0 <= drawdown_val <= 1.0:
-                        self.last_max_drawdown = drawdown_val
-                except (ValueError, TypeError):
-                    pass # Keep last valid value if conversion fails
-
             # Get Sharpe ratio (key name from TradingEnvironment)
-            # Using 'sharpe_ratio_episode' as that seems to be the key based on logs
             sharpe_key = 'sharpe_ratio_episode'
             if sharpe_key in info:
                 try:
@@ -233,13 +220,33 @@ class TuneReportCallback(BaseCallback):
                 except (ValueError, TypeError):
                     pass # Keep last valid value if conversion fails
 
+            # Get Calmar ratio
+            calmar_key = 'calmar_ratio'
+            if calmar_key in info:
+                try:
+                    calmar_val = float(info[calmar_key])
+                    if np.isfinite(calmar_val):
+                        self.last_calmar_ratio = calmar_val
+                except (ValueError, TypeError):
+                    pass # Keep last valid value
+
+            # Get Sortino ratio
+            sortino_key = 'sortino_ratio'
+            if sortino_key in info:
+                try:
+                    sortino_val = float(info[sortino_key])
+                    if np.isfinite(sortino_val):
+                        self.last_sortino_ratio = sortino_val
+                except (ValueError, TypeError):
+                    pass # Keep last valid value
+
         return True
 
     def _on_rollout_end(self) -> None:
         """
         Report metrics at the end of each rollout.
         Uses ep_rew_mean from ep_info_buffer and fetches the most recent
-        explained_variance, max_drawdown, and sharpe_ratio stored by _on_step.
+        explained_variance, sharpe_ratio, and episode return stored by _on_step.
         """
         callback_logger = logging.getLogger("rl_agent")
         callback_logger.debug(
@@ -263,29 +270,31 @@ class TuneReportCallback(BaseCallback):
 
         # --- Use the metrics stored from _on_step --- #
         variance_value = self.last_explained_variance
-        drawdown_value = self.last_max_drawdown
         sharpe_value = self.last_sharpe_ratio
         return_value = self.last_episode_return # Get stored episode return
-        callback_logger.debug(f"Using stored variance: {variance_value:.4f}, drawdown: {drawdown_value:.4f}, sharpe: {sharpe_value:.4f}, return: {return_value:.4f}")
+        calmar_value = self.last_calmar_ratio   # Get stored Calmar
+        sortino_value = self.last_sortino_ratio # Get stored Sortino
+        callback_logger.debug(f"Using stored metrics: var={variance_value:.4f}, shp={sharpe_value:.4f}, ret={return_value:.4f}, cal={calmar_value:.4f}, sor={sortino_value:.4f}")
 
         # --- Prepare and Report Metrics --- #
         # Use the updated combined score calculation
-        combined_score = self._normalize_and_combine_metrics(reward_value, variance_value, drawdown_value, sharpe_value, return_value)
+        combined_score = self._normalize_and_combine_metrics(reward_value, variance_value, sharpe_value, return_value, calmar_value, sortino_value)
 
         metrics_to_report = {
             "eval/mean_reward": reward_value,
             "eval/explained_variance": variance_value,
-            "eval/max_drawdown": drawdown_value, # Report drawdown
             "eval/sharpe_ratio": sharpe_value, # Report sharpe
             "eval/episode_return": return_value, # Report episode return
+            "eval/calmar_ratio": calmar_value,   # Report Calmar
+            "eval/sortino_ratio": sortino_value, # Report Sortino
             "eval/combined_score": combined_score, # Report new combined score
             "timesteps": self.num_timesteps,
         }
         callback_logger.debug(
              f"Reporting (step {self.num_timesteps}): "
              f"reward={reward_value:.4f}, var={variance_value:.4f}, "
-             f"dd={drawdown_value:.4f}, shp={sharpe_value:.4f}, "
-             f"return={return_value:.4f}, combined={combined_score:.4f}"
+             f"shp={sharpe_value:.4f}, ret={return_value:.4f}, "
+             f"cal={calmar_value:.4f}, sor={sortino_value:.4f}, combined={combined_score:.4f}"
          )
 
         # Report to Ray Tune
@@ -558,7 +567,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                     except (ValueError, TypeError): last_variance = 0.0
 
                 temp_cb = TuneReportCallback()
-                combo_score = temp_cb._normalize_and_combine_metrics(last_reward, last_variance, 0.0, 0.0, 0.0)
+                combo_score = temp_cb._normalize_and_combine_metrics(last_reward, last_variance, 0.0, 0.0, 0.0, 0.0)
                 failure_metrics["eval/mean_reward"] = last_reward
                 failure_metrics["eval/explained_variance"] = last_variance
                 failure_metrics["eval/combined_score"] = combo_score
@@ -646,7 +655,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         final_summary_metrics["final_logger_explained_variance"] = final_variance
 
         temp_cb = TuneReportCallback()
-        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0)
+        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0)
         final_summary_metrics["eval/combined_score"] = float(final_combined)
 
     trial_logger.info("Final Summary Metrics:")
@@ -1574,7 +1583,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         final_metrics["eval/explained_variance"] = final_variance
 
         temp_cb = TuneReportCallback()
-        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0)
+        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0)
         final_metrics["eval/combined_score"] = float(final_combined)
 
     if RAY_AVAILABLE and tune.is_session_enabled():
