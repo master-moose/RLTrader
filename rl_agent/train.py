@@ -746,7 +746,27 @@ def parse_args():
     )
     data.add_argument(
         "--features", type=str,
-        default="close,volume,open,high,low,rsi_14,macd,ema_9,ema_21",
+        default=(
+            "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,sma_7_scaled,sma_25_scaled,sma_99_scaled,"
+            "ema_9_scaled,ema_21_scaled,rsi_14_scaled,macd_scaled,macd_signal_scaled,macd_hist_scaled,"
+            "atr_14_scaled,true_volatility_scaled,volume_sma_20_scaled,volume_ratio_scaled,price_sma_ratio_scaled,"
+            "sma_cross_signal_scaled,bb_middle_scaled,bb_upper_scaled,bb_lower_scaled,bb_width_scaled,bb_pct_b_scaled,"
+            "open_scaled_15m,high_scaled_15m,low_scaled_15m,close_scaled_15m,volume_scaled_15m,sma_7_scaled_15m,"
+            "sma_25_scaled_15m,sma_99_scaled_15m,ema_9_scaled_15m,ema_21_scaled_15m,rsi_14_scaled_15m,macd_scaled_15m,"
+            "macd_signal_scaled_15m,macd_hist_scaled_15m,atr_14_scaled_15m,true_volatility_scaled_15m,"
+            "volume_sma_20_scaled_15m,volume_ratio_scaled_15m,price_sma_ratio_scaled_15m,sma_cross_signal_scaled_15m,"
+            "bb_middle_scaled_15m,bb_upper_scaled_15m,bb_lower_scaled_15m,bb_width_scaled_15m,bb_pct_b_scaled_15m,"
+            "open_scaled_4h,high_scaled_4h,low_scaled_4h,close_scaled_4h,volume_scaled_4h,sma_7_scaled_4h,"
+            "sma_25_scaled_4h,sma_99_scaled_4h,ema_9_scaled_4h,ema_21_scaled_4h,rsi_14_scaled_4h,macd_scaled_4h,"
+            "macd_signal_scaled_4h,macd_hist_scaled_4h,atr_14_scaled_4h,true_volatility_scaled_4h,"
+            "volume_sma_20_scaled_4h,volume_ratio_scaled_4h,price_sma_ratio_scaled_4h,sma_cross_signal_scaled_4h,"
+            "bb_middle_scaled_4h,bb_upper_scaled_4h,bb_lower_scaled_4h,bb_width_scaled_4h,bb_pct_b_scaled_4h,"
+            "open_scaled_1d,high_scaled_1d,low_scaled_1d,close_scaled_1d,volume_scaled_1d,sma_7_scaled_1d,"
+            "sma_25_scaled_1d,sma_99_scaled_1d,ema_9_scaled_1d,ema_21_scaled_1d,rsi_14_scaled_1d,macd_scaled_1d,"
+            "macd_signal_scaled_1d,macd_hist_scaled_1d,atr_14_scaled_1d,true_volatility_scaled_1d,"
+            "volume_sma_20_scaled_1d,volume_ratio_scaled_1d,price_sma_ratio_scaled_1d,sma_cross_signal_scaled_1d,"
+            "bb_middle_scaled_1d,bb_upper_scaled_1d,bb_lower_scaled_1d,bb_width_scaled_1d,bb_pct_b_scaled_1d"
+        ),
         help="Comma-separated list of features/indicators to use"
     )
 
@@ -939,9 +959,14 @@ def create_env(
         data = data_override
     else:
         data_path = config["data_path"]
-        data_key = config.get("data_key")
-        data_loader = DataLoader(data_path=data_path, data_key=data_key)
-        data = data_loader.load_data()
+        # Load data for each timeframe
+        data_15m = DataLoader(data_path=data_path, data_key="/15m").load_data()
+        data_4h = DataLoader(data_path=data_path, data_key="/4h").load_data()
+        data_1d = DataLoader(data_path=data_path, data_key="/1d").load_data()
+
+        # Combine data into a single DataFrame
+        # Assuming the data can be aligned on a common index like timestamp
+        data = data_15m.join(data_4h, rsuffix='_4h').join(data_1d, rsuffix='_1d')
 
     env_kwargs = {
         "data": data,
