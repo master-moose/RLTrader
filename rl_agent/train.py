@@ -1261,7 +1261,21 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
 
     # --- Load Model --- #
     model_type_str = config.get("model_type", "ppo").lower()
-    ModelClass = get_model_class(model_type_str)
+    # Define the mapping from model type string to class
+    model_cls_map = {
+        "dqn": DQN,
+        "ppo": PPO,
+        "a2c": A2C,
+        "sac": SAC,
+        "lstm_dqn": DQN, # LSTM handled by feature extractor
+        "qrdqn": QRDQN,
+        "recurrentppo": RecurrentPPO
+    }
+    if model_type_str not in model_cls_map:
+        eval_logger.error(f"Unknown model type '{model_type_str}' specified in config.")
+        raise ValueError(f"Unknown model type: {model_type_str}")
+    ModelClass = model_cls_map[model_type_str]
+    
     try:
         model = ModelClass.load(model_path, env=test_env, device=config.get("device", "auto"))
         eval_logger.info(f"Model {model_path} loaded successfully.")
@@ -1274,8 +1288,9 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
 
     n_eval = config.get("n_eval_episodes", 5)
     eval_logger.info(f"Evaluating model for {n_eval} episodes...")
-    mean_reward, portfolio_values, actions, rewards = run_evaluation_episodes(
-        model=model, env=test_env, n_episodes=n_eval, deterministic=True
+    # Call the existing evaluate_model function
+    mean_reward, portfolio_values, actions, rewards = evaluate_model(
+        model=model, env=test_env, config=config, n_episodes=n_eval, deterministic=True
     )
     eval_logger.info(f"Evaluation complete. Mean reward: {mean_reward:.4f}")
 
