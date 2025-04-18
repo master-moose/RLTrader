@@ -357,11 +357,17 @@ class TradingEnvironment(Env):
         elif truncated:
             termination_reason = f"Max Steps Reached ({self.max_steps})"
 
-        # if terminated or truncated: # Commenting out this log message
-        #     logger.info(
-        #         f"Episode End (Step {self.current_step}, EpStep {self.episode_step}): "
-        #         f"Terminated={terminated}, Truncated={truncated}, Reason: {termination_reason}"
-        #     )
+        # --- EPISODE SUMMARY LOG ---
+        if terminated or truncated:
+            logger.info(
+                f"""[EPISODE END] Step {self.current_step} | EpStep {self.episode_step}\n"
+                f"Terminated: {terminated} | Truncated: {truncated} | Reason: {termination_reason}\n"
+                f"Final Portfolio Value: {self.portfolio_value:.2f}\n"
+                f"Profit: {self.portfolio_value - self.initial_balance:.2f}\n"
+                f"Episode Return: {info.get('episode_return', 0.0):.4f}\n"
+                f"Total Trades: {self.total_trades} | Buys: {self.total_buys} | Sells: {self.total_sells}\n"
+                f"Max Drawdown: {self.max_drawdown:.2%}"
+            )
         # --- End Log ---
 
         # Decay exploration bonus for the next step
