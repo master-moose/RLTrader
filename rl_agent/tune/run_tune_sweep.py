@@ -236,6 +236,9 @@ def run_tune_experiment(args):
         base_config = DEFAULT_CONFIG.copy()
         print("Using default base configuration")
     
+    # Override base config with CLI arguments
+    base_config.update(vars(args))
+    
     # Add command line args to config
     # Make sure paths are absolute for Ray workers
     if args.data_path:

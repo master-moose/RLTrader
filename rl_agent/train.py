@@ -1673,6 +1673,9 @@ def main():
          # Ensure items are strings if read from JSON as list
          config['features'] = [str(f) for f in config['features']]
 
+    # Override with CLI arguments
+    config.update(vars(args))
+
     # --- Directory Setup --- #
     log_base_dir, model_name = config["log_dir"], config["model_name"]
     ckpt_base_dir = config["checkpoint_dir"]

@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import traceback
+import json
 
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -125,6 +126,14 @@ def parse_args():
     
     # Add base_config (None) for compatibility
     setattr(arg_obj, "base_config", None)
+    
+    # Override any loaded config with CLI arguments
+    if hasattr(arg_obj, 'base_config') and arg_obj.base_config:
+        with open(arg_obj.base_config, 'r') as f:
+            loaded_config = json.load(f)
+        loaded_config.update(vars(args))
+        for key, value in loaded_config.items():
+            setattr(arg_obj, key, value)
     
     return arg_obj
 
