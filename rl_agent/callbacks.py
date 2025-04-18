@@ -452,19 +452,23 @@ class EpisodeInfoCallback(BaseCallback):
                 total_trades = info.get("total_trades", "N/A")
                 episode_return = info.get("episode_return", 0.0) # This is a fraction
                 sharpe_ratio = info.get("sharpe_ratio_episode", "N/A")
+                sharpe_rolling = info.get("sharpe_ratio_rolling", "N/A")
+                calmar_ratio = info.get("calmar_ratio", "N/A")
+                sortino_ratio = info.get("sortino_ratio", "N/A")
 
                 # Format values for logging
                 reward_str = f"{ep_reward:.2f}" if isinstance(ep_reward, (int, float)) else str(ep_reward)
                 # --- SAFELY FORMAT RETURN (Handling NaN/Inf) --- #
                 return_val = info.get("episode_return", None)
-                # Check if it's a number AND finite before formatting
                 if isinstance(return_val, (int, float)) and np.isfinite(return_val):
                     return_str = f"{return_val * 100:.2f}%"
                 else:
-                    # If not a number or if it's NaN/Infinity, show N/A
-                    return_str = "N/A" 
+                    return_str = "N/A"
                 # --- END SAFE FORMAT --- #
                 sharpe_str = f"{sharpe_ratio:.2f}" if isinstance(sharpe_ratio, (int, float)) else str(sharpe_ratio)
+                sharpe_rolling_str = f"{sharpe_rolling:.2f}" if isinstance(sharpe_rolling, (int, float)) else str(sharpe_rolling)
+                calmar_str = f"{calmar_ratio:.4f}" if isinstance(calmar_ratio, (int, float)) else str(calmar_ratio)
+                sortino_str = f"{sortino_ratio:.4f}" if isinstance(sortino_ratio, (int, float)) else str(sortino_ratio)
                 trades_str = str(total_trades)
                 length_str = str(ep_length)
 
@@ -472,22 +476,20 @@ class EpisodeInfoCallback(BaseCallback):
                 cumulative_components_str = ""
                 if 'cumulative_reward_components' in info:
                     cumulative_components = info['cumulative_reward_components']
-                    # Filter out zero components for brevity - REMOVED FILTER
-                    components_to_log = {k: v for k, v in cumulative_components.items() } # REMOVED: if abs(v) > 1e-6
+                    components_to_log = {k: v for k, v in cumulative_components.items() }
                     if components_to_log:
-                        # Format components as a string
                         components_str = ', '.join([f"{k}: {v:.4f}" for k, v in components_to_log.items()])
                         cumulative_components_str = f"\nCum. Rewards: {components_str}"
-                # --- End Extract --- 
+                # --- End Extract ---
 
-                # Format log message using cumulative rewards
+                # Format log message using all tracked ratios
                 log_str = (
                     f"Episode {self.episode_count} finished: "
                     f"Reward={reward_str}, Length={length_str}, "
                     f"Return={return_str}, Sharpe={sharpe_str}, "
-                    f"Trades={trades_str}{cumulative_components_str}" # Use cumulative string
+                    f"Sharpe(rolling)={sharpe_rolling_str}, Calmar={calmar_str}, Sortino={sortino_str}, "
+                    f"Trades={trades_str}{cumulative_components_str}"
                 )
-                # Use the renamed logger instance
                 self._info_logger.info(log_str)
 
         return True
