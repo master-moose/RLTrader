@@ -131,8 +131,14 @@ class TcnPolicy(ActorCriticPolicy):
         self.mlp_extractor.latent_dim_pi = 64  # Output dim of policy net in TcnExtractor
         self.mlp_extractor.latent_dim_vf = 64  # Output dim of value net in TcnExtractor
         
-        # 4. Create action net (for policy output) - same as in ActorCriticPolicy
-        action_net_output_dim = self.action_dist.proba_distribution_net_output_dim(self.action_dim)
+        # 4. Create action net (for policy output) - handle different distribution types
+        # For discrete actions, the output dim is equal to the number of actions
+        if isinstance(self.action_space, gym.spaces.Discrete):
+            action_net_output_dim = self.action_space.n
+        else:
+            # For continuous actions, usually action_dim is the output size
+            action_net_output_dim = self.action_dim
+        
         self.action_net = nn.Linear(self.mlp_extractor.latent_dim_pi, action_net_output_dim)
         
         # 5. Create value net (for value function) - same as in ActorCriticPolicy
