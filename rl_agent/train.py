@@ -1212,12 +1212,24 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
     data_key = args.data_key
 
     # --- Environment Setup --- #
-    eval_env_config = extract_env_config(config)
-    # Override data path for evaluation
+    # Create eval_env_config by extracting relevant keys from the main config
+    env_keys = [
+        "features", "sequence_length", "initial_balance", "commission",
+        "reward_scaling", "window_size", "max_position", "max_steps",
+        "random_start",
+        # Reward component keys
+        "portfolio_change_weight", "drawdown_penalty_weight", "sharpe_reward_weight",
+        "fee_penalty_weight", "benchmark_reward_weight", "consistency_penalty_weight",
+        "idle_penalty_weight", "profit_bonus_weight", "exploration_bonus_weight",
+        "sharpe_window", "consistency_threshold", "idle_threshold",
+        "exploration_start", "exploration_end", "exploration_decay_rate",
+        "trade_penalty_weight"
+    ]
+    eval_env_config = {k: config[k] for k in env_keys if k in config}
+    
+    # Override data path and key for evaluation
     eval_env_config["data_path"] = test_data_path
     eval_env_config["data_key"] = data_key
-    # Use a distinct seed for evaluation if available, otherwise None
-    eval_seed = config.get("seed") + 1000 if config.get("seed") is not None else None
 
     eval_logger.info(f"Creating evaluation environment with data: {test_data_path}")
     test_env = make_vec_env(
