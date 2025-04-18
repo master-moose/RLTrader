@@ -1543,24 +1543,11 @@ def main():
         if os.path.exists(args.load_config):
             print(f"Loading configuration from: {args.load_config}")
             file_config = load_config(args.load_config)
-            # This ensures file values overwrite defaults from args
+            # Update config with file values first
             config.update(file_config)
             print(f"Config updated with values from {args.load_config}")
 
-            print("Applying CLI overrides for run control parameters...")
-            if args.total_timesteps is not None:
-                 config['total_timesteps'] = args.total_timesteps
-                 print(f"  Overriding total_timesteps -> {config['total_timesteps']}")
-            if args.eval_freq is not None:
-                 config['eval_freq'] = args.eval_freq
-                 print(f"  Overriding eval_freq -> {config['eval_freq']}")
-
-            # <<< FIX: Ensure eval_only from CLI overrides file config >>>
-            # This MUST run AFTER config.update() to have effect
-            if args.eval_only:
-                config['eval_only'] = True
-                print(f"  Ensuring eval_only is set to True based on CLI flag.")
-            # <<< END FIX >>>
+            # <<< REMOVED CLI OVERRIDES FROM HERE >>>
 
         else:
             print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
@@ -1578,6 +1565,22 @@ def main():
     ensure_dir_exists(log_base_dir); ensure_dir_exists(ckpt_base_dir)
     ensure_dir_exists(os.path.join(log_base_dir, model_name))
     ensure_dir_exists(os.path.join(ckpt_base_dir, model_name))
+
+    # <<< ADDED CLI OVERRIDES HERE >>>
+    # Apply CLI overrides *after* loading config and *before* mode selection
+    print("\nApplying final CLI overrides for run control parameters...")
+    if args.total_timesteps is not None:
+         config['total_timesteps'] = args.total_timesteps
+         print(f"  Overriding total_timesteps -> {config['total_timesteps']}")
+    if args.eval_freq is not None:
+         config['eval_freq'] = args.eval_freq
+         print(f"  Overriding eval_freq -> {config['eval_freq']}")
+    # Ensure eval_only from CLI overrides file config
+    if args.eval_only:
+        config['eval_only'] = True
+        print(f"  Ensuring eval_only is set to True based on CLI flag.")
+    print("--- End CLI Overrides ---\n")
+    # <<< END ADDED CLI OVERRIDES >>>
 
     # --- Mode Selection --- #
     # <<< REMOVE DEBUG PRINTS >>>
