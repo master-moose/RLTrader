@@ -866,6 +866,17 @@ def parse_args():
     logging_group.add_argument("--norm_obs", type=str, default="auto",
                                choices=["auto", "true", "false"],
                                help="Control VecNormalize ('auto': based on feats)")
+                               
+    # --- TCN Parameters --- #
+    tcn_group = parser.add_argument_group('TCN Parameters (for tcn_ppo)')
+    tcn_group.add_argument("--tcn_num_layers", type=int, default=4,
+                         help="Number of TCN layers (4-6 recommended)")
+    tcn_group.add_argument("--tcn_num_filters", type=int, default=64,
+                         help="Number of filters in each TCN layer")
+    tcn_group.add_argument("--tcn_kernel_size", type=int, default=3,
+                         help="Kernel size for TCN convolutions")
+    tcn_group.add_argument("--tcn_dropout", type=float, default=0.2,
+                         help="Dropout rate for TCN layers")
 
     args = parser.parse_args()
 
@@ -1141,9 +1152,27 @@ def create_model(
     elif model_type == "tcn_ppo":
         lr = config["learning_rate"]
         lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
+        
+        # Extract TCN-specific parameters from config
+        tcn_params = {
+            "num_filters": config.get("tcn_num_filters", 64),
+            "num_layers": config.get("tcn_num_layers", 4),
+            "kernel_size": config.get("tcn_kernel_size", 3),
+            "dropout": config.get("tcn_dropout", 0.2)
+        }
+        
+        # Get sequence length from environment config
+        sequence_length = config.get("sequence_length", 60)
+        
+        # Pass TCN parameters to the policy
+        policy_kwargs.update({
+            "tcn_params": tcn_params,
+            "sequence_length": sequence_length
+        })
+        
         model_kwargs.update({
             "policy": TcnPolicy,
-            "learning_rate": lr_schedule,  # Use schedule
+            "learning_rate": lr_schedule,
             "n_steps": config["n_steps"],
             "batch_size": config["batch_size"],
             "n_epochs": config["n_epochs"],
@@ -1153,6 +1182,8 @@ def create_model(
             "gae_lambda": config["gae_lambda"],
             "max_grad_norm": config["max_grad_norm"]
         })
+        
+        logger.info(f"TCN-PPO configuration: layers={tcn_params['num_layers']}, filters={tcn_params['num_filters']}, kernel={tcn_params['kernel_size']}, dropout={tcn_params['dropout']}")
         model = PPO(**model_kwargs)
 
     else:
@@ -1296,7 +1327,8 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
         "sac": SAC,
         "lstm_dqn": DQN, # LSTM handled by feature extractor
         "qrdqn": QRDQN,
-        "recurrentppo": RecurrentPPO
+        "recurrentppo": RecurrentPPO,
+        "tcn_ppo": PPO  # TCN is handled by TcnPolicy
     }
     if model_type_str not in model_cls_map:
         eval_logger.error(f"Unknown model type '{model_type_str}' specified in config.")

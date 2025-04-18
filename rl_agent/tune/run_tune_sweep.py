@@ -206,6 +206,12 @@ def define_search_space() -> Dict[str, Any]:
         # Gradient clipping norm - removed 2.0
         "max_grad_norm": tune.choice([0.5, 1.0]),
 
+        # --- TCN Parameters (for tcn_ppo model type only) ---
+        "tcn_num_layers": tune.choice([4, 5, 6]),  # As per architecture suggestion: 4-6 layers
+        "tcn_num_filters": tune.choice([32, 64, 128]),  # Range of filter sizes to try
+        "tcn_kernel_size": tune.choice([3]),  # Fixed at 3 as per architecture suggestion
+        "tcn_dropout": tune.uniform(0.1, 0.3),  # Range around the default 0.2
+
         # --- Reward Component Weights (Focus on stability and profit) --- #
         # Added portfolio_change_weight tuning
         "portfolio_change_weight": tune.uniform(1.0, 5.0),
