@@ -301,8 +301,11 @@ def create_evaluation_plots(
         show_plot: Whether to display the plot
         figsize: Figure size (width, height)
     """
+    plot_logger = logging.getLogger("rl_agent.plotting") # Use a specific logger
+    plot_logger.debug(f"create_evaluation_plots called. save_path={save_path}")
+
     if portfolio_values.size == 0:
-        logger.warning("No portfolio values to plot")
+        plot_logger.warning("No portfolio values to plot, exiting.")
         return
 
     # Handle None values
@@ -313,130 +316,155 @@ def create_evaluation_plots(
     # Create figure and axes
     fig, axes = plt.subplots(nrows=3, ncols=1, figsize=figsize, sharex=True)
 
-    # Set style
-    sns.set_style("whitegrid")
+    try:
+        # Set style
+        sns.set_style("whitegrid")
 
-    # Plot portfolio values
-    steps = list(range(len(portfolio_values)))
-    axes[0].plot(steps, portfolio_values, label="Portfolio Value", color="blue",
-                 linewidth=2)
-    axes[0].set_title("Portfolio Value Over Time", fontsize=14)
-    axes[0].set_ylabel("Value", fontsize=12)
-    axes[0].legend(loc="upper left")
-    axes[0].grid(True)
+        # Plot portfolio values
+        steps = list(range(len(portfolio_values)))
+        axes[0].plot(steps, portfolio_values, label="Portfolio Value", color="blue",
+                     linewidth=2)
+        axes[0].set_title("Portfolio Value Over Time", fontsize=14)
+        axes[0].set_ylabel("Value", fontsize=12)
+        axes[0].legend(loc="upper left")
+        axes[0].grid(True)
 
-    # Calculate returns if we have enough data
-    if len(portfolio_values) > 1:
-        returns = np.diff(portfolio_values) / portfolio_values[:-1]
-        cumulative_returns = np.cumprod(1 + returns) - 1
+        # Calculate returns if we have enough data
+        if len(portfolio_values) > 1:
+            # Add basic check for zero/negative values before division
+            safe_portfolio_values = np.maximum(portfolio_values[:-1], 1e-9)
+            returns = np.diff(portfolio_values) / safe_portfolio_values
+            # Check for NaNs/Infs in returns before cumprod
+            if np.any(~np.isfinite(returns)):
+                plot_logger.warning("NaN or Inf detected in returns, cannot plot cumulative.")
+            else:
+                cumulative_returns = np.cumprod(1 + returns) - 1
+                # Add returns to the first plot
+                ax_returns = axes[0].twinx()
+                ax_returns.plot(
+                    steps[1:], cumulative_returns,
+                    label="Cumulative Return", color="green",
+                    linestyle="--", linewidth=1.5
+                )
+                ax_returns.set_ylabel("Cumulative Return (%)", fontsize=12)
+                ax_returns.legend(loc="upper right")
 
-        # Add returns to the first plot
-        ax_returns = axes[0].twinx()
-        ax_returns.plot(
-            steps[1:], cumulative_returns,
-            label="Cumulative Return", color="green",
-            linestyle="--", linewidth=1.5
-        )
-        ax_returns.set_ylabel("Cumulative Return (%)", fontsize=12)
-        ax_returns.legend(loc="upper right")
+        # Plot actions if available
+        if actions:
+            if len(actions) > len(steps):
+                actions = actions[:len(steps)]
+                plot_logger.debug(f"Trimmed actions to match steps: {len(actions)}")
+            elif len(actions) < len(steps):
+                padding_needed = len(steps) - len(actions)
+                actions.extend([0] * padding_needed)
+                plot_logger.debug(f"Padded actions by {padding_needed} to match steps.")
 
-    # Plot actions if available
-    if actions:
-        if len(actions) > len(steps):
-            actions = actions[:len(steps)]
-        elif len(actions) < len(steps):
-            actions.extend([0] * (len(steps) - len(actions)))
+            # Plot actions as scatter points
+            action_labels = {0: "Sell", 1: "Hold", 2: "Buy"}
+            action_colors = {0: "red", 1: "gray", 2: "green"}
 
-        # Plot actions as scatter points
-        action_labels = {0: "Sell", 1: "Hold", 2: "Buy"}
-        action_colors = {0: "red", 1: "gray", 2: "green"}
+            # Count actions
+            unique_actions, counts = np.unique(actions, return_counts=True)
+            action_counts = dict(zip(unique_actions, counts))
 
-        # Count actions
-        action_counts = {
-            action: actions.count(action) for action in set(actions)
-        }
+            # Create action array for plotting
+            action_array = np.array(actions)
 
-        # Create action array for plotting
-        action_array = np.array(actions)
+            for action in sorted(action_counts.keys()):
+                mask = action_array == action
+                if np.any(mask):
+                    axes[1].scatter(
+                        np.array(steps)[mask],
+                        np.ones(mask.sum()) * action,
+                        label=f"{action_labels.get(action, action)} "
+                              f"({action_counts.get(action, 0)})",
+                        color=action_colors.get(action, "blue"),
+                        s=50,
+                        alpha=0.7
+                    )
 
-        for action in sorted(set(actions)):
-            mask = action_array == action
-            axes[1].scatter(
-                np.array(steps)[mask],
-                np.ones(mask.sum()) * action,
-                label=f"{action_labels.get(action, action)} "
-                      f"({action_counts.get(action, 0)})",
-                color=action_colors.get(action, "blue"),
-                s=50,
-                alpha=0.7
-            )
+            axes[1].set_title("Actions Taken by Agent", fontsize=14)
+            axes[1].set_ylabel("Action", fontsize=12)
+            if unique_actions.size > 0:
+                axes[1].set_yticks(list(sorted(unique_actions)))
+                axes[1].set_yticklabels([
+                    action_labels.get(a, a) for a in sorted(unique_actions)
+                ])
+            axes[1].legend(loc="upper right")
+            axes[1].grid(True)
 
-        axes[1].set_title("Actions Taken by Agent", fontsize=14)
-        axes[1].set_ylabel("Action", fontsize=12)
-        axes[1].set_yticks(list(sorted(set(actions))))
-        axes[1].set_yticklabels([
-            action_labels.get(a, a) for a in sorted(set(actions))
-        ])
-        axes[1].legend(loc="upper right")
-        axes[1].grid(True)
-
-    # Plot rewards or positions in the third subplot
-    if rewards:
-        reward_steps = steps[:len(rewards)]
-        axes[2].plot(reward_steps, rewards, label="Reward",
-                     color="purple", linewidth=1.5)
-        axes[2].set_title("Rewards", fontsize=14)
-        axes[2].set_ylabel("Reward", fontsize=12)
-        axes[2].set_xlabel("Step", fontsize=12)
-        axes[2].legend(loc="upper left")
-        axes[2].grid(True)
-
-        # Plot cumulative rewards
-        ax_cum_rewards = axes[2].twinx()
-        cum_rewards = np.cumsum(rewards)
-        ax_cum_rewards.plot(
-            reward_steps, cum_rewards,
-            label="Cumulative Reward", color="orange",
-            linestyle="--", linewidth=1.5
-        )
-        ax_cum_rewards.set_ylabel("Cumulative Reward", fontsize=12)
-        ax_cum_rewards.legend(loc="upper right")
-
-    # Add positions if available
-    if positions:
-        position_steps = steps[:len(positions)]
-        if not rewards:  # Only if we haven't plotted rewards
-            axes[2].plot(position_steps, positions, label="Position",
-                         color="brown", linewidth=1.5)
-            axes[2].set_title("Positions", fontsize=14)
-            axes[2].set_ylabel("Position", fontsize=12)
+        # Plot rewards or positions in the third subplot
+        if rewards:
+            reward_steps = steps[:len(rewards)]
+            axes[2].plot(reward_steps, rewards, label="Reward",
+                         color="purple", linewidth=1.5)
+            axes[2].set_title("Rewards", fontsize=14)
+            axes[2].set_ylabel("Reward", fontsize=12)
             axes[2].set_xlabel("Step", fontsize=12)
             axes[2].legend(loc="upper left")
             axes[2].grid(True)
-        else:
-            # Add positions to the rewards plot
-            ax_pos = axes[2].twinx()
-            # Offset the axis slightly if rewards were plotted
-            spine_offset = 60
-            ax_pos.spines["right"].set_position(("axes", 1.0 + spine_offset / 72.0))
-            ax_pos.plot(
-                position_steps, positions, label="Position",
-                color="brown", linestyle=":", linewidth=1.5
-            )
-            ax_pos.set_ylabel("Position", fontsize=12)
-            ax_pos.legend(loc="lower right")
 
-    # Adjust layout
-    plt.tight_layout()
+            # Plot cumulative rewards
+            ax_cum_rewards = axes[2].twinx()
+            cum_rewards = np.cumsum(rewards)
+            ax_cum_rewards.plot(
+                reward_steps, cum_rewards,
+                label="Cumulative Reward", color="orange",
+                linestyle="--", linewidth=1.5
+            )
+            ax_cum_rewards.set_ylabel("Cumulative Reward", fontsize=12)
+            ax_cum_rewards.legend(loc="upper right")
+
+        # Add positions if available
+        if positions:
+            position_steps = steps[:len(positions)]
+            if not rewards:  # Only if we haven't plotted rewards
+                axes[2].plot(position_steps, positions, label="Position",
+                             color="brown", linewidth=1.5)
+                axes[2].set_title("Positions", fontsize=14)
+                axes[2].set_ylabel("Position", fontsize=12)
+                axes[2].set_xlabel("Step", fontsize=12)
+                axes[2].legend(loc="upper left")
+                axes[2].grid(True)
+            else:
+                # Add positions to the rewards plot
+                ax_pos = axes[2].twinx()
+                # Offset the axis slightly if rewards were plotted
+                spine_offset = 60
+                ax_pos.spines["right"].set_position(("axes", 1.0 + spine_offset / 72.0))
+                ax_pos.plot(
+                    position_steps, positions, label="Position",
+                    color="brown", linestyle=":", linewidth=1.5
+                )
+                ax_pos.set_ylabel("Position", fontsize=12)
+                ax_pos.legend(loc="lower right")
+
+        # Adjust layout
+        plt.tight_layout()
+
+    except Exception as e:
+        plot_logger.error(f"Error occurred during plot generation: {e}", exc_info=True)
+        plt.close(fig) # Close the potentially broken figure
+        return # Exit if plot generation failed
 
     # Save or show the plot
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        try:
+            # Construct the full file path here
+            full_file_path = os.path.join(save_path, "evaluation_plots.png")
+            plot_logger.info(f"Attempting to save plot to: {full_file_path}")
+            plt.savefig(full_file_path, dpi=300, bbox_inches="tight")
+            plot_logger.info(f"Plot successfully saved to {full_file_path}")
+        except Exception as e:
+            plot_logger.error(f"Error saving plot to {full_file_path}: {e}", exc_info=True)
 
     if show_plot:
+        plot_logger.debug("Displaying plot.")
         plt.show()
     else:
-        plt.close()
+        # Always close the figure if not shown to free memory
+        plot_logger.debug("Closing plot figure.")
+        plt.close(fig)
 
 
 def calculate_trading_metrics(
