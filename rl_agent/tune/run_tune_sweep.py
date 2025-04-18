@@ -60,7 +60,7 @@ DEFAULT_CONFIG = {
     "model_type": "recurrentppo",
     
     # Features - keeping OHLCV features fixed as requested
-    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,rsi_14_scaled,macd_hist_scaled,ema_9_scaled,ema_21_scaled",
+    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,sma_7_scaled,sma_25_scaled,sma_99_scaled,ema_9_scaled,ema_21_scaled,rsi_14_scaled,macd_scaled,macd_signal_scaled,macd_hist_scaled,atr_14_scaled,true_volatility_scaled,volume_sma_20_scaled,volume_ratio_scaled,price_sma_ratio_scaled,sma_cross_signal_scaled,bb_middle_scaled,bb_upper_scaled,bb_lower_scaled,bb_width_scaled,bb_pct_b_scaled",
     
     # Reward structure - simplified as requested
     "drawdown_penalty_weight": 0.0,
