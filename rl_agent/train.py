@@ -1554,7 +1554,9 @@ def main():
             if args.eval_freq is not None:
                  config['eval_freq'] = args.eval_freq
                  print(f"  Overriding eval_freq -> {config['eval_freq']}")
+
             # <<< FIX: Ensure eval_only from CLI overrides file config >>>
+            # This MUST run AFTER config.update() to have effect
             if args.eval_only:
                 config['eval_only'] = True
                 print(f"  Ensuring eval_only is set to True based on CLI flag.")
