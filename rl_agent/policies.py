@@ -132,16 +132,19 @@ class TcnPolicy(ActorCriticPolicy):
         self.mlp_extractor.latent_dim_vf = 64  # Output dim of value net in TcnExtractor
         
         # 4. Create action net (for policy output) - handle different action space types
-        if isinstance(self.action_space, gym.spaces.Discrete):
-            # For discrete actions (Discrete)
+        # Get the type name as a string to handle both gym and gymnasium
+        action_space_type = self.action_space.__class__.__name__
+        
+        if action_space_type == "Discrete":
+            # For discrete actions (Discrete from gym or gymnasium)
             action_net_output_dim = self.action_space.n
-        elif isinstance(self.action_space, gym.spaces.Box):
-            # For continuous actions (Box)
+        elif action_space_type == "Box":
+            # For continuous actions (Box from gym or gymnasium)
             action_net_output_dim = int(np.prod(self.action_space.shape))
-        elif isinstance(self.action_space, gym.spaces.MultiDiscrete):
+        elif action_space_type == "MultiDiscrete":
             # For multi-discrete actions
             action_net_output_dim = sum(self.action_space.nvec)
-        elif isinstance(self.action_space, gym.spaces.MultiBinary):
+        elif action_space_type == "MultiBinary":
             # For multi-binary actions
             action_net_output_dim = self.action_space.n
         else:
