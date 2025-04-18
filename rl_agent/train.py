@@ -1320,7 +1320,19 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
             # <<< End debug print >>>
             trading_metrics = calculate_trading_metrics(flat_portfolio_values)
             metrics.update(trading_metrics)
-            eval_logger.info(f"Trading Metrics: {trading_metrics}")
+
+            # --- Format metrics into a markdown table --- #
+            metrics_table = "| Metric                | Value    |\n"
+            metrics_table += "| :-------------------- | :------- |\n"
+            for key, value in trading_metrics.items():
+                try:
+                    # Format float values, handle potential non-float values gracefully
+                    metrics_table += f"| {key:<21} | {float(value):<8.4f} |\n"
+                except (ValueError, TypeError):
+                    metrics_table += f"| {key:<21} | {str(value):<8} |\n"
+            eval_logger.info(f"Trading Metrics:\n{metrics_table}")
+            # -------------------------------------------- #
+
         except Exception as e:
             eval_logger.warning(f"Could not calculate trading metrics: {e}")
 
