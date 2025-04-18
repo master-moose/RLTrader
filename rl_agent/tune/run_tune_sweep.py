@@ -59,8 +59,8 @@ DEFAULT_CONFIG = {
     # Model type
     "model_type": "recurrentppo",
     
-    # Features - most important for all timeframes
-    "features": "open,high,low,close,volume,sma_7,sma_25,sma_99,ema_9,ema_21,rsi_14,open_4h,high_4h,low_4h,close_4h,volume_4h,sma_7_4h,sma_25_4h,sma_99_4h,ema_9_4h,ema_21_4h,rsi_14_4h,open_1d,high_1d,low_1d,close_1d,volume_1d,sma_7_1d,sma_25_1d,sma_99_1d,ema_9_1d,ema_21_1d,rsi_14_1d",
+    # Features - most important for all timeframes, using _scaled columns
+    "features": "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,sma_7_scaled,sma_25_scaled,sma_99_scaled,ema_9_scaled,ema_21_scaled,rsi_14_scaled,open_scaled_4h,high_scaled_4h,low_scaled_4h,close_scaled_4h,volume_scaled_4h,sma_7_scaled_4h,sma_25_scaled_4h,sma_99_scaled_4h,ema_9_scaled_4h,ema_21_scaled_4h,rsi_14_scaled_4h,open_scaled_1d,high_scaled_1d,low_scaled_1d,close_scaled_1d,volume_scaled_1d,sma_7_scaled_1d,sma_25_scaled_1d,sma_99_scaled_1d,ema_9_scaled_1d,ema_21_scaled_1d,rsi_14_scaled_1d",
     
     # Reward structure - simplified as requested
     "drawdown_penalty_weight": 0.0,
