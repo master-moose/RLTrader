@@ -311,14 +311,11 @@ class TcnPolicy(ActorCriticPolicy):
         """Forward pass through the network."""
         features = self.extract_features(obs)
         latent_pi, latent_vf = self.mlp_extractor(features)
-        
-        # Get values from the value head
         values = self.value_net(latent_vf)
-        
-        # Get distribution parameters from the policy head
         distribution = self._get_action_dist_from_latent(latent_pi)
-        
-        return distribution, values
+        actions = distribution.get_actions(deterministic=deterministic)
+        log_probs = distribution.log_prob(actions)
+        return actions, values, log_probs
 
     def _get_action_dist_from_latent(self, latent_pi):
         """Get the action distribution from the latent features."""
