@@ -299,6 +299,14 @@ class TcnPolicy(ActorCriticPolicy):
                 value_latent = self_extractor.value_net(flattened)
                 
                 return policy_latent, value_latent
+
+            def forward_actor(self_extractor, features):
+                policy_latent, _ = self_extractor.forward(features)
+                return policy_latent
+
+            def forward_critic(self_extractor, features):
+                _, value_latent = self_extractor.forward(features)
+                return value_latent
                 
         return TcnExtractor(
             self._tcn, 
