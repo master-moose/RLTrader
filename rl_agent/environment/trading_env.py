@@ -11,6 +11,7 @@ import pandas as pd
 from typing import List, Optional
 import matplotlib.pyplot as plt
 import logging
+from rl_agent.utils import calculate_trading_metrics
 
 # Get module logger
 logger = logging.getLogger("rl_agent.environment")
@@ -939,6 +940,35 @@ class TradingEnvironment(Env):
         # --- Add cumulative reward components to info ---
         info['cumulative_reward_components'] = self.cumulative_rewards.copy()
         # --- End add cumulative ---
+
+        # --- Calculate and add Calmar/Sortino Ratios at episode end ---
+        # Default values
+        info['calmar_ratio'] = 0.0
+        info['sortino_ratio'] = 0.0
+
+        # Check if enough data points exist for metric calculation
+        # Using > 2 because metrics like std dev need at least 2 points,
+        # and calculate_trading_metrics itself has internal checks.
+        if len(self.portfolio_values) > 2:
+            try:
+                # Ensure portfolio_values is a numpy array
+                portfolio_values_np = np.array(self.portfolio_values)
+                # Call the utility function
+                trading_metrics = calculate_trading_metrics(portfolio_values_np)
+
+                # Add calculated metrics to info, checking if they exist in the result
+                if trading_metrics:
+                    info['calmar_ratio'] = trading_metrics.get('calmar_ratio', 0.0)
+                    info['sortino_ratio'] = trading_metrics.get('sortino_ratio', 0.0)
+                    # Optionally add other metrics if needed later
+                    # info['max_drawdown_metric'] = trading_metrics.get('max_drawdown', 0.0)
+                    # info['sharpe_ratio_metric'] = trading_metrics.get('sharpe_ratio', 0.0)
+
+            except Exception as e:
+                logger.error(f"_get_info: Error calculating trading metrics: {e}", exc_info=True)
+                # Keep default values (0.0) on error
+
+        # --- End Calmar/Sortino Calculation ---
 
         # Reward components are added in the step method after _calculate_reward is called
         # if 'reward_components' not in info: # Ensure it exists even at step 0
