@@ -789,7 +789,15 @@ class TradingEnvironment(Env):
         
         # Combine features and account info
         observation = np.array(feature_data + account_info, dtype=np.float32)
-        
+
+        # --- DEBUG PRINTS FOR SHAPE DIAGNOSIS ---
+        logger.debug(f"[OBS DEBUG] Features used: {self.features}")
+        logger.debug(f"[OBS DEBUG] feature_data length: {len(feature_data)} (should be sequence_length * num_features)")
+        logger.debug(f"[OBS DEBUG] account_info: {account_info}")
+        logger.debug(f"[OBS DEBUG] Final observation shape: {observation.shape}, dtype: {observation.dtype}")
+        logger.debug(f"[OBS DEBUG] First 10 obs values: {observation[:10]}")
+        # --- END DEBUG PRINTS ---
+
         return observation
     
     def _get_info(self):
