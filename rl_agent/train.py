@@ -1183,6 +1183,9 @@ def create_model(
             "tcn_params": tcn_params,
             "sequence_length": sequence_length
         })
+        # --- PATCH: Pass features list to policy_kwargs for TcnPolicy ---
+        if "features" in config:
+            policy_kwargs["features"] = config["features"]
         
         model_kwargs.update({
             "policy": TcnPolicy,
