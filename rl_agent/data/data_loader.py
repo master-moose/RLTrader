@@ -94,21 +94,21 @@ class DataLoader:
         Returns:
             DataFrame with preprocessed data
         """
-        logger.info(f"Loading data from {self.data_path}")
+        logger.debug(f"Loading data from {self.data_path}")
         
         # Determine file type
         file_extension = os.path.splitext(self.data_path)[1].lower()
         data = None
         
         if file_extension == '.csv':
-            logger.info("Detected CSV file format.")
+            logger.debug("Detected CSV file format.")
             try:
                 data = pd.read_csv(self.data_path)
             except Exception as e:
                 logger.error(f"Error loading CSV file: {e}")
                 raise
         elif file_extension in ['.h5', '.hdf5']:
-            logger.info("Detected HDF5 file format.")
+            logger.debug("Detected HDF5 file format.")
             if not self.data_key:
                 logger.warning("HDF5 file specified but no data_key provided. Attempting to load default key '/data' or first available key.")
                 # Try to infer a key if none provided (optional, can be error-prone)
@@ -124,7 +124,7 @@ class DataLoader:
                     raise
 
             try:
-                logger.info(f"Loading data from HDF5 key: {self.data_key}")
+                logger.debug(f"Loading data from HDF5 key: {self.data_key}")
                 data = pd.read_hdf(self.data_path, key=self.data_key)
             except KeyError:
                 logger.error(f"Key '{self.data_key}' not found in HDF5 file: {self.data_path}")
@@ -167,7 +167,7 @@ class DataLoader:
             except Exception as e:
                 logger.warning(f"Error parsing timestamps: {e}. Proceeding without datetime index.")
         elif isinstance(timestamp_source, pd.DatetimeIndex):
-            logger.info("Data already has a DatetimeIndex.")
+            logger.debug("Data already has a DatetimeIndex.")
         
         # Handle missing values (ensure this happens after potential index setting)
         if data.isnull().values.any():
@@ -186,13 +186,13 @@ class DataLoader:
             else:
                  logger.info("NA values present but not handled (fill_method='none').")
         else:
-            logger.info("No NA values found in the loaded data.")
+            logger.debug("No NA values found in the loaded data.")
         
         # Ensure all numeric columns are float32 for better memory usage
         for col in data.select_dtypes(include=np.number).columns:
             data[col] = data[col].astype(np.float32)
         
-        logger.info(f"Loaded data with shape: {data.shape}")
+        logger.debug(f"Loaded data with shape: {data.shape}")
         
         return data
     
