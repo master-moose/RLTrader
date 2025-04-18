@@ -115,6 +115,7 @@ class TcnPolicy(ActorCriticPolicy):
         
         # Dynamically infer sequence_length and features_per_timestep
         features_dim = int(np.prod(observation_space.shape))
+        print(f"[TCNPolicy][DEBUG] observation_space.shape: {observation_space.shape} (features_dim={features_dim})")
         orig_sequence_length = sequence_length
         orig_features_per_timestep = features_per_timestep
         # If features_per_timestep is not provided, use the number of features in the config
@@ -135,14 +136,18 @@ class TcnPolicy(ActorCriticPolicy):
                 # Filter out features with _4h or _1d suffixes
                 filtered_features = [f for f in features_list if not (f.endswith('_4h') or f.endswith('_1d'))]
                 features_per_timestep = len(filtered_features)
-                print(f"[TCNPolicy] Inferred features_per_timestep={features_per_timestep} from filtered features list: {filtered_features}")
+                print(f"[TCNPolicy][DEBUG] features list (raw): {features_list}")
+                print(f"[TCNPolicy][DEBUG] features list (filtered for main timeframe): {filtered_features}")
+                print(f"[TCNPolicy][DEBUG] features_per_timestep inferred: {features_per_timestep}")
             else:
                 raise ValueError("features_per_timestep not provided and features list not found in config/kwargs.")
         # Now set sequence_length
         if features_dim % features_per_timestep != 0:
+            print(f"[TCNPolicy][ERROR] features_dim: {features_dim}, features_per_timestep: {features_per_timestep}")
+            print(f"[TCNPolicy][ERROR] features list: {features if features is not None else 'N/A'}")
             raise ValueError(f"Observation dimension {features_dim} is not divisible by features_per_timestep {features_per_timestep}. Check your features list and data shape.")
         sequence_length = features_dim // features_per_timestep
-        print(f"[TCNPolicy] Using sequence_length={sequence_length}, features_per_timestep={features_per_timestep} (features_dim={features_dim})")
+        print(f"[TCNPolicy][DEBUG] Using sequence_length={sequence_length}, features_per_timestep={features_per_timestep} (features_dim={features_dim})")
         self.sequence_length = sequence_length
         self.features_per_timestep = features_per_timestep
         # Store these parameters for later use in _build
