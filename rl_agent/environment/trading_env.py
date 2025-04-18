@@ -357,8 +357,9 @@ class TradingEnvironment(Env):
         elif truncated:
             termination_reason = f"Max Steps Reached ({self.max_steps})"
 
-        # --- EPISODE SUMMARY LOG ---
-        if terminated or truncated:
+        # --- EPISODE END CHECK ---
+        episode_ended = terminated or truncated or is_end_of_data or is_max_steps_reached
+        if episode_ended:
             info = self._get_info()
             logger.info(
                 (
@@ -398,65 +399,19 @@ class TradingEnvironment(Env):
         current_price = self.data['close'].iloc[self.current_step]
         fee_paid_this_step = 0.0 # Track fee for this specific action
         
+        # --- Action logic: allow selling after buying, and update shares_held correctly ---
         # Record action counts (basic) - Adjust Buy/Trade count logic below
-        # self.total_trades += (action != 1)  # Count non-hold actions as trades
-        if action == 0:
-            self.total_sells += 1
-        elif action == 1:
-            self.total_holds += 1
-        elif action == 2:
-            # Defer Buy/Trade count increment until success confirmed
-            pass # Handled below
-        
-        # Update consecutive action counts
-        if action == self.last_action:
-            if action == 0: # Sell
-                self.consecutive_sells += 1
-            elif action == 1: # Hold
-                self.consecutive_holds += 1
-            elif action == 2: # Buy
-                self.consecutive_buys += 1
-        else:
-            # Reset counters when action changes
-            if action == 0: # Sell
-                self.consecutive_sells = 1
-                self.consecutive_holds = 0
-                self.consecutive_buys = 0
-            elif action == 1: # Hold
-                self.consecutive_holds = 1
-                self.consecutive_sells = 0
-                self.consecutive_buys = 0
-            elif action == 2: # Buy
-                self.consecutive_buys = 1
-                self.consecutive_holds = 0
-                self.consecutive_sells = 0
-
-        # Update last action
-        self.last_action = action
-
         if action == 0:  # Sell
-            if self.shares_held > ZERO_THRESHOLD: # Check if shares held > 0
-                self.total_trades += 1 
-                # Calculate transaction fee
+            if self.shares_held > ZERO_THRESHOLD: # Only sell if holding shares
+                self.total_trades += 1
+                self.total_sells += 1
                 sell_amount = self.shares_held * current_price
-                fee = sell_amount * self.transaction_fee # Use fixed fee
+                fee = sell_amount * self.transaction_fee
                 fee_paid_this_step = fee
                 self.total_fees_paid += fee
-                
-                # Update balance and shares
                 self.balance += sell_amount - fee
-                # --- Log intermediate state --- #
-                logger.debug(
-                    f"_take_action (Sell): Post-update Balance={self.balance:.4f}, "
-                    f"Shares=0, Fee={fee:.4f}"
-                )
-                if not np.isfinite(self.balance):
-                    logger.error(
-                        f"_take_action (Sell): Balance became non-finite! "
-                        f"{self.balance}"
-                    )
-                # --- End log --- #
-                
+                self.shares_held = 0
+                self.asset_value = 0
                 # Log sell
                 sell_info = {
                     'step': self.current_step,
@@ -469,126 +424,57 @@ class TradingEnvironment(Env):
                 }
                 self.trades.append(sell_info)
                 self.sell_prices.append(current_price)
-                
                 logger.debug(
-                    f"Step {self.current_step}: Sold {self.shares_held:.6f} shares @ "
-                    f"{current_price:.2f} (Amt: {sell_amount:.2f}, Fee: {fee:.2f}) -> "
-                    f"Bal: {self.balance:.2f}"
+                    f"Step {self.current_step}: Sold {sell_amount:.6f} @ {current_price:.2f} (Fee: {fee:.2f}) -> Bal: {self.balance:.2f}"
                 )
-                
-                self.shares_held = 0
-                self.asset_value = 0
             else:
-                # Log failed sell attempt
                 self.failed_sells += 1
-                logger.debug(
-                    f"Step {self.current_step}: Attempted Sell, but no shares held."
-                )
-                # We didn't increment total_sells or total_trades, so no need to decrement.
-
+                logger.debug(f"Step {self.current_step}: Attempted Sell, but no shares held.")
+        elif action == 1:  # Hold
+            self.total_holds += 1
         elif action == 2:  # Buy
-            if self.balance > ZERO_THRESHOLD: # Check if balance > 0
-                # <<< ADDED CHECK: Prevent buying if already holding shares >>>
-                if self.shares_held > ZERO_THRESHOLD:
-                    self.failed_buys += 1 # Increment failed buy counter
-                    logger.debug(
-                        f"Step {self.current_step}: Attempted Buy, but already holding "
-                        f"{self.shares_held:.6f} shares. Holding."
-                    )
-                    return # Exit the function, action becomes Hold # Keep return to prevent execution
-                # <<< END ADDED CHECK >>>
-
-                # Calculate amount to invest based on max_position
+            if self.balance > ZERO_THRESHOLD and self.shares_held < ZERO_THRESHOLD: # Only buy if not already holding
                 invest_amount = self.balance * self.max_position
-                
-                # <<< ADDED CHECK: Minimum Trade Value >>>
-                min_trade_value = self.initial_balance * 0.005 # Minimum 0.5% of initial balance
-                if invest_amount < min_trade_value:
-                    self.failed_buys += 1
-                    logger.debug(
-                        f"Step {self.current_step}: Attempted Buy. Invest amount "
-                        f"{invest_amount:.2f} < min trade value {min_trade_value:.2f}. "
-                        f"Holding."
-                    )
-                    return # Treat as Hold
-                # <<< END ADDED CHECK >>>
-
-                # Calculate shares we can buy considering the fee
-                # Avoid division by zero/small price
-                if current_price * (1 + self.transaction_fee) > ZERO_THRESHOLD:
-                    shares_to_buy = invest_amount / (current_price * (1 + self.transaction_fee))
-                else:
-                    shares_to_buy = 0 # Cannot buy if price is zero
-
-                # Ensure we can buy a meaningful amount of shares
-                if shares_to_buy > ZERO_THRESHOLD: # Use threshold
-                    # --- Buy Succeeded ---
-                    # Increment trade/buy counts here
-                    self.total_buys += 1
-                    self.total_trades += 1
-
-                    # Buy shares
-                    self.shares_held = shares_to_buy
-                    buy_cost = self.shares_held * current_price
-                    fee = buy_cost * self.transaction_fee
-                    fee_paid_this_step = fee
-                    self.total_fees_paid += fee
-                    
-                    # Update balance and asset value
-                    self.balance -= (buy_cost + fee)
-                    # Ensure balance doesn't go negative due to float precision
-                    self.balance = max(0, self.balance) 
-                    self.asset_value = self.shares_held * current_price
-                    # --- Log intermediate state --- #
-                    logger.debug(
-                        f"_take_action (Buy): Post-update Balance={self.balance:.4f}, "
-                        f"Shares={self.shares_held:.8f}, AssetVal={self.asset_value:.4f}, "
-                        f"Fee={fee:.4f}"
-                    )
-                    if not np.isfinite(self.balance) or not np.isfinite(self.shares_held) or not np.isfinite(self.asset_value):
-                        logger.error(
-                            f"_take_action (Buy): State became non-finite! "
-                            f"Bal={self.balance}, Shares={self.shares_held}, "
-                            f"AssetVal={self.asset_value}"
+                min_trade_value = self.initial_balance * 0.005
+                if invest_amount >= min_trade_value:
+                    shares_to_buy = invest_amount / (current_price * (1 + self.transaction_fee)) if current_price * (1 + self.transaction_fee) > ZERO_THRESHOLD else 0
+                    if shares_to_buy > ZERO_THRESHOLD:
+                        self.total_buys += 1
+                        self.total_trades += 1
+                        self.shares_held = shares_to_buy
+                        buy_cost = self.shares_held * current_price
+                        fee = buy_cost * self.transaction_fee
+                        fee_paid_this_step = fee
+                        self.total_fees_paid += fee
+                        self.balance -= (buy_cost + fee)
+                        self.balance = max(0, self.balance)
+                        self.asset_value = self.shares_held * current_price
+                        self.last_buy_price = current_price
+                        self.buy_prices.append(current_price)
+                        buy_info = {
+                            'step': self.current_step,
+                            'type': 'buy',
+                            'price': current_price,
+                            'shares': self.shares_held,
+                            'cost': buy_cost,
+                            'fee': fee,
+                            'balance_after': self.balance
+                        }
+                        self.trades.append(buy_info)
+                        logger.debug(
+                            f"Step {self.current_step}: Bought {self.shares_held:.6f} @ {current_price:.2f} (Cost: {buy_cost:.2f}, Fee: {fee:.2f}) -> Bal: {self.balance:.2f}"
                         )
-                    # --- End log --- #
-                    
-                    # Record buy price
-                    self.last_buy_price = current_price
-                    self.buy_prices.append(current_price)
-                    
-                    # Log buy
-                    buy_info = {
-                        'step': self.current_step,
-                        'type': 'buy',
-                        'price': current_price,
-                        'shares': self.shares_held,
-                        'cost': buy_cost,
-                        'fee': fee,
-                        'balance_after': self.balance
-                    }
-                    self.trades.append(buy_info)
-                    
-                    logger.debug(
-                        f"Step {self.current_step}: Bought {self.shares_held:.6f} shares @ "
-                        f"{current_price:.2f} (Cost: {buy_cost:.2f}, Fee: {fee:.2f}) -> "
-                        f"Bal: {self.balance:.2f}"
-                    )
+                    else:
+                        self.failed_buys += 1
+                        logger.debug(f"Step {self.current_step}: Attempted Buy, but calculated shares {shares_to_buy:.8f} <= threshold. Holding.")
                 else:
-                    # --- Buy Failed (Insufficient funds for meaningful amount OR price too low) ---
-                    self.failed_buys += 1 # Increment failed buy counter
-                    logger.debug(
-                        f"Step {self.current_step}: Attempted Buy. Bal: {self.balance:.2f}, "
-                        f"Price: {current_price:.2f}, MaxPos: {self.max_position:.2f}. "
-                        f"Calculated shares {shares_to_buy:.8f} <= threshold. Holding."
-                    )
+                    self.failed_buys += 1
+                    logger.debug(f"Step {self.current_step}: Attempted Buy. Invest amount {invest_amount:.2f} < min trade value {min_trade_value:.2f}. Holding.")
             else:
-                # --- Buy Failed (Zero balance) ---
-                self.failed_buys += 1 # Increment failed buy counter
-                logger.debug(
-                    f"Step {self.current_step}: Attempted Buy, but balance is "
-                    f"{self.balance:.2f}. Holding."
-                )
+                self.failed_buys += 1
+                logger.debug(f"Step {self.current_step}: Attempted Buy, but already holding shares or no balance. Holding.")
+        # Update last action
+        self.last_action = action
     
     def _update_portfolio_value(self):
         """Update the portfolio value based on current balance and asset prices."""
