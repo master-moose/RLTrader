@@ -96,6 +96,9 @@ class TcnPolicy(ActorCriticPolicy):
                 print(f"Warning: Could not infer features_per_timestep from {observation_space}. Using default: {self.features_per_timestep}")
         else:
             self.features_per_timestep = features_per_timestep
+        
+        # Initialize TCN before parent class to ensure it exists
+        self._tcn = None
             
         # Initialize the parent class
         super(TcnPolicy, self).__init__(
@@ -107,7 +110,7 @@ class TcnPolicy(ActorCriticPolicy):
         )
         
         # Create the TCN after parent initialization (which sets self.features_dim)
-        self.tcn = TCN(
+        self._tcn = TCN(
             input_channels=self.features_per_timestep,
             num_filters=self.tcn_params["num_filters"],
             num_layers=self.tcn_params["num_layers"],
@@ -117,48 +120,58 @@ class TcnPolicy(ActorCriticPolicy):
         
         # Replace the mlp_extractor with our TCN-based feature extractor
         self.mlp_extractor = self._build_mlp_extractor()
+    
+    @property
+    def tcn(self):
+        """Safe access to TCN with error handling."""
+        if self._tcn is None:
+            raise ValueError("TCN not initialized properly. Check if tcn_params is provided correctly.")
+        return self._tcn
 
     def _build_mlp_extractor(self):
         """Build a TCN-based feature extractor."""
+        if self._tcn is None:
+            raise ValueError("TCN must be initialized before building the MLP extractor.")
+            
         class TcnExtractor(nn.Module):
-            def __init__(self, tcn, features_per_timestep, sequence_length, features_dim):
-                super(TcnExtractor, self).__init__()
-                self.tcn = tcn
-                self.features_per_timestep = features_per_timestep
-                self.sequence_length = sequence_length
-                self.features_dim = features_dim
+            def __init__(self_extractor, tcn, features_per_timestep, sequence_length, features_dim):
+                super(TcnExtractor, self_extractor).__init__()
+                self_extractor.tcn = tcn
+                self_extractor.features_per_timestep = features_per_timestep
+                self_extractor.sequence_length = sequence_length
+                self_extractor.features_dim = features_dim
                 
                 # Output size will be (batch_size, num_filters, sequence_length)
                 # We need to project this to the appropriate size for actor/critic
-                self.output_dim = tcn.output_dim * sequence_length
+                self_extractor.output_dim = tcn.output_dim * sequence_length
                 
                 # Create separate heads for policy and value
-                self.policy_net = nn.Sequential(
-                    nn.Linear(self.output_dim, 64),
+                self_extractor.policy_net = nn.Sequential(
+                    nn.Linear(self_extractor.output_dim, 64),
                     nn.ReLU()
                 )
-                self.value_net = nn.Sequential(
-                    nn.Linear(self.output_dim, 64),
+                self_extractor.value_net = nn.Sequential(
+                    nn.Linear(self_extractor.output_dim, 64),
                     nn.ReLU()
                 )
                 
-            def forward(self, features):
+            def forward(self_extractor, features):
                 batch_size = features.shape[0]
                 
                 # Reshape from (batch_size, features_dim) to 
                 # (batch_size, features_per_timestep, sequence_length)
-                x = features.view(batch_size, self.features_per_timestep, self.sequence_length)
+                x = features.view(batch_size, self_extractor.features_per_timestep, self_extractor.sequence_length)
                 
                 # Apply TCN - output: (batch_size, num_filters, sequence_length)
-                x = self.tcn(x)
+                x = self_extractor.tcn(x)
                 
                 # Flatten for the MLP heads
                 x_flat = x.reshape(batch_size, -1)
                 
-                return self.policy_net(x_flat), self.value_net(x_flat)
+                return self_extractor.policy_net(x_flat), self_extractor.value_net(x_flat)
                 
         return TcnExtractor(
-            self.tcn, 
+            self._tcn, 
             self.features_per_timestep, 
             self.sequence_length, 
             self.features_dim
