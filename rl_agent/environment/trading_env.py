@@ -748,7 +748,6 @@ class TradingEnvironment(Env):
         return reward_components
     
     def _get_observation(self):
-        print("[OBS DEBUG] TradingEnvironment._get_observation CALLED")
         """
         Get the current observation.
         
@@ -781,10 +780,10 @@ class TradingEnvironment(Env):
         observation = np.array(feature_data, dtype=np.float32)
 
         # --- DEBUG PRINTS FOR SHAPE DIAGNOSIS ---
-        logger.debug(f"[OBS DEBUG] Features used: {self.features}")
-        logger.debug(f"[OBS DEBUG] feature_data length: {len(feature_data)} (should be sequence_length * num_features)")
-        logger.debug(f"[OBS DEBUG] Final observation shape: {observation.shape}, dtype: {observation.dtype}")
-        logger.debug(f"[OBS DEBUG] First 10 obs values: {observation[:10]}")
+        # logger.debug(f"[OBS DEBUG] Features used: {self.features}")
+        # logger.debug(f"[OBS DEBUG] feature_data length: {len(feature_data)} (should be sequence_length * num_features)")
+        # logger.debug(f"[OBS DEBUG] Final observation shape: {observation.shape}, dtype: {observation.dtype}")
+        # logger.debug(f"[OBS DEBUG] First 10 obs values: {observation[:10]}")
         # --- END DEBUG PRINTS ---
 
         return observation
