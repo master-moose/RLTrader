@@ -72,6 +72,7 @@ from rl_agent.utils import (
     load_config, save_config, set_seeds, setup_logger,
     setup_sb3_logger
 )
+from rl_agent.policies import TcnPolicy
 
 
 # --- Global Settings --- #
@@ -684,7 +685,7 @@ def parse_args():
     general.add_argument(
         "--model_type", type=str, default="recurrentppo", # Changed default
         choices=[
-            "dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo"
+            "dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo"
         ],
         help="RL algorithm to use"
     )
@@ -1136,6 +1137,23 @@ def create_model(
         policy_kwargs["net_arch"] = [fc_size] * 2
         logger.info(f"RecurrentPPO LSTM: hidden={policy_kwargs['lstm_hidden_size']}, layers={policy_kwargs['n_lstm_layers']}, shared={policy_kwargs['shared_lstm']}, critic={policy_kwargs['enable_critic_lstm']}, net_arch={policy_kwargs['net_arch']}")
         model = RecurrentPPO(**model_kwargs)
+
+    elif model_type == "tcn_ppo":
+        lr = config["learning_rate"]
+        lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
+        model_kwargs.update({
+            "policy": TcnPolicy,
+            "learning_rate": lr_schedule,  # Use schedule
+            "n_steps": config["n_steps"],
+            "batch_size": config["batch_size"],
+            "n_epochs": config["n_epochs"],
+            "ent_coef": float(config["ent_coef"]),
+            "vf_coef": config["vf_coef"],
+            "clip_range": config["clip_range"],
+            "gae_lambda": config["gae_lambda"],
+            "max_grad_norm": config["max_grad_norm"]
+        })
+        model = PPO(**model_kwargs)
 
     else:
         raise ValueError(f"Unknown model type: {model_type}")
