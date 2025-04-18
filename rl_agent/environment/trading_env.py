@@ -380,7 +380,7 @@ class TradingEnvironment(Env):
         observation = self._get_observation()
         info = self._get_info()
 
-        # --- Log Termination/Truncation Reason and Episode Summary ---
+        # --- Log Termination/Truncation Reason ---
         if terminated or truncated:
             logger.info(
                 (
