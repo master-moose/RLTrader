@@ -235,16 +235,21 @@ class TcnPolicy(ActorCriticPolicy):
                 )
                 
             def forward(self_extractor, features):
-                # Reshape the input features to (batch_size, features_per_timestep, sequence_length)
-                # TCN expects (batch_size, channels, sequence_length)
+                # Debug prints for shape diagnosis
                 batch_size = features.shape[0]
-                
+                seq_len = self_extractor.sequence_length
+                feat_per_timestep = self_extractor.features_per_timestep
+                total_expected = batch_size * seq_len * feat_per_timestep
+                print(f"[DEBUG] features.shape: {features.shape}")
+                print(f"[DEBUG] batch_size: {batch_size}")
+                print(f"[DEBUG] sequence_length: {seq_len}")
+                print(f"[DEBUG] features_per_timestep: {feat_per_timestep}")
+                print(f"[DEBUG] batch_size * sequence_length * features_per_timestep: {total_expected}")
+                print(f"[DEBUG] features.numel(): {features.numel()}")
                 # First reshape to (batch_size, sequence_length, features_per_timestep)
                 reshaped_features = features.view(batch_size, self_extractor.sequence_length, 
                                                 self_extractor.features_per_timestep)
-                
                 # Then transpose to (batch_size, features_per_timestep, sequence_length)
-                # which is the expected format for TCN: (batch_size, channels, sequence_length)
                 reshaped_features = reshaped_features.transpose(1, 2)
                 
                 # Process through TCN
