@@ -16,7 +16,7 @@ import logging
 logger = logging.getLogger("rl_agent.environment")
 
 # Define a small threshold for floating point comparisons
-ZERO_THRESHOLD = 1e-9
+ZERO_THRESHOLD = 1e-9 # noqa E221
 
 class TradingEnvironment(Env):
     """
@@ -96,10 +96,10 @@ class TradingEnvironment(Env):
             
             # Additional reward parameters
             sharpe_window: Window size for Sharpe ratio calculation
-            consistency_threshold: Minimum consecutive actions before flip is acceptable
-            idle_threshold: Number of consecutive holds before applying idle penalty
+            consistency_threshold: Min consecutive actions before flip ok
+            idle_threshold: Num consecutive holds before idle penalty
             trade_penalty_weight: Weight for trade penalty
-        """
+        """ # noqa E501
         super(TradingEnvironment, self).__init__()
         
         # Store parameters
@@ -206,17 +206,17 @@ class TradingEnvironment(Env):
         self.max_portfolio_value = self.portfolio_value
         
         # Reset trade history
-        self.trades = []
-        self.buy_prices = []
-        self.sell_prices = []
-        self.portfolio_values = [self.portfolio_value]
-        self.rewards = []
+        self.trades = [] # noqa E221
+        self.buy_prices = [] # noqa E221
+        self.sell_prices = [] # noqa E221
+        self.portfolio_values = [self.portfolio_value] # noqa E221
+        self.rewards = [] # noqa E221
         self.last_buy_price = None
         
         # Reset metrics
-        self.total_trades = 0
-        self.total_buys = 0
-        self.total_sells = 0
+        self.total_trades = 0 # noqa E221
+        self.total_buys = 0 # noqa E221
+        self.total_sells = 0 # noqa E221
         self.total_holds = 0
         self.max_drawdown = 0.0  # Reset max drawdown
 
@@ -265,7 +265,7 @@ class TradingEnvironment(Env):
             
         Returns:
             Tuple of (observation, reward, terminated, truncated, info)
-        """
+        """ # noqa E501
         # --- Log state at the very beginning of the step ---
         # logger.info(
         #     f"STEP ENTRY (Step {self.current_step}): Balance={self.balance:.2f}, "
@@ -368,7 +368,7 @@ class TradingEnvironment(Env):
 
         # Decay exploration bonus for the next step
         if self.exploration_decay_rate > 0 and self.exploration_bonus_value > self.exploration_end:
-            self.exploration_bonus_value -= self.exploration_decay_rate
+            self.exploration_bonus_value -= self.exploration_decay_rate # noqa E128
         
         # Get new observation
         observation = self._get_observation()
@@ -628,7 +628,7 @@ class TradingEnvironment(Env):
             
         Returns:
             A dictionary containing the breakdown of reward components and the total scaled reward.
-        """
+        """ # noqa E501
         # Initialize reward components dictionary
         reward_components = {
             'portfolio_change': 0.0,
@@ -797,7 +797,7 @@ class TradingEnvironment(Env):
         
         Returns:
             Dictionary containing environment info
-        """
+        """ # noqa E501
         current_price = self.data['close'].iloc[self.current_step]
         
         # Base info

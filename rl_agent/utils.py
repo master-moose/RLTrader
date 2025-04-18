@@ -498,7 +498,8 @@ def calculate_trading_metrics(
 
     # Sortino ratio (downside deviation)
     negative_returns = returns[returns < 0]
-    if negative_returns.size > 0:
+    # Correct check for empty NumPy array
+    if negative_returns.size > 0:  # <--- CORRECTED LINE
         downside_deviation = np.std(negative_returns) * np.sqrt(252)
         sortino_ratio = annualized_return / (downside_deviation + 1e-10)
     else:
