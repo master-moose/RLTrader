@@ -38,6 +38,9 @@ except ImportError:
 # Setup logger
 logger = logging.getLogger("rl_agent")
 
+# Define a small threshold for floating point comparisons
+ZERO_THRESHOLD = 1e-9  # noqa E221
+
 
 def setup_logger(
     log_dir: str = "./logs",
@@ -278,7 +281,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 def create_evaluation_plots(
-    portfolio_values: List[float],
+    portfolio_values: np.ndarray,
     actions: Optional[List[int]] = None,
     rewards: Optional[List[float]] = None,
     positions: Optional[List[float]] = None,
@@ -298,7 +301,7 @@ def create_evaluation_plots(
         show_plot: Whether to display the plot
         figsize: Figure size (width, height)
     """
-    if not portfolio_values:
+    if portfolio_values.size == 0:
         logger.warning("No portfolio values to plot")
         return
 
@@ -495,7 +498,7 @@ def calculate_trading_metrics(
 
     # Sortino ratio (downside deviation)
     negative_returns = returns[returns < 0]
-    if len(negative_returns) > 0:
+    if negative_returns.size > 0:
         downside_deviation = np.std(negative_returns) * np.sqrt(252)
         sortino_ratio = annualized_return / (downside_deviation + 1e-10)
     else:
