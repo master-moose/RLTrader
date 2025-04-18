@@ -751,6 +751,7 @@ class TradingEnvironment(Env):
         return reward_components
     
     def _get_observation(self):
+        print("[OBS DEBUG] TradingEnvironment._get_observation CALLED")
         """
         Get the current observation.
         
