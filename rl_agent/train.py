@@ -1284,9 +1284,8 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
         raise
 
     # --- Run Evaluation --- #
-    # REMOVED 불필요: model.set_logger(eval_sb3_logger)
-
-    n_eval = config.get("n_eval_episodes", 5)
+    # Prioritize CLI arg for n_eval_episodes, then config, then default
+    n_eval = args.n_eval_episodes if args.n_eval_episodes is not None else config.get("n_eval_episodes", 5)
     eval_logger.info(f"Evaluating model for {n_eval} episodes...")
     # Call the existing evaluate_model function
     mean_reward, portfolio_values, actions, rewards = evaluate_model(
