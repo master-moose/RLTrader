@@ -152,6 +152,9 @@ class TcnPolicy(ActorCriticPolicy):
         self.features_per_timestep = features_per_timestep
         # Store these parameters for later use in _build
         self._tcn = None
+        # Remove 'features' from kwargs before calling super().__init__
+        if 'features' in kwargs:
+            del kwargs['features']
         # Initialize the parent class - IMPORTANT: This will call _build,
         # which will in turn call our overridden _build_mlp_extractor
         super(TcnPolicy, self).__init__(
