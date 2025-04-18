@@ -23,6 +23,7 @@ class TCN(nn.Module):
         dropout: float = 0.2
     ):
         super(TCN, self).__init__()
+        print(f"[TCN][INIT] input_channels={input_channels}, num_filters={num_filters}, num_layers={num_layers}, kernel_size={kernel_size}, dropout={dropout}")
         layers = []
         # Calculate padding needed to maintain sequence length
         padding = (kernel_size - 1) * 2**(num_layers-1)
@@ -116,44 +117,32 @@ class TcnPolicy(ActorCriticPolicy):
         features_dim = int(np.prod(observation_space.shape))
         orig_sequence_length = sequence_length
         orig_features_per_timestep = features_per_timestep
-        MAX_SEQ_LEN = 120  # Reasonable max for TCN
-        # Try to use provided values if possible
-        if sequence_length is not None and features_per_timestep is not None:
-            if sequence_length * features_per_timestep != features_dim:
-                print(f"[TCNPolicy] Provided sequence_length ({sequence_length}) * features_per_timestep ({features_per_timestep}) != obs dim ({features_dim}). Will infer dynamically.")
-                sequence_length = None
-                features_per_timestep = None
-        # If not provided or not matching, infer
-        if sequence_length is None or features_per_timestep is None:
-            # Try to find the largest possible sequence_length <= MAX_SEQ_LEN that divides features_dim
-            best_seq = None
-            best_feat = None
-            for seq in range(min(features_dim, MAX_SEQ_LEN), 0, -1):
-                if features_dim % seq == 0:
-                    best_seq = seq
-                    best_feat = features_dim // seq
-                    break
-            if best_seq is not None:
-                sequence_length = best_seq
-                features_per_timestep = best_feat
-                print(f"[TCNPolicy] Inferred sequence_length={sequence_length}, features_per_timestep={features_per_timestep} from obs dim {features_dim}")
-            else:
-                # Fallback: pick the largest divisor less than features_dim
-                for seq in range(MAX_SEQ_LEN, 0, -1):
-                    if features_dim % seq == 0:
-                        best_seq = seq
-                        best_feat = features_dim // seq
-                        print(f"[TCNPolicy] Fallback inferred sequence_length={sequence_length}, features_per_timestep={features_per_timestep} from obs dim {features_dim}")
-                        break
-                if best_seq is not None:
-                    sequence_length = best_seq
-                    features_per_timestep = best_feat
+        # If features_per_timestep is not provided, use the number of features in the config
+        if features_per_timestep is None:
+            # Try to get features from kwargs or config
+            features = None
+            if 'features' in kwargs:
+                features = kwargs['features']
+            elif hasattr(self, 'features'):
+                features = self.features
+            if features is not None:
+                if isinstance(features, str):
+                    features_list = [f.strip() for f in features.split(',') if f.strip()]
+                elif isinstance(features, list):
+                    features_list = [str(f) for f in features]
                 else:
-                    raise ValueError(f"Cannot infer sequence_length/features_per_timestep for obs dim {features_dim}")
-        else:
-            print(f"[TCNPolicy] Using provided sequence_length={sequence_length}, features_per_timestep={features_per_timestep}")
-        if features_per_timestep == 1 or sequence_length == 1:
-            print(f"[TCNPolicy][WARNING] Inferred features_per_timestep=1 or sequence_length=1. This may cause excessive memory usage or poor learning. Please check your observation shape and consider setting sequence_length and features_per_timestep explicitly.")
+                    raise ValueError("Could not determine features_per_timestep from features config.")
+                # Filter out features with _4h or _1d suffixes
+                filtered_features = [f for f in features_list if not (f.endswith('_4h') or f.endswith('_1d'))]
+                features_per_timestep = len(filtered_features)
+                print(f"[TCNPolicy] Inferred features_per_timestep={features_per_timestep} from filtered features list: {filtered_features}")
+            else:
+                raise ValueError("features_per_timestep not provided and features list not found in config/kwargs.")
+        # Now set sequence_length
+        if features_dim % features_per_timestep != 0:
+            raise ValueError(f"Observation dimension {features_dim} is not divisible by features_per_timestep {features_per_timestep}. Check your features list and data shape.")
+        sequence_length = features_dim // features_per_timestep
+        print(f"[TCNPolicy] Using sequence_length={sequence_length}, features_per_timestep={features_per_timestep} (features_dim={features_dim})")
         self.sequence_length = sequence_length
         self.features_per_timestep = features_per_timestep
         # Store these parameters for later use in _build
