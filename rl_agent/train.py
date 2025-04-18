@@ -1189,111 +1189,116 @@ def evaluate_model(
     return (mean_reward, np.array(all_portfolio_values), all_actions, all_rewards)
 
 
-def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Evaluate a trained model on test data.
-    """
-    log_path = os.path.join(config["log_dir"], config["model_name"], "evaluation")
-    ensure_dir_exists(log_path)
-    log_level = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
-    setup_logger(log_dir=log_path, log_level=log_level)
-    eval_logger = logging.getLogger("rl_agent")
+def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:  # Add args parameter
+    """Evaluate a trained model."""
+    eval_logger = logging.getLogger("rl_agent.evaluate")
+    eval_logger.info("Starting evaluation...")
 
-    model_path = config["load_model"]
+    # <<< Use args.load_model directly >>>
+    model_path = args.load_model
     if not model_path or not os.path.exists(model_path):
-        eval_logger.error(f"Model path not found/specified: {model_path}"); sys.exit(1)
-    if not config.get("test_data_path"):
-        eval_logger.error("No test data path provided (--test_data_path)"); sys.exit(1)
+        eval_logger.error(f"Model path not found or invalid: {model_path}")
+        raise FileNotFoundError(f"Model path {model_path} required for evaluation.")
+    eval_logger.info(f"Loading model from: {model_path}")
 
-    eval_logger.info(f"Creating test env from: {config['test_data_path']}")
-    base_seed = config.get("seed")
+    # <<< Use args.test_data_path directly >>>
+    test_data_path = args.test_data_path
+    if not test_data_path:
+        eval_logger.error("Test data path (--test_data_path) is required for evaluation.")
+        raise ValueError("Test data path is required for evaluation.")
+    eval_logger.info(f"Using test data: {test_data_path}")
 
-    def make_single_eval_env(rank: int, base_seed_val: Optional[int]):
-        def _init():
-            env_config = config.copy()
-            env_config["seed"] = base_seed_val + rank if base_seed_val is not None else None
-            env = create_env(config=env_config, is_eval=True)
-            monitor_log = os.path.join(log_path, f'monitor_eval_{rank}.csv')
-            os.makedirs(os.path.dirname(monitor_log), exist_ok=True)
-            env = Monitor(env, filename=monitor_log)
-            return env
-        return _init
+    # <<< Use args.data_key directly >>>
+    data_key = args.data_key
 
+    # --- Environment Setup --- #
+    eval_env_config = extract_env_config(config)
+    # Override data path for evaluation
+    eval_env_config["data_path"] = test_data_path
+    eval_env_config["data_key"] = data_key
+    # Use a distinct seed for evaluation if available, otherwise None
+    eval_seed = config.get("seed") + 1000 if config.get("seed") is not None else None
+
+    eval_logger.info(f"Creating evaluation environment with data: {test_data_path}")
     test_env = make_vec_env(
-        env_id=make_single_eval_env(rank=0, base_seed_val=base_seed),
-        n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
+        env_id=make_single_train_env(rank=0, base_seed_val=eval_seed, is_eval_flag=True),
+        n_envs=1, # Always 1 env for evaluation
+        seed=None,
+        vec_env_cls=DummyVecEnv,
+        env_kwargs=None # env_config passed within make_single_train_env
     )
 
-    # --- Apply VecNormalize --- #
+    # Apply VecNormalize if stats file exists
     potential_stats_path = model_path.replace(".zip", "_vecnormalize.pkl")
     if os.path.exists(potential_stats_path):
         eval_logger.info(f"Loading VecNorm stats: {potential_stats_path}")
         test_env = VecNormalize.load(potential_stats_path, test_env)
         test_env.training = False; test_env.norm_reward = False
+        eval_logger.info("VecNormalize applied for evaluation.")
     else:
-        eval_logger.warning("VecNorm stats not found. Creating fresh wrapper.")
-        norm_obs_setting = config.get("norm_obs", "auto").lower()
-        if norm_obs_setting == "auto":
-            features = config.get("features", [])
-            if isinstance(features, str): features = features.split(",")
-            has_scaled = any("_scaled" in f for f in features)
-            should_norm_obs = not has_scaled
-        else: should_norm_obs = norm_obs_setting == "true"
-        eval_logger.info(f"Applying VecNorm: norm_obs={should_norm_obs}")
-        test_env = VecNormalize(
-            test_env, norm_obs=should_norm_obs, norm_reward=False,
-            clip_obs=10., gamma=config["gamma"], training=False
-        )
+        eval_logger.info("No VecNormalize stats file found, using raw environment.")
 
-    model_cls = {"dqn": DQN, "ppo": PPO, "a2c": A2C, "sac": SAC,
-                 "lstm_dqn": DQN, "qrdqn": QRDQN, "recurrentppo": RecurrentPPO}
-    model = model_cls[config["model_type"]].load(model_path, env=test_env)
+    # --- Load Model --- #
+    model_type_str = config.get("model_type", "ppo").lower()
+    ModelClass = get_model_class(model_type_str)
+    try:
+        model = ModelClass.load(model_path, env=test_env, device=config.get("device", "auto"))
+        eval_logger.info(f"Model {model_path} loaded successfully.")
+    except Exception as e:
+        eval_logger.error(f"Failed to load model: {e}", exc_info=True)
+        raise
 
-    # <<< REMOVE FIX: Explicitly set a new logger for evaluation >>>
-    # eval_sb3_log_path = os.path.join(log_path, "sb3_eval_logs")
-    # ensure_dir_exists(eval_sb3_log_path)
-    # eval_sb3_logger = setup_sb3_logger(log_dir=eval_sb3_log_path, use_tensorboard=False) # Don't need TB for basic eval logs
-    # model.set_logger(eval_sb3_logger)
-    # eval_logger.info(f"Set new SB3 logger for evaluation model: {eval_sb3_log_path}")
-    # <<< END REMOVE FIX >>>
+    # --- Run Evaluation --- #
+    # REMOVED 불필요: model.set_logger(eval_sb3_logger)
 
     n_eval = config.get("n_eval_episodes", 5)
-    eval_logger.info(f"Starting evaluation for {n_eval} episodes")
-    mean_reward, portfolio_values, actions, rewards = evaluate_model(
-        model=model, env=test_env, config=config,
-        n_episodes=n_eval, deterministic=True
+    eval_logger.info(f"Evaluating model for {n_eval} episodes...")
+    mean_reward, portfolio_values, actions, rewards = run_evaluation_episodes(
+        model=model, env=test_env, n_episodes=n_eval, deterministic=True
     )
+    eval_logger.info(f"Evaluation complete. Mean reward: {mean_reward:.4f}")
 
-    # Calculate metrics
+    # --- Calculate Metrics --- #
     initial_balance = config.get("initial_balance", 10000)
-    final_value = portfolio_values[-1] if len(portfolio_values) > 0 else initial_balance
+    # Ensure portfolio_values is not empty and get the last value
+    final_value = portfolio_values[-1][-1] if portfolio_values and portfolio_values[-1] else initial_balance
     total_return = (final_value / initial_balance) - 1 if initial_balance > 0 else 0.0
-    metrics = {"mean_reward": mean_reward, "final_portfolio_value": final_value,
-               "total_return": total_return, "n_eval_episodes": n_eval}
-    if len(portfolio_values) > 10:
+
+    metrics = {
+        "mean_reward": mean_reward,
+        "final_portfolio_value": final_value,
+        "total_return": total_return,
+        "n_eval_episodes": n_eval
+    }
+
+    # Flatten portfolio values for metric calculation
+    flat_portfolio_values = [val for episode_vals in portfolio_values for val in episode_vals]
+
+    if len(flat_portfolio_values) > 10: # Need enough data points
         try:
-            trading_metrics = calculate_trading_metrics(portfolio_values)
+            trading_metrics = calculate_trading_metrics(flat_portfolio_values)
             metrics.update(trading_metrics)
-            plot_path = os.path.join(log_path, "evaluation_plots.png")
-            create_evaluation_plots(list(portfolio_values), actions, rewards, save_path=plot_path)
-            eval_logger.info(f"Evaluation plots saved: {plot_path}")
-        except Exception as e: eval_logger.warning(f"Eval metrics/plots error: {e}")
-    else: eval_logger.warning(f"Only {len(portfolio_values)} vals; skipping advanced metrics.")
+            eval_logger.info(f"Trading Metrics: {trading_metrics}")
+        except Exception as e:
+            eval_logger.warning(f"Could not calculate trading metrics: {e}")
 
-    eval_logger.info("Evaluation Results:")
-    for k, v in metrics.items():
-        log_str = f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}"
-        eval_logger.info(log_str)
-
-    metrics_file = os.path.join(log_path, "evaluation_metrics.json")
-    try:
-        serializable = {k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
-                        for k, v in metrics.items()}
-        with open(metrics_file, 'w', encoding='utf-8') as f: json.dump(serializable, f, indent=4)
-        eval_logger.info(f"Metrics saved to {metrics_file}")
-    except Exception as e: eval_logger.warning(f"Failed to save metrics: {e}")
+    # --- Generate Plots --- #
+    if config.get("generate_plots", True) and len(flat_portfolio_values) > 1:
+        plot_dir = os.path.join(os.path.dirname(model_path), "evaluation_plots")
+        ensure_dir_exists(plot_dir)
+        try:
+            create_evaluation_plots(
+                portfolio_values=flat_portfolio_values,
+                actions=actions, # Pass flattened/combined actions if needed
+                rewards=rewards, # Pass flattened/combined rewards if needed
+                plot_dir=plot_dir
+            )
+            eval_logger.info(f"Evaluation plots saved to: {plot_dir}")
+        except Exception as e:
+            eval_logger.warning(f"Could not generate evaluation plots: {e}")
 
     test_env.close()
+    eval_logger.info("Evaluation finished.")
     return metrics
 
 
@@ -1528,11 +1533,10 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 # --- Main Execution --- #
 
 def main():
-    """Main function: parse args, setup, run train/eval."""
-    # REMOVED: print(f"Raw sys.argv: {sys.argv}")
+    print(f"Raw sys.argv: {sys.argv}") # KEEP THIS CHECK
     args = parse_args()
-    # REMOVED: print(f"Value of args.eval_only IMMEDIATELY after parse_args: {args.eval_only}")
-    config = args_to_config(args)
+    print(f"Parsed args: {args}") # KEEP THIS CHECK
+    print(f"Value of args.eval_only AFTER parse_args: {args.eval_only}") # KEEP THIS CHECK
 
     # --- Config Loading --- #
     if args.load_config is not None:
@@ -1582,54 +1586,18 @@ def main():
 
     # <<< Use args.eval_only directly for mode selection >>>
     if args.eval_only:
-        # REMOVED: print(">>> EXECUTION: Entered IF args.eval_only block <<<") # ADDED DEBUG
         print("Running in Evaluation-Only Mode")
-        # Ensure load_model and test_data_path are provided for eval mode
-        if config.get("load_model") is None:
-             print("Error: --load_model required for evaluation mode."); sys.exit(1)
-        # Use the primary data_path argument for the evaluation data source
-        # if config.get("test_data_path") is None:
-        #    print("Error: --test_data_path required for evaluation mode."); sys.exit(1)
-        # Ensure data_path is used for evaluation data
-        if config.get("data_path") is None:
-            print("Error: --data_path (pointing to eval data) required for evaluation mode."); sys.exit(1)
-        # Set test_data_path based on data_path if not explicitly given
-        if config.get("test_data_path") is None:
-            config["test_data_path"] = config["data_path"]
-            print(f"Using data_path '{config['data_path']}' as test_data_path for evaluation.")
-
-        evaluate(config)
+        # <<< Pass args to evaluate function >>>
+        evaluate(config, args)
     else:
-        # REMOVED: print(">>> EXECUTION: Entered ELSE block (Training Mode) <<<") # ADDED DEBUG
-        print(f"Running Training Mode: {config['model_type']}")
-        model, train_metrics = train(config)
-        # Post-training evaluation on test set (if provided)
-        if config.get("test_data_path") is not None:
-            print("\\nStarting final evaluation on test data...")
-            final_model_path = os.path.join(config["log_dir"], config["model_name"], "final_model.zip")
-            # Check if final model exists before attempting evaluation
-            if not os.path.exists(final_model_path):
-                 print(f"Error: Final model not found at {final_model_path}. Cannot run post-training evaluation.")
-            else:
-                 eval_config = config.copy()
-                 eval_config["load_model"] = final_model_path
-                 # Use test_data_path for evaluation
-                 eval_config["data_path"] = config["test_data_path"] # Ensure eval uses test data path
-                 test_metrics = evaluate(eval_config)
-                 print("\\n--- Training Summary ---")
-                 print(f"Time: {train_metrics.get('training_time', 0):.2f}s")
-                 print(f"Steps: {train_metrics.get('total_timesteps', 0)}")
-                 print(f"Model saved: {final_model_path}")
-                 print("\\n--- Test Set Evaluation Results ---")
-                 for k, v in test_metrics.items(): print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+        print("Running in Training Mode")
+        # Check if Ray Tune is being used
+        if RAY_AVAILABLE and tune.is_session_enabled():
+            print("Detected Ray Tune session. Running tune_trainable.")
+            tune_trainable(config)
         else:
-            # If no test data, just print training summary
-            final_model_path = os.path.join(config["log_dir"], config["model_name"], "final_model.zip")
-            print("\\n--- Training Completed ---")
-            print(f"Time: {train_metrics.get('training_time', 0):.2f}s")
-            print(f"Steps: {train_metrics.get('total_timesteps', 0)}")
-            print(f"Model saved: {final_model_path}")
-            print("No test data provided (--test_data_path) for final evaluation.")
+            print("No Ray Tune session detected. Running standard train.")
+            train(config)
 
 
 if __name__ == "__main__":
