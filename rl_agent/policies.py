@@ -92,7 +92,7 @@ class TcnPolicy(ActorCriticPolicy):
         *args,
         # TCN specific parameters
         tcn_params: Optional[Dict[str, Any]] = None,
-        sequence_length: int = 60,
+        sequence_length: Optional[int] = 60,
         features_per_timestep: Optional[int] = None,
         **kwargs
     ):
@@ -107,28 +107,39 @@ class TcnPolicy(ActorCriticPolicy):
         # Override defaults with provided parameters
         if tcn_params is not None:
             self.tcn_params.update(tcn_params)
-            
-        # Store sequence information
-        self.sequence_length = sequence_length
         
-        # If features_per_timestep is not provided, try to infer from observation space
-        if features_per_timestep is None:
-            if isinstance(observation_space, gym.spaces.Box):
-                # Calculate features_per_timestep by dividing total features by sequence_length
-                features_dim = int(np.prod(observation_space.shape))
-                self.features_per_timestep = features_dim // sequence_length
-                print(f"Inferring features_per_timestep from observation space: {self.features_per_timestep} (total features: {features_dim}, sequence_length: {sequence_length})")
+        # Dynamically infer sequence_length and features_per_timestep
+        features_dim = int(np.prod(observation_space.shape))
+        orig_sequence_length = sequence_length
+        orig_features_per_timestep = features_per_timestep
+        # Try to use provided values if possible
+        if sequence_length is not None and features_per_timestep is not None:
+            if sequence_length * features_per_timestep != features_dim:
+                print(f"[TCNPolicy] Provided sequence_length ({sequence_length}) * features_per_timestep ({features_per_timestep}) != obs dim ({features_dim}). Will infer dynamically.")
+                sequence_length = None
+                features_per_timestep = None
+        # If not provided or not matching, infer
+        if sequence_length is None or features_per_timestep is None:
+            # Try to find the largest possible sequence_length that divides features_dim
+            best_seq = None
+            best_feat = None
+            for seq in range(features_dim, 0, -1):
+                if features_dim % seq == 0:
+                    best_seq = seq
+                    best_feat = features_dim // seq
+                    break
+            if best_seq is not None:
+                sequence_length = best_seq
+                features_per_timestep = best_feat
+                print(f"[TCNPolicy] Inferred sequence_length={sequence_length}, features_per_timestep={features_per_timestep} from obs dim {features_dim}")
             else:
-                # Default to a reasonable value if can't infer
-                self.features_per_timestep = 32
-                print(f"Warning: Could not infer features_per_timestep from {observation_space}. Using default: {self.features_per_timestep}")
+                raise ValueError(f"Cannot infer sequence_length/features_per_timestep for obs dim {features_dim}")
         else:
-            self.features_per_timestep = features_per_timestep
-            print(f"Using provided features_per_timestep: {self.features_per_timestep}")
-        
+            print(f"[TCNPolicy] Using provided sequence_length={sequence_length}, features_per_timestep={features_per_timestep}")
+        self.sequence_length = sequence_length
+        self.features_per_timestep = features_per_timestep
         # Store these parameters for later use in _build
         self._tcn = None
-        
         # Initialize the parent class - IMPORTANT: This will call _build,
         # which will in turn call our overridden _build_mlp_extractor
         super(TcnPolicy, self).__init__(
