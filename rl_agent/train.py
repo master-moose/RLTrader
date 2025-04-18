@@ -1579,6 +1579,7 @@ def main():
 
     # <<< Use args.eval_only directly for mode selection >>>
     if args.eval_only:
+        print(">>> EXECUTION: Entered IF args.eval_only block <<<") # ADDED DEBUG
         print("Running in Evaluation-Only Mode")
         # Ensure load_model and test_data_path are provided for eval mode
         if config.get("load_model") is None:
@@ -1596,6 +1597,7 @@ def main():
 
         evaluate(config)
     else:
+        print(">>> EXECUTION: Entered ELSE block (Training Mode) <<<") # ADDED DEBUG
         print(f"Running Training Mode: {config['model_type']}")
         model, train_metrics = train(config)
         # Post-training evaluation on test set (if provided)
