@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import gym
 from typing import Dict, List, Tuple, Type, Union, Optional, Any
+import logging
 
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -54,14 +55,27 @@ class TCN(nn.Module):
         if len(x.shape) != 3:
             print(f"Warning: Expected 3D input (batch_size, channels, sequence_length), got {x.shape}")
             if len(x.shape) == 2:
-                # If 2D, assume (batch_size, features) and reshape to (batch_size, 1, features)
-                x = x.unsqueeze(1)
-                print(f"Reshaped to {x.shape}")
+                # If 2D, assume (batch_size, features) and reshape appropriately
+                batch_size = x.shape[0]
+                features = x.shape[1]
+                # Try to infer sequence_length and channels
+                sequence_length = self.receptive_field
+                channels = features // sequence_length
+                x = x.view(batch_size, channels, sequence_length)
+                print(f"Reshaped 2D input to {x.shape}")
             elif len(x.shape) > 3:
                 # If more than 3D, try to flatten extra dimensions
                 batch_size = x.shape[0]
                 x = x.reshape(batch_size, -1, x.shape[-1])
                 print(f"Reshaped to {x.shape}")
+        else:
+            # If already 3D, check if dimensions need to be transposed
+            # TCN expects (batch_size, channels, sequence_length)
+            # but sometimes we get (batch_size, sequence_length, channels)
+            if x.shape[1] > x.shape[2]:
+                # Likely (batch, seq_len, channels), transpose to (batch, channels, seq_len)
+                x = x.transpose(1, 2)
+                print(f"Transposed dimensions to {x.shape}")
         
         return self.network(x)
 
@@ -198,72 +212,77 @@ class TcnPolicy(ActorCriticPolicy):
         class TcnExtractor(nn.Module):
             def __init__(self_extractor, tcn, features_per_timestep, sequence_length, features_dim):
                 super(TcnExtractor, self_extractor).__init__()
-                self_extractor.tcn = tcn
+                
+                self_extractor.tcn = tcn  # The TCN module
                 self_extractor.features_per_timestep = features_per_timestep
                 self_extractor.sequence_length = sequence_length
                 self_extractor.features_dim = features_dim
                 
-                # Output size will be (batch_size, num_filters, sequence_length)
-                # We need to project this to the appropriate size for actor/critic
-                self_extractor.output_dim = tcn.output_dim * sequence_length
+                # Calculate the output dimension after TCN processing
+                # This is the number of filters * sequence_length
+                num_filters = tcn.num_filters if hasattr(tcn, 'num_filters') else 64  # Default if not available
+                self_extractor.output_dim = num_filters * sequence_length
                 
-                # Create separate heads for policy and value
+                # Initialize policy and value networks with the expected output dimensions
                 self_extractor.policy_net = nn.Sequential(
                     nn.Linear(self_extractor.output_dim, 64),
                     nn.ReLU()
                 )
+                
                 self_extractor.value_net = nn.Sequential(
                     nn.Linear(self_extractor.output_dim, 64),
                     nn.ReLU()
                 )
                 
             def forward(self_extractor, features):
+                # Reshape the input features to (batch_size, features_per_timestep, sequence_length)
+                # TCN expects (batch_size, channels, sequence_length)
                 batch_size = features.shape[0]
-                feature_dim = features.shape[1]  # Total features per sample
                 
-                # Always calculate the correct features_per_timestep based on actual input
-                # This ensures we never have a shape mismatch
-                correct_features_per_timestep = feature_dim // self_extractor.sequence_length
+                # First reshape to (batch_size, sequence_length, features_per_timestep)
+                reshaped_features = features.view(batch_size, self_extractor.sequence_length, 
+                                                self_extractor.features_per_timestep)
                 
-                # If there's a remainder, we need to pad or truncate
-                if feature_dim % self_extractor.sequence_length != 0:
-                    # Let's log this situation for debugging
-                    print(f"Warning: Feature dimension {feature_dim} is not divisible by sequence length {self_extractor.sequence_length}.")
-                    print(f"Using {correct_features_per_timestep} features per timestep with truncation.")
+                # Then transpose to (batch_size, features_per_timestep, sequence_length)
+                # which is the expected format for TCN: (batch_size, channels, sequence_length)
+                reshaped_features = reshaped_features.transpose(1, 2)
                 
-                # Update the features_per_timestep to match the actual data
-                self_extractor.features_per_timestep = correct_features_per_timestep
+                # Process through TCN
+                tcn_output = self_extractor.tcn(reshaped_features)
                 
-                # If feature_dim is smaller than sequence_length, we need to adjust sequence_length instead
-                actual_sequence_length = self_extractor.sequence_length
-                if feature_dim < self_extractor.sequence_length:
-                    actual_sequence_length = feature_dim
-                    print(f"Warning: Input features ({feature_dim}) fewer than sequence length ({self_extractor.sequence_length}).")
-                    print(f"Reducing sequence length to {actual_sequence_length} for this forward pass.")
+                # Get the actual output shape from the TCN
+                actual_output_shape = tcn_output.shape
+                print(f"TCN output shape: {actual_output_shape}")
                 
-                try:
-                    # Reshape using the corrected dimensions
-                    x = features.view(batch_size, self_extractor.features_per_timestep, actual_sequence_length)
-                    print(f"Reshaped input to: {x.shape}")
-                except RuntimeError as e:
-                    # Last resort fallback - reshape to 2D then to 3D
-                    print(f"Reshape failed: {e}. Using emergency fallback.")
-                    # Just create a valid 3D tensor of the right shape for the TCN
-                    flat_features = features.reshape(batch_size, -1)
-                    channels = min(32, flat_features.shape[1])  # Use at most 32 channels
-                    seq_len = flat_features.shape[1] // channels
-                    # Update internal values for downstream calculations
-                    self_extractor.features_per_timestep = channels
-                    x = flat_features[:, :channels*seq_len].reshape(batch_size, channels, seq_len)
-                    print(f"Emergency fallback shape: {x.shape}")
+                # Flatten the output for the policy and value networks
+                flattened = tcn_output.reshape(batch_size, -1)
+                actual_flattened_dim = flattened.shape[1]
                 
-                # Apply TCN - output: (batch_size, num_filters, sequence_length)
-                x = self_extractor.tcn(x)
+                # Check if the expected output dimension matches the actual output
+                if self_extractor.output_dim != actual_flattened_dim:
+                    print(f"TCN output dimension mismatch: expected {self_extractor.output_dim}, "
+                          f"got {actual_flattened_dim}. Adjusting networks.")
+                    
+                    # Update the output dimension
+                    self_extractor.output_dim = actual_flattened_dim
+                    
+                    # Recreate the policy and value networks with the correct dimensions
+                    device = flattened.device
+                    self_extractor.policy_net = nn.Sequential(
+                        nn.Linear(actual_flattened_dim, 64),
+                        nn.ReLU()
+                    ).to(device)
+                    
+                    self_extractor.value_net = nn.Sequential(
+                        nn.Linear(actual_flattened_dim, 64),
+                        nn.ReLU()
+                    ).to(device)
                 
-                # Flatten for the MLP heads
-                x_flat = x.reshape(batch_size, -1)
+                # Forward through the policy and value networks
+                policy_latent = self_extractor.policy_net(flattened)
+                value_latent = self_extractor.value_net(flattened)
                 
-                return self_extractor.policy_net(x_flat), self_extractor.value_net(x_flat)
+                return policy_latent, value_latent
                 
         return TcnExtractor(
             self._tcn, 
