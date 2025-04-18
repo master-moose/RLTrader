@@ -76,7 +76,11 @@ class TCN(nn.Module):
                 # Likely (batch, seq_len, channels), transpose to (batch, channels, seq_len)
                 x = x.transpose(1, 2)
                 print(f"Transposed dimensions to {x.shape}")
-        
+        # --- Add assertion for channel mismatch ---
+        expected_channels = self.network[1].in_channels if hasattr(self.network[1], 'in_channels') else None
+        if expected_channels is not None and x.shape[1] != expected_channels:
+            print(f"[TCN][ERROR] Input channels: {x.shape[1]}, Expected: {expected_channels}, Input shape: {x.shape}")
+            raise RuntimeError(f"TCN input channel mismatch: got {x.shape[1]}, expected {expected_channels}. Check features_per_timestep and sequence_length inference.")
         return self.network(x)
 
 
