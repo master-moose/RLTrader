@@ -81,11 +81,11 @@ DEFAULT_CONFIG = {
     
     # Fixed LSTM params as requested
     "lstm_hidden_size": 256,
-    "n_lstm_layers": 1,
+    "n_lstm_layers": 2,
     "shared_lstm": "shared",
     
     # Fixed environment params as requested
-    "sequence_length": 60,
+    "sequence_length": 96,
     # num_envs is calculated dynamically based on available CPUs
     "max_steps": 20000,
     
@@ -202,7 +202,7 @@ def define_search_space() -> Dict[str, Any]:
         # GAE lambda - removed 0.99
         "gae_lambda": tune.choice([0.9, 0.95, 0.98]),
         # PPO epochs per update - Reduced range to try improving stability
-        "n_epochs": tune.choice([3, 5, 8]),
+        "n_epochs": tune.choice([3, 5]),
         # Gradient clipping norm - removed 2.0
         "max_grad_norm": tune.choice([0.5, 1.0]),
 
