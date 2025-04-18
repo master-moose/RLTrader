@@ -378,23 +378,22 @@ class TradingEnvironment(Env):
         
         # Get new observation
         observation = self._get_observation()
-        
-        # Get info
         info = self._get_info()
-        # Add detailed reward components to info dict
-        info['reward_components'] = reward_info
-        
-        # --- DEBUG LOGGING --- 
-        # if terminated or truncated: # Silenced as requested
-        #     # Changed to logger.info to ensure visibility regardless of level
-        #     logger.info(
-        #         f"DEBUG STEP: current_step={self.current_step}, "
-        #         f"episode_step={self.episode_step}, max_steps={self.max_steps}, "
-        #         f"action={action}, terminated={terminated}, truncated={truncated}, "
-        #         f"is_end_of_data={is_end_of_data}, is_max_steps_reached={is_max_steps_reached}"
-        #     )
-        # --- END DEBUG LOGGING ---
-        
+
+        # --- Log Termination/Truncation Reason and Episode Summary ---
+        if terminated or truncated:
+            logger.info(
+                (
+                    f"[EPISODE END] Step {self.current_step} | EpStep {self.episode_step}\n"
+                    f"Terminated: {terminated} | Truncated: {truncated} | Reason: {termination_reason}\n"
+                    f"Final Portfolio Value: {self.portfolio_value:.2f}\n"
+                    f"Profit: {self.portfolio_value - self.initial_balance:.2f}\n"
+                    f"Episode Return: {info.get('episode_return', 0.0):.4f}\n"
+                    f"Total Trades: {self.total_trades} | Buys: {self.total_buys} | Sells: {self.total_sells}\n"
+                    f"Max Drawdown: {self.max_drawdown:.2%}"
+                )
+            )
+
         # Gymnasium expects 5 return values: obs, reward, terminated, truncated, info
         return observation, reward, terminated, truncated, info
     
