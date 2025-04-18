@@ -148,15 +148,12 @@ class TradingEnvironment(Env):
         # Define action and observation spaces
         self.action_space = spaces.Discrete(3)  # 0: Sell, 1: Hold, 2: Buy
         
-        # Observation space: features + balance + position
+        # Observation space: features only, no account info
         feature_space_dim = len(self.features) * self.sequence_length
-        account_space_dim = 2  # Cash balance and asset position (normalized)
-        total_space_dim = feature_space_dim + account_space_dim
-        
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(total_space_dim,),  # Use the calculated total dimension
+            shape=(feature_space_dim,),  # Only features, not account info
             dtype=np.float32
         )
         
