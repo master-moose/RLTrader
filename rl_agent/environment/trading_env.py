@@ -360,13 +360,15 @@ class TradingEnvironment(Env):
         # --- EPISODE SUMMARY LOG ---
         if terminated or truncated:
             logger.info(
-                f"""[EPISODE END] Step {self.current_step} | EpStep {self.episode_step}\n"
-                f"Terminated: {terminated} | Truncated: {truncated} | Reason: {termination_reason}\n"
-                f"Final Portfolio Value: {self.portfolio_value:.2f}\n"
-                f"Profit: {self.portfolio_value - self.initial_balance:.2f}\n"
-                f"Episode Return: {info.get('episode_return', 0.0):.4f}\n"
-                f"Total Trades: {self.total_trades} | Buys: {self.total_buys} | Sells: {self.total_sells}\n"
-                f"Max Drawdown: {self.max_drawdown:.2%}"
+                (
+                    f"[EPISODE END] Step {self.current_step} | EpStep {self.episode_step}\n"
+                    f"Terminated: {terminated} | Truncated: {truncated} | Reason: {termination_reason}\n"
+                    f"Final Portfolio Value: {self.portfolio_value:.2f}\n"
+                    f"Profit: {self.portfolio_value - self.initial_balance:.2f}\n"
+                    f"Episode Return: {info.get('episode_return', 0.0):.4f}\n"
+                    f"Total Trades: {self.total_trades} | Buys: {self.total_buys} | Sells: {self.total_sells}\n"
+                    f"Max Drawdown: {self.max_drawdown:.2%}"
+                )
             )
         # --- End Log ---
 
