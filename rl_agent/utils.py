@@ -440,8 +440,8 @@ def create_evaluation_plots(
 
 
 def calculate_trading_metrics(
-    portfolio_values: List[float],
-    benchmark_returns: Optional[List[float]] = None,
+    portfolio_values: np.ndarray,
+    benchmark_returns: Optional[np.ndarray] = None,
     risk_free_rate: float = 0.0
 ) -> Dict[str, float]:
     """
@@ -457,7 +457,7 @@ def calculate_trading_metrics(
     """
     metrics = {}
 
-    if len(portfolio_values) < 2:
+    if portfolio_values.size < 2:
         return {"error": "Not enough data points"}
 
     # Calculate returns
@@ -510,9 +510,9 @@ def calculate_trading_metrics(
     metrics["sortino_ratio"] = sortino_ratio
 
     # Benchmark comparison if provided
-    if benchmark_returns is not None and len(benchmark_returns) >= len(returns):
+    if benchmark_returns is not None and benchmark_returns.size >= returns.size:
         # Adjust benchmark returns to match the length of portfolio returns
-        benchmark_returns = benchmark_returns[:len(returns)]
+        benchmark_returns = benchmark_returns[:returns.size]
 
         # Beta
         covariance = np.cov(returns, benchmark_returns)[0, 1]
@@ -537,7 +537,7 @@ def calculate_trading_metrics(
     return metrics
 
 
-def calculate_max_drawdown(values: List[float]) -> float:
+def calculate_max_drawdown(values: np.ndarray) -> float:
     """
     Calculate maximum drawdown from a series of values.
 
@@ -547,8 +547,12 @@ def calculate_max_drawdown(values: List[float]) -> float:
     Returns:
         Maximum drawdown as a decimal
     """
-    if not values:
+    if values.size == 0:
         return 0.0
+
+    # Ensure input is a NumPy array for vectorized operations if possible
+    # Although iteration works, explicit array is safer
+    values = np.asarray(values)
 
     max_so_far = values[0]
     max_drawdown = 0
