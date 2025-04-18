@@ -1230,15 +1230,24 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
     # Override data path and key for evaluation
     eval_env_config["data_path"] = test_data_path
     eval_env_config["data_key"] = data_key
+    # Use a distinct seed for evaluation if available, otherwise None
+    eval_seed = config.get("seed") + 1000 if config.get("seed") is not None else None
+    eval_env_config["seed"] = eval_seed # Add seed to the config for create_env
 
     eval_logger.info(f"Creating evaluation environment with data: {test_data_path}")
-    test_env = make_vec_env(
-        env_id=make_single_train_env(rank=0, base_seed_val=eval_seed, is_eval_flag=True),
-        n_envs=1, # Always 1 env for evaluation
-        seed=None,
-        vec_env_cls=DummyVecEnv,
-        env_kwargs=None # env_config passed within make_single_train_env
-    )
+    # Create a single environment instance directly for evaluation
+    try:
+        single_eval_env = create_env(config=eval_env_config, is_eval=True)
+        # Wrap with Monitor for logging episode returns/lengths
+        monitor_log_path = os.path.join(os.path.dirname(model_path), f'monitor_eval.csv')
+        ensure_dir_exists(os.path.dirname(monitor_log_path))
+        single_eval_env = Monitor(single_eval_env, filename=monitor_log_path)
+        # Wrap with DummyVecEnv to make it a VecEnv
+        test_env = DummyVecEnv([lambda: single_eval_env])
+        eval_logger.info("Evaluation environment created successfully.")
+    except Exception as e:
+        eval_logger.error(f"Failed to create evaluation environment: {e}", exc_info=True)
+        raise
 
     # Apply VecNormalize if stats file exists
     potential_stats_path = model_path.replace(".zip", "_vecnormalize.pkl")
