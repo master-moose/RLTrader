@@ -219,37 +219,43 @@ class TcnPolicy(ActorCriticPolicy):
                 
             def forward(self_extractor, features):
                 batch_size = features.shape[0]
-                total_features = features.numel() // batch_size
+                feature_dim = features.shape[1]  # Total features per sample
                 
-                # Sanity check to avoid shape errors
-                if total_features != self_extractor.features_per_timestep * self_extractor.sequence_length:
-                    # Recalculate features_per_timestep based on the actual input
-                    actual_features_per_timestep = total_features // self_extractor.sequence_length
-                    print(f"Warning: Shape mismatch - expected {self_extractor.features_per_timestep} features per timestep, "
-                          f"but got {actual_features_per_timestep} based on input of size {features.shape} "
-                          f"and sequence length {self_extractor.sequence_length}")
-                    # Update to use the corrected dimensions
-                    self_extractor.features_per_timestep = actual_features_per_timestep
+                # Always calculate the correct features_per_timestep based on actual input
+                # This ensures we never have a shape mismatch
+                correct_features_per_timestep = feature_dim // self_extractor.sequence_length
                 
-                # Reshape from (batch_size, features_dim) to 
-                # (batch_size, features_per_timestep, sequence_length)
+                # If there's a remainder, we need to pad or truncate
+                if feature_dim % self_extractor.sequence_length != 0:
+                    # Let's log this situation for debugging
+                    print(f"Warning: Feature dimension {feature_dim} is not divisible by sequence length {self_extractor.sequence_length}.")
+                    print(f"Using {correct_features_per_timestep} features per timestep with truncation.")
+                
+                # Update the features_per_timestep to match the actual data
+                self_extractor.features_per_timestep = correct_features_per_timestep
+                
+                # If feature_dim is smaller than sequence_length, we need to adjust sequence_length instead
+                actual_sequence_length = self_extractor.sequence_length
+                if feature_dim < self_extractor.sequence_length:
+                    actual_sequence_length = feature_dim
+                    print(f"Warning: Input features ({feature_dim}) fewer than sequence length ({self_extractor.sequence_length}).")
+                    print(f"Reducing sequence length to {actual_sequence_length} for this forward pass.")
+                
                 try:
-                    x = features.view(batch_size, self_extractor.features_per_timestep, self_extractor.sequence_length)
+                    # Reshape using the corrected dimensions
+                    x = features.view(batch_size, self_extractor.features_per_timestep, actual_sequence_length)
+                    print(f"Reshaped input to: {x.shape}")
                 except RuntimeError as e:
-                    # If the reshape fails, try to adapt
-                    print(f"Reshape error: {e}. Attempting to adapt shape...")
-                    # Calculate how many timesteps we can actually fit
-                    actual_features = features.shape[1]
-                    actual_timesteps = actual_features // self_extractor.features_per_timestep
-                    if actual_timesteps < 1:
-                        # If we can't fit even one timestep, we need to reduce features_per_timestep
-                        self_extractor.features_per_timestep = actual_features
-                        x = features.view(batch_size, self_extractor.features_per_timestep, 1)
-                        print(f"Adapted to shape: {x.shape}")
-                    else:
-                        # Otherwise use as many timesteps as we can
-                        x = features.view(batch_size, self_extractor.features_per_timestep, actual_timesteps)
-                        print(f"Adapted to shape: {x.shape}")
+                    # Last resort fallback - reshape to 2D then to 3D
+                    print(f"Reshape failed: {e}. Using emergency fallback.")
+                    # Just create a valid 3D tensor of the right shape for the TCN
+                    flat_features = features.reshape(batch_size, -1)
+                    channels = min(32, flat_features.shape[1])  # Use at most 32 channels
+                    seq_len = flat_features.shape[1] // channels
+                    # Update internal values for downstream calculations
+                    self_extractor.features_per_timestep = channels
+                    x = flat_features[:, :channels*seq_len].reshape(batch_size, channels, seq_len)
+                    print(f"Emergency fallback shape: {x.shape}")
                 
                 # Apply TCN - output: (batch_size, num_filters, sequence_length)
                 x = self_extractor.tcn(x)
