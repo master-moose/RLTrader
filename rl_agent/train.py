@@ -1323,7 +1323,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 
     train_logger.info(f"Starting training for model: {config['model_name']}")
     device = ("cpu" if config["cpu_only"] else ("cuda" if torch.cuda.is_available() else "cpu"))
-    train_logger.info(f"Training on device: {device}")
+    train_logger.debug(f"Training on device: {device}") # Changed from info
     check_resources(train_logger)
 
     # --- Environment Creation --- #

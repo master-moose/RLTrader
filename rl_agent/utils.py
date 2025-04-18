@@ -186,18 +186,17 @@ def check_resources(
 
     # Log resource information
     if logger:
-        logger.info(f"CPU Usage: {cpu_percent:.1f}%")
-        logger.info(
+        logger.debug(f"CPU Usage: {cpu_percent:.1f}%")
+        logger.debug(
             f"Memory Usage: {memory.percent:.1f}% "
             f"({memory.used/(1024**3):.1f}GB / {memory.total/(1024**3):.1f}GB)"
         )
 
         if "gpu_memory_used" in resources:
-            logger.info(
-                f"GPU Memory: {resources['gpu_memory_used']:.1f}MB / "
-                f"{resources['gpu_memory_total']:.1f}MB "
-                f"({resources.get('gpu_utilization', 'N/A'):.1f}%)"
-            )
+            gpu_name = torch.cuda.get_device_name(0) if TORCH_AVAILABLE and torch.cuda.is_available() else "GPU"
+            logger.debug(f"GPU ({gpu_name}): {resources['gpu_memory_used']:.1f}MB / "
+                       f"{resources['gpu_memory_total']:.1f}MB "
+                       f"({resources.get('gpu_utilization', 'N/A'):.1f}% Utilization)")
 
     # Check for high memory usage
     if memory.percent > warning_threshold * 100:

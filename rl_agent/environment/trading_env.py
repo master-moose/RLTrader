@@ -166,7 +166,7 @@ class TradingEnvironment(Env):
             self.max_steps = min(max_steps,
                                  len(self.data) - self.sequence_length - 1)
         
-        logger.info(
+        logger.debug(
             f"Created TradingEnvironment with {len(self.data)} data points, "
             f"{len(self.features)} features, and sequence length "
             f"{self.sequence_length}"
