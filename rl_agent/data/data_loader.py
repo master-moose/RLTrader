@@ -89,65 +89,53 @@ class DataLoader:
     
     def load_data(self) -> pd.DataFrame:
         """
-        Load data from the CSV file.
+        Load data from the HDF5 file for multiple timeframes.
         
         Returns:
-            DataFrame with preprocessed data
+            DataFrame with combined data from multiple timeframes
         """
         logger.debug(f"Loading data from {self.data_path}")
         
-        # Determine file type
+        # Ensure the file is HDF5
         file_extension = os.path.splitext(self.data_path)[1].lower()
-        data = None
-        
-        if file_extension == '.csv':
-            logger.debug("Detected CSV file format.")
-            try:
-                data = pd.read_csv(self.data_path)
-            except Exception as e:
-                logger.error(f"Error loading CSV file: {e}")
-                raise
-        elif file_extension in ['.h5', '.hdf5']:
-            logger.debug("Detected HDF5 file format.")
-            if not self.data_key:
-                logger.warning("HDF5 file specified but no data_key provided. Attempting to load default key '/data' or first available key.")
-                # Try to infer a key if none provided (optional, can be error-prone)
-                try:
-                    with pd.HDFStore(self.data_path, mode='r') as store:
-                        keys = store.keys()
-                        if not keys:
-                             raise ValueError("HDF5 file contains no keys.")
-                        self.data_key = keys[0] # Use the first key
-                        logger.info(f"Using inferred data_key: {self.data_key}")
-                except Exception as e:
-                    logger.error(f"Could not read keys from HDF5 file {self.data_path}: {e}")
-                    raise
-
-            try:
-                logger.debug(f"Loading data from HDF5 key: {self.data_key}")
-                data = pd.read_hdf(self.data_path, key=self.data_key)
-            except KeyError:
-                logger.error(f"Key '{self.data_key}' not found in HDF5 file: {self.data_path}")
-                raise
-            except Exception as e:
-                logger.error(f"Error loading HDF5 file with key '{self.data_key}': {e}")
-                raise
-        else:
-            logger.error(f"Unsupported file format: {file_extension}. Please use .csv or .h5/.hdf5")
+        if file_extension not in ['.h5', '.hdf5']:
+            logger.error(f"Unsupported file format: {file_extension}. Please use .h5/.hdf5")
             raise ValueError(f"Unsupported file format: {file_extension}")
         
-        if data is None or data.empty:
-            logger.error("Loaded data is empty.")
-            raise ValueError("Failed to load non-empty data.")
-
+        # Define the keys for each timeframe
+        timeframes = ['/15m', '/4h', '/1d']
+        data_frames = []
+        
+        # Load data for each timeframe
+        try:
+            with pd.HDFStore(self.data_path, mode='r') as store:
+                for key in timeframes:
+                    if key in store:
+                        logger.debug(f"Loading data from HDF5 key: {key}")
+                        df = pd.read_hdf(self.data_path, key=key)
+                        df['timeframe'] = key  # Add a column to indicate the timeframe
+                        data_frames.append(df)
+                    else:
+                        logger.warning(f"Key '{key}' not found in HDF5 file: {self.data_path}")
+        except Exception as e:
+            logger.error(f"Error loading HDF5 file: {e}")
+            raise
+        
+        # Combine all dataframes
+        if not data_frames:
+            logger.error("No data loaded from specified timeframes.")
+            raise ValueError("Failed to load data from any specified timeframe.")
+        combined_data = pd.concat(data_frames, axis=0)
+        
+        # Post-processing (e.g., handling missing values, setting index)
         # --- Post-loading processing (applies to both CSV and HDF5) ---
         
         # Check if timestamp column exists; if not, assume it's the index
-        if self.timestamp_column in data.columns:
-            timestamp_source = data[self.timestamp_column]
+        if self.timestamp_column in combined_data.columns:
+            timestamp_source = combined_data[self.timestamp_column]
             is_index = False
-        elif data.index.name == self.timestamp_column or isinstance(data.index, pd.DatetimeIndex):
-            timestamp_source = data.index
+        elif combined_data.index.name == self.timestamp_column or isinstance(combined_data.index, pd.DatetimeIndex):
+            timestamp_source = combined_data.index
             is_index = True
         else:
             timestamp_source = None
@@ -158,29 +146,29 @@ class DataLoader:
             try:
                 parsed_timestamps = pd.to_datetime(timestamp_source, format=self.datetime_format)
                 if is_index:
-                    data.index = parsed_timestamps
+                    combined_data.index = parsed_timestamps
                 else:
-                    data[self.timestamp_column] = parsed_timestamps
+                    combined_data[self.timestamp_column] = parsed_timestamps
                     # Set timestamp as index if not already set
-                    if not isinstance(data.index, pd.DatetimeIndex):
-                         data.set_index(self.timestamp_column, inplace=True)
+                    if not isinstance(combined_data.index, pd.DatetimeIndex):
+                         combined_data.set_index(self.timestamp_column, inplace=True)
             except Exception as e:
                 logger.warning(f"Error parsing timestamps: {e}. Proceeding without datetime index.")
         elif isinstance(timestamp_source, pd.DatetimeIndex):
             logger.debug("Data already has a DatetimeIndex.")
         
         # Handle missing values (ensure this happens after potential index setting)
-        if data.isnull().values.any():
-            original_rows = len(data)
+        if combined_data.isnull().values.any():
+            original_rows = len(combined_data)
             if self.drop_na:
-                data.dropna(inplace=True)
-                logger.info(f"Dropped {original_rows - len(data)} rows with NA values.")
+                combined_data.dropna(inplace=True)
+                logger.info(f"Dropped {original_rows - len(combined_data)} rows with NA values.")
             elif self.fill_method.lower() != 'none':
                 fill_method_used = self.fill_method.lower()
                 if fill_method_used in ['ffill', 'bfill']:
-                    data.fillna(method=fill_method_used, inplace=True)
+                    combined_data.fillna(method=fill_method_used, inplace=True)
                 else:
-                    data.fillna(0, inplace=True) # Default fill with 0
+                    combined_data.fillna(0, inplace=True) # Default fill with 0
                     fill_method_used = 'zero'
                 logger.info(f"Filled NA values using method: {fill_method_used}")
             else:
@@ -189,12 +177,11 @@ class DataLoader:
             logger.debug("No NA values found in the loaded data.")
         
         # Ensure all numeric columns are float32 for better memory usage
-        for col in data.select_dtypes(include=np.number).columns:
-            data[col] = data[col].astype(np.float32)
+        for col in combined_data.select_dtypes(include=np.number).columns:
+            combined_data[col] = combined_data[col].astype(np.float32)
         
-        logger.debug(f"Loaded data with shape: {data.shape}")
-        
-        return data
+        logger.debug(f"Loaded combined data with shape: {combined_data.shape}")
+        return combined_data
     
     def add_technical_indicators(
         self, 
