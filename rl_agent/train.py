@@ -1528,11 +1528,10 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 
 def main():
     """Main function: parse args, setup, run train/eval."""
-    print(f"Raw sys.argv: {sys.argv}") # <-- Add this line
+    print(f"Raw sys.argv: {sys.argv}")
     args = parse_args()
-    config = args_to_config(args) # Get config from args FIRST
-
-    # <<< REMOVED EARLY DEBUG PRINTS >>>
+    print(f"Value of args.eval_only IMMEDIATELY after parse_args: {args.eval_only}")
+    config = args_to_config(args)
 
     # --- Config Loading --- #
     if args.load_config is not None:
@@ -1575,9 +1574,8 @@ def main():
     # --- Mode Selection --- #
     # <<< Debugging print statements remain >>>
     print("\n--- Debugging Mode Selection ---")
-    print(f"Value of args.eval_only: {args.eval_only}")
-    print(f"Value of config['eval_only'] before check: {config.get('eval_only')}") # Keep this to see if config still changes
-    print("--- End Debugging ---\n")
+    print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
+    print("--- End Debugging ---")
 
     # <<< Use args.eval_only directly for mode selection >>>
     if args.eval_only:
