@@ -1314,6 +1314,11 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
 
     if len(flat_portfolio_values) > 10: # Need enough data points
         try:
+            # <<< Add debug print here >>>
+            print(f"DEBUG: Type before calculate_trading_metrics: {type(flat_portfolio_values)}")
+            print(f"DEBUG: Shape before calculate_trading_metrics: {flat_portfolio_values.shape}")
+            print(f"DEBUG: First 10 elements: {flat_portfolio_values[:10]}")
+            # <<< End debug print >>>
             trading_metrics = calculate_trading_metrics(flat_portfolio_values)
             metrics.update(trading_metrics)
             eval_logger.info(f"Trading Metrics: {trading_metrics}")
