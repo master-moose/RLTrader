@@ -112,10 +112,10 @@ class TcnPolicy(ActorCriticPolicy):
     
     def _build(self, lr_schedule):
         """
-        Override the _build method from ActorCriticPolicy to ensure TCN is created
-        before the MLP extractor is built.
+        Completely override the _build method from ActorCriticPolicy to ensure
+        proper initialization sequence for the TCN-based policy.
         """
-        # Create the underlying TCN first
+        # 1. Create the underlying TCN first
         self._tcn = TCN(
             input_channels=self.features_per_timestep,
             num_filters=self.tcn_params["num_filters"],
@@ -124,9 +124,33 @@ class TcnPolicy(ActorCriticPolicy):
             dropout=self.tcn_params["dropout"]
         )
         
-        # Then call the parent _build method which will call _build_mlp_extractor
-        super()._build(lr_schedule)
-    
+        # 2. Create our custom mlp_extractor using the TCN
+        self.mlp_extractor = self._build_mlp_extractor()
+        
+        # 3. Add required properties for compatibility with parent class
+        self.mlp_extractor.latent_dim_pi = 64  # Output dim of policy net in TcnExtractor
+        self.mlp_extractor.latent_dim_vf = 64  # Output dim of value net in TcnExtractor
+        
+        # 4. Create action net (for policy output) - same as in ActorCriticPolicy
+        action_net_output_dim = self.action_dist.proba_distribution_net_output_dim(self.action_dim)
+        self.action_net = nn.Linear(self.mlp_extractor.latent_dim_pi, action_net_output_dim)
+        
+        # 5. Create value net (for value function) - same as in ActorCriticPolicy
+        self.value_net = nn.Linear(self.mlp_extractor.latent_dim_vf, 1)
+        
+        # 6. Initialize weights - similar to ActorCriticPolicy
+        # Initialize policy weights
+        module_gains = {
+            self.mlp_extractor: 1.0,
+            self.action_net: 0.01,
+            self.value_net: 1.0,
+        }
+        for module, gain in module_gains.items():
+            module.apply(lambda m: self.init_weights(m, gain=gain))
+            
+        # 7. Set up optimizer
+        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+
     @property
     def tcn(self):
         """Safe access to TCN with error handling."""
