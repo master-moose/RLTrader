@@ -1297,7 +1297,8 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
     # --- Calculate Metrics --- #
     initial_balance = config.get("initial_balance", 10000)
     # Ensure portfolio_values is not empty and get the last value
-    final_value = portfolio_values[-1][-1] if portfolio_values and portfolio_values[-1] else initial_balance
+    # Corrected condition to check list emptiness explicitly
+    final_value = portfolio_values[-1][-1] if portfolio_values and portfolio_values[-1] is not None and len(portfolio_values[-1]) > 0 else initial_balance
     total_return = (final_value / initial_balance) - 1 if initial_balance > 0 else 0.0
 
     metrics = {
