@@ -1309,7 +1309,8 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
     }
 
     # Flatten portfolio values for metric calculation
-    flat_portfolio_values = [val for episode_vals in portfolio_values for val in episode_vals]
+    # portfolio_values is already a flat NumPy array from evaluate_model
+    flat_portfolio_values = portfolio_values
 
     if len(flat_portfolio_values) > 10: # Need enough data points
         try:
