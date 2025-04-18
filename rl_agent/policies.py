@@ -97,10 +97,11 @@ class TcnPolicy(ActorCriticPolicy):
         else:
             self.features_per_timestep = features_per_timestep
         
-        # Initialize TCN before parent class to ensure it exists
+        # Store these parameters for later use in _build
         self._tcn = None
-            
-        # Initialize the parent class
+        
+        # Initialize the parent class - IMPORTANT: This will call _build,
+        # which will in turn call our overridden _build_mlp_extractor
         super(TcnPolicy, self).__init__(
             observation_space,
             action_space,
@@ -108,8 +109,13 @@ class TcnPolicy(ActorCriticPolicy):
             *args,
             **kwargs
         )
-        
-        # Create the TCN after parent initialization (which sets self.features_dim)
+    
+    def _build(self, lr_schedule):
+        """
+        Override the _build method from ActorCriticPolicy to ensure TCN is created
+        before the MLP extractor is built.
+        """
+        # Create the underlying TCN first
         self._tcn = TCN(
             input_channels=self.features_per_timestep,
             num_filters=self.tcn_params["num_filters"],
@@ -118,8 +124,8 @@ class TcnPolicy(ActorCriticPolicy):
             dropout=self.tcn_params["dropout"]
         )
         
-        # Replace the mlp_extractor with our TCN-based feature extractor
-        self.mlp_extractor = self._build_mlp_extractor()
+        # Then call the parent _build method which will call _build_mlp_extractor
+        super()._build(lr_schedule)
     
     @property
     def tcn(self):
