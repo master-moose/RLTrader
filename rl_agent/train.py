@@ -1538,16 +1538,20 @@ def main():
     print(f"Parsed args: {args}") # KEEP THIS CHECK
     print(f"Value of args.eval_only AFTER parse_args: {args.eval_only}") # KEEP THIS CHECK
 
+    # Initialize config from args FIRST
+    config = args_to_config(args)
+    print(f"Initial config from args: {config}") # Optional debug print
+
     # --- Config Loading --- #
     if args.load_config is not None:
-        if os.path.exists(args.load_config):
-            print(f"Loading configuration from: {args.load_config}")
-            file_config = load_config(args.load_config)
+        # Load config from file if path provided
+        config_path = os.path.abspath(os.path.expanduser(args.load_config))
+        if os.path.exists(config_path):
+            print(f"Loading configuration from: {config_path}") # CORRECTED PRINT
+            file_config = load_config(config_path)
             # Update config with file values first
             config.update(file_config)
-            print(f"Config updated with values from {args.load_config}") # CORRECTED PRINT
-        else:
-            print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
+            print(f"Config updated with values from {config_path}") # CORRECTED PRINT
 
     # Ensure features are a list (might be redundant now, but safe)
     if 'features' in config and isinstance(config['features'], str):
