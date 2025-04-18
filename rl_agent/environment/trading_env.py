@@ -359,6 +359,7 @@ class TradingEnvironment(Env):
 
         # --- EPISODE SUMMARY LOG ---
         if terminated or truncated:
+            info = self._get_info()
             logger.info(
                 (
                     f"[EPISODE END] Step {self.current_step} | EpStep {self.episode_step}\n"
@@ -383,24 +384,6 @@ class TradingEnvironment(Env):
         # Get new observation
         observation = self._get_observation()
         info = self._get_info()
-
-        # --- Log Termination/Truncation Reason ---
-        if terminated or truncated:
-            logger.info(
-                (
-                    f"[EPISODE END] Step {self.current_step} | EpStep {self.episode_step}\n"
-                    f"Terminated: {terminated} | Truncated: {truncated} | Reason: {termination_reason}\n"
-                    f"Final Portfolio Value: {self.portfolio_value:.2f}\n"
-                    f"Profit: {self.portfolio_value - self.initial_balance:.2f}\n"
-                    f"Episode Return: {info.get('episode_return', 0.0):.4f}\n"
-                    f"Sharpe (episode): {info.get('sharpe_ratio_episode', 0.0):.4f}\n"
-                    f"Sharpe (rolling): {info.get('sharpe_ratio_rolling', 0.0):.4f}\n"
-                    f"Calmar: {info.get('calmar_ratio', 0.0):.4f}\n"
-                    f"Sortino: {info.get('sortino_ratio', 0.0):.4f}\n"
-                    f"Total Trades: {self.total_trades} | Buys: {self.total_buys} | Sells: {self.total_sells}\n"
-                    f"Max Drawdown: {self.max_drawdown:.2%}"
-                )
-            )
 
         # Gymnasium expects 5 return values: obs, reward, terminated, truncated, info
         return observation, reward, terminated, truncated, info
