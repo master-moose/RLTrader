@@ -1531,12 +1531,7 @@ def main():
     args = parse_args()
     config = args_to_config(args) # Get config from args FIRST
 
-    # <<< ADD EARLY DEBUG PRINTS >>>
-    print("\\n--- EARLY Debug ---")
-    print(f"IMMEDIATELY after parse_args, args.eval_only: {args.eval_only}")
-    print(f"IMMEDIATELY after args_to_config, config['eval_only']: {config.get('eval_only')}")
-    print("--- End EARLY Debug ---\\n")
-    # <<< END EARLY DEBUG PRINTS >>>
+    # <<< REMOVED EARLY DEBUG PRINTS >>>
 
     # --- Config Loading --- #
     if args.load_config is not None:
@@ -1545,10 +1540,7 @@ def main():
             file_config = load_config(args.load_config)
             # Update config with file values first
             config.update(file_config)
-            print(f"Config updated with values from {args.load_config}")
-
-            # <<< REMOVED CLI OVERRIDES FROM HERE >>>
-
+            print(f"Config updated with values from {args.load_config}") # Corrected print message source
         else:
             print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
 
@@ -1566,7 +1558,7 @@ def main():
     ensure_dir_exists(os.path.join(log_base_dir, model_name))
     ensure_dir_exists(os.path.join(ckpt_base_dir, model_name))
 
-    # <<< ADDED CLI OVERRIDES HERE >>>
+    # <<< REVISED CLI OVERRIDES >>>
     # Apply CLI overrides *after* loading config and *before* mode selection
     print("\nApplying final CLI overrides for run control parameters...")
     if args.total_timesteps is not None:
@@ -1575,55 +1567,65 @@ def main():
     if args.eval_freq is not None:
          config['eval_freq'] = args.eval_freq
          print(f"  Overriding eval_freq -> {config['eval_freq']}")
-    # Ensure eval_only from CLI overrides file config
-    if args.eval_only:
-        config['eval_only'] = True
-        print(f"  Ensuring eval_only is set to True based on CLI flag.")
+    # eval_only override removed - will use args.eval_only directly
     print("--- End CLI Overrides ---\n")
-    # <<< END ADDED CLI OVERRIDES >>>
+    # <<< END REVISED CLI OVERRIDES >>>
 
     # --- Mode Selection --- #
-    # <<< REMOVE DEBUG PRINTS >>>
-    # print("\\n--- Debugging Mode Selection ---")
-    # print(f"Value of args.eval_only: {args.eval_only}")
-    # print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
-    # print("--- End Debugging ---\\n")
-    # <<< END REMOVE DEBUG PRINTS >>>
+    # <<< Debugging print statements remain >>>
+    print("\n--- Debugging Mode Selection ---")
+    print(f"Value of args.eval_only: {args.eval_only}")
+    print(f"Value of config['eval_only'] before check: {config.get('eval_only')}") # Keep this to see if config still changes
+    print("--- End Debugging ---\n")
 
-    # <<< ADD FINAL DEBUG PRINT >>>
-    print("\\n--- Final Mode Check Debug ---")
-    print(f"Value of config['eval_only'] JUST BEFORE if check: {config.get('eval_only')}")
-    print("--- End Final Debug ---\\n")
-    # <<< END FINAL DEBUG PRINT >>>
-
-    if config.get("eval_only", False):
+    # <<< Use args.eval_only directly for mode selection >>>
+    if args.eval_only:
         print("Running in Evaluation-Only Mode")
-        if config.get("load_model") is None: print("Error: --load_model required for eval"); sys.exit(1)
-        if config.get("test_data_path") is None: print("Error: --test_data_path required for eval"); sys.exit(1)
+        # Ensure load_model and test_data_path are provided for eval mode
+        if config.get("load_model") is None:
+             print("Error: --load_model required for evaluation mode."); sys.exit(1)
+        # Use the primary data_path argument for the evaluation data source
+        # if config.get("test_data_path") is None:
+        #    print("Error: --test_data_path required for evaluation mode."); sys.exit(1)
+        # Ensure data_path is used for evaluation data
+        if config.get("data_path") is None:
+            print("Error: --data_path (pointing to eval data) required for evaluation mode."); sys.exit(1)
+        # Set test_data_path based on data_path if not explicitly given
+        if config.get("test_data_path") is None:
+            config["test_data_path"] = config["data_path"]
+            print(f"Using data_path '{config['data_path']}' as test_data_path for evaluation.")
+
         evaluate(config)
     else:
         print(f"Running Training Mode: {config['model_type']}")
         model, train_metrics = train(config)
+        # Post-training evaluation on test set (if provided)
         if config.get("test_data_path") is not None:
-            print("\nStarting final evaluation on test data...")
-            final_model = os.path.join(log_base_dir, model_name, "final_model.zip")
-            eval_config = config.copy()
-            eval_config["load_model"] = final_model
-            eval_config["test_data_path"] = config["test_data_path"]
-            test_metrics = evaluate(eval_config)
-            print("\n--- Training Summary ---")
-            print(f"Time: {train_metrics.get('training_time', 0):.2f}s")
-            print(f"Steps: {train_metrics.get('total_timesteps', 0)}")
-            print(f"Model: {final_model}")
-            print("\n--- Test Set Evaluation Results ---")
-            for k, v in test_metrics.items(): print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+            print("\\nStarting final evaluation on test data...")
+            final_model_path = os.path.join(config["log_dir"], config["model_name"], "final_model.zip")
+            # Check if final model exists before attempting evaluation
+            if not os.path.exists(final_model_path):
+                 print(f"Error: Final model not found at {final_model_path}. Cannot run post-training evaluation.")
+            else:
+                 eval_config = config.copy()
+                 eval_config["load_model"] = final_model_path
+                 # Use test_data_path for evaluation
+                 eval_config["data_path"] = config["test_data_path"] # Ensure eval uses test data path
+                 test_metrics = evaluate(eval_config)
+                 print("\\n--- Training Summary ---")
+                 print(f"Time: {train_metrics.get('training_time', 0):.2f}s")
+                 print(f"Steps: {train_metrics.get('total_timesteps', 0)}")
+                 print(f"Model saved: {final_model_path}")
+                 print("\\n--- Test Set Evaluation Results ---")
+                 for k, v in test_metrics.items(): print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
         else:
-            final_model = os.path.join(log_base_dir, model_name, "final_model.zip")
-            print("\n--- Training Completed ---")
+            # If no test data, just print training summary
+            final_model_path = os.path.join(config["log_dir"], config["model_name"], "final_model.zip")
+            print("\\n--- Training Completed ---")
             print(f"Time: {train_metrics.get('training_time', 0):.2f}s")
             print(f"Steps: {train_metrics.get('total_timesteps', 0)}")
-            print(f"Model: {final_model}")
-            print("No test data provided (--test_data_path).")
+            print(f"Model saved: {final_model_path}")
+            print("No test data provided (--test_data_path) for final evaluation.")
 
 
 if __name__ == "__main__":
