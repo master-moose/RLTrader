@@ -1577,6 +1577,9 @@ def main():
     print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
     print("--- End Debugging ---")
 
+    # <<< Add one more check right before the condition >>>
+    print(f"Value of args.eval_only JUST BEFORE 'if': {args.eval_only}")
+
     # <<< Use args.eval_only directly for mode selection >>>
     if args.eval_only:
         print(">>> EXECUTION: Entered IF args.eval_only block <<<") # ADDED DEBUG
