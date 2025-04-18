@@ -112,6 +112,7 @@ class TcnPolicy(ActorCriticPolicy):
         features_dim = int(np.prod(observation_space.shape))
         orig_sequence_length = sequence_length
         orig_features_per_timestep = features_per_timestep
+        MAX_SEQ_LEN = 120  # Reasonable max for TCN
         # Try to use provided values if possible
         if sequence_length is not None and features_per_timestep is not None:
             if sequence_length * features_per_timestep != features_dim:
@@ -120,10 +121,10 @@ class TcnPolicy(ActorCriticPolicy):
                 features_per_timestep = None
         # If not provided or not matching, infer
         if sequence_length is None or features_per_timestep is None:
-            # Try to find the largest possible sequence_length that divides features_dim
+            # Try to find the largest possible sequence_length <= MAX_SEQ_LEN that divides features_dim
             best_seq = None
             best_feat = None
-            for seq in range(features_dim, 0, -1):
+            for seq in range(min(features_dim, MAX_SEQ_LEN), 0, -1):
                 if features_dim % seq == 0:
                     best_seq = seq
                     best_feat = features_dim // seq
@@ -133,9 +134,22 @@ class TcnPolicy(ActorCriticPolicy):
                 features_per_timestep = best_feat
                 print(f"[TCNPolicy] Inferred sequence_length={sequence_length}, features_per_timestep={features_per_timestep} from obs dim {features_dim}")
             else:
-                raise ValueError(f"Cannot infer sequence_length/features_per_timestep for obs dim {features_dim}")
+                # Fallback: pick the largest divisor less than features_dim
+                for seq in range(MAX_SEQ_LEN, 0, -1):
+                    if features_dim % seq == 0:
+                        best_seq = seq
+                        best_feat = features_dim // seq
+                        print(f"[TCNPolicy] Fallback inferred sequence_length={sequence_length}, features_per_timestep={features_per_timestep} from obs dim {features_dim}")
+                        break
+                if best_seq is not None:
+                    sequence_length = best_seq
+                    features_per_timestep = best_feat
+                else:
+                    raise ValueError(f"Cannot infer sequence_length/features_per_timestep for obs dim {features_dim}")
         else:
             print(f"[TCNPolicy] Using provided sequence_length={sequence_length}, features_per_timestep={features_per_timestep}")
+        if features_per_timestep == 1 or sequence_length == 1:
+            print(f"[TCNPolicy][WARNING] Inferred features_per_timestep=1 or sequence_length=1. This may cause excessive memory usage or poor learning. Please check your observation shape and consider setting sequence_length and features_per_timestep explicitly.")
         self.sequence_length = sequence_length
         self.features_per_timestep = features_per_timestep
         # Store these parameters for later use in _build
