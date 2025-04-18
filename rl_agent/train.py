@@ -428,7 +428,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         env_kwargs=None
     )
 
-    # --- VecNormalize Setup ---
+    # --- VecNormalize Setup --- #
     norm_obs_setting = train_config.get("norm_obs", "auto").lower()
     if norm_obs_setting == "auto":
         features = train_config.get("features", [])
@@ -1248,13 +1248,13 @@ def evaluate(config: Dict[str, Any]) -> Dict[str, Any]:
                  "lstm_dqn": DQN, "qrdqn": QRDQN, "recurrentppo": RecurrentPPO}
     model = model_cls[config["model_type"]].load(model_path, env=test_env)
 
-    # <<< FIX: Explicitly set a new logger for evaluation >>>
-    eval_sb3_log_path = os.path.join(log_path, "sb3_eval_logs")
-    ensure_dir_exists(eval_sb3_log_path)
-    eval_sb3_logger = setup_sb3_logger(log_dir=eval_sb3_log_path, use_tensorboard=False) # Don't need TB for basic eval logs
-    model.set_logger(eval_sb3_logger)
-    eval_logger.info(f"Set new SB3 logger for evaluation model: {eval_sb3_log_path}")
-    # <<< END FIX >>>
+    # <<< REMOVE FIX: Explicitly set a new logger for evaluation >>>
+    # eval_sb3_log_path = os.path.join(log_path, "sb3_eval_logs")
+    # ensure_dir_exists(eval_sb3_log_path)
+    # eval_sb3_logger = setup_sb3_logger(log_dir=eval_sb3_log_path, use_tensorboard=False) # Don't need TB for basic eval logs
+    # model.set_logger(eval_sb3_logger)
+    # eval_logger.info(f"Set new SB3 logger for evaluation model: {eval_sb3_log_path}")
+    # <<< END REMOVE FIX >>>
 
     n_eval = config.get("n_eval_episodes", 5)
     eval_logger.info(f"Starting evaluation for {n_eval} episodes")
@@ -1584,6 +1584,13 @@ def main():
     # print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
     # print("--- End Debugging ---\\n")
     # <<< END REMOVE DEBUG PRINTS >>>
+
+    # <<< ADD FINAL DEBUG PRINT >>>
+    print("\\n--- Final Mode Check Debug ---")
+    print(f"Value of config['eval_only'] JUST BEFORE if check: {config.get('eval_only')}")
+    print("--- End Final Debug ---\\n")
+    # <<< END FINAL DEBUG PRINT >>>
+
     if config.get("eval_only", False):
         print("Running in Evaluation-Only Mode")
         if config.get("load_model") is None: print("Error: --load_model required for eval"); sys.exit(1)
