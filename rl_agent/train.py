@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import traceback  # Added for potential use
+import copy # ADDED IMPORT
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # --- Third-Party Imports --- #
@@ -871,8 +872,8 @@ def parse_args():
 # --- Helper Functions --- #
 
 def args_to_config(args) -> Dict[str, Any]:
-    """Convert argparse arguments to config dictionary."""
-    return vars(args)
+    """Convert argparse arguments to config dictionary using deepcopy."""
+    return copy.deepcopy(vars(args)) # USE DEEPCOPY
 
 
 def linear_schedule(initial_value: float) -> Callable[[float], float]:
@@ -1528,9 +1529,9 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 
 def main():
     """Main function: parse args, setup, run train/eval."""
-    print(f"Raw sys.argv: {sys.argv}")
+    # REMOVED: print(f"Raw sys.argv: {sys.argv}")
     args = parse_args()
-    print(f"Value of args.eval_only IMMEDIATELY after parse_args: {args.eval_only}")
+    # REMOVED: print(f"Value of args.eval_only IMMEDIATELY after parse_args: {args.eval_only}")
     config = args_to_config(args)
 
     # --- Config Loading --- #
@@ -1540,7 +1541,7 @@ def main():
             file_config = load_config(args.load_config)
             # Update config with file values first
             config.update(file_config)
-            print(f"Config updated with values from {args.load_config}") # Corrected print message source
+            print(f"Config updated with values from {args.load_config}") # CORRECTED PRINT
         else:
             print(f"Error: Config file not found: {args.load_config}"); sys.exit(1)
 
@@ -1572,17 +1573,16 @@ def main():
     # <<< END REVISED CLI OVERRIDES >>>
 
     # --- Mode Selection --- #
-    # <<< Debugging print statements remain >>>
-    print("\n--- Debugging Mode Selection ---")
-    print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
-    print("--- End Debugging ---")
+    # REMOVED: print("\n--- Debugging Mode Selection ---")
+    # REMOVED: print(f"Value of config['eval_only'] before check: {config.get('eval_only')}")
+    # REMOVED: print("--- End Debugging ---")
 
     # <<< Add one more check right before the condition >>>
-    print(f"Value of args.eval_only JUST BEFORE 'if': {args.eval_only}")
+    print(f"Value of args.eval_only JUST BEFORE 'if': {args.eval_only}") # KEEP THIS CHECK
 
     # <<< Use args.eval_only directly for mode selection >>>
     if args.eval_only:
-        print(">>> EXECUTION: Entered IF args.eval_only block <<<") # ADDED DEBUG
+        # REMOVED: print(">>> EXECUTION: Entered IF args.eval_only block <<<") # ADDED DEBUG
         print("Running in Evaluation-Only Mode")
         # Ensure load_model and test_data_path are provided for eval mode
         if config.get("load_model") is None:
@@ -1600,7 +1600,7 @@ def main():
 
         evaluate(config)
     else:
-        print(">>> EXECUTION: Entered ELSE block (Training Mode) <<<") # ADDED DEBUG
+        # REMOVED: print(">>> EXECUTION: Entered ELSE block (Training Mode) <<<") # ADDED DEBUG
         print(f"Running Training Mode: {config['model_type']}")
         model, train_metrics = train(config)
         # Post-training evaluation on test set (if provided)
