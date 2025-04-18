@@ -1329,7 +1329,7 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
                 portfolio_values=flat_portfolio_values,
                 actions=actions, # Pass flattened/combined actions if needed
                 rewards=rewards, # Pass flattened/combined rewards if needed
-                plot_dir=plot_dir
+                save_path=plot_dir
             )
             eval_logger.info(f"Evaluation plots saved to: {plot_dir}")
         except Exception as e:
