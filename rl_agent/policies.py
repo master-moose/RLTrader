@@ -246,58 +246,49 @@ class TcnPolicy(ActorCriticPolicy):
                 )
                 
             def forward(self_extractor, features):
-                # Debug prints for shape diagnosis
+                # Debug prints for shape diagnosis (suppressed)
                 batch_size = features.shape[0]
                 seq_len = self_extractor.sequence_length
                 feat_per_timestep = self_extractor.features_per_timestep
                 total_expected = batch_size * seq_len * feat_per_timestep
-                print(f"[DEBUG] features.shape: {features.shape}")
-                print(f"[DEBUG] batch_size: {batch_size}")
-                print(f"[DEBUG] sequence_length: {seq_len}")
-                print(f"[DEBUG] features_per_timestep: {feat_per_timestep}")
-                print(f"[DEBUG] batch_size * sequence_length * features_per_timestep: {total_expected}")
-                print(f"[DEBUG] features.numel(): {features.numel()}")
+                # print(f"[DEBUG] features.shape: {features.shape}")
+                # print(f"[DEBUG] batch_size: {batch_size}")
+                # print(f"[DEBUG] sequence_length: {seq_len}")
+                # print(f"[DEBUG] features_per_timestep: {feat_per_timestep}")
+                # print(f"[DEBUG] batch_size * sequence_length * features_per_timestep: {total_expected}")
+                # print(f"[DEBUG] features.numel(): {features.numel()}")
                 # First reshape to (batch_size, sequence_length, features_per_timestep)
                 reshaped_features = features.view(batch_size, self_extractor.sequence_length, 
                                                 self_extractor.features_per_timestep)
                 # Then transpose to (batch_size, features_per_timestep, sequence_length)
                 reshaped_features = reshaped_features.transpose(1, 2)
-                
                 # Process through TCN
                 tcn_output = self_extractor.tcn(reshaped_features)
-                
                 # Get the actual output shape from the TCN
-                actual_output_shape = tcn_output.shape
-                print(f"TCN output shape: {actual_output_shape}")
-                
+                # actual_output_shape = tcn_output.shape
+                # print(f"TCN output shape: {actual_output_shape}")
                 # Flatten the output for the policy and value networks
                 flattened = tcn_output.reshape(batch_size, -1)
                 actual_flattened_dim = flattened.shape[1]
-                
                 # Check if the expected output dimension matches the actual output
                 if self_extractor.output_dim != actual_flattened_dim:
-                    print(f"TCN output dimension mismatch: expected {self_extractor.output_dim}, "
-                          f"got {actual_flattened_dim}. Adjusting networks.")
-                    
+                    # print(f"TCN output dimension mismatch: expected {self_extractor.output_dim}, "
+                    #       f"got {actual_flattened_dim}. Adjusting networks.")
                     # Update the output dimension
                     self_extractor.output_dim = actual_flattened_dim
-                    
                     # Recreate the policy and value networks with the correct dimensions
                     device = flattened.device
                     self_extractor.policy_net = nn.Sequential(
                         nn.Linear(actual_flattened_dim, 64),
                         nn.ReLU()
                     ).to(device)
-                    
                     self_extractor.value_net = nn.Sequential(
                         nn.Linear(actual_flattened_dim, 64),
                         nn.ReLU()
                     ).to(device)
-                
                 # Forward through the policy and value networks
                 policy_latent = self_extractor.policy_net(flattened)
                 value_latent = self_extractor.value_net(flattened)
-                
                 return policy_latent, value_latent
 
             def forward_actor(self_extractor, features):
