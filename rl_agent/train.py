@@ -1528,6 +1528,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
 
 def main():
     """Main function: parse args, setup, run train/eval."""
+    print(f"Raw sys.argv: {sys.argv}") # <-- Add this line
     args = parse_args()
     config = args_to_config(args) # Get config from args FIRST
 
