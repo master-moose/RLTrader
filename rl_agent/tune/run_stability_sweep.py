@@ -101,6 +101,14 @@ def parse_args():
         help="Verbosity level: 0=no output, 1=info, 2=debug"
     )
     
+    # --- Add Model Type Argument --- #
+    parser.add_argument(
+        "--model_type", type=str, default="recurrentppo",
+        choices=["dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo"],
+        help="RL algorithm model type to use"
+    )
+    # ------------------------------ #
+    
     args = parser.parse_args()
     
     # Create a class to match the expected arguments structure
