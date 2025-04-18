@@ -779,21 +779,12 @@ class TradingEnvironment(Env):
         for feature in self.features:
             feature_data.extend(historical_data[feature].values)
         
-        # Add account information
-        account_info = [
-            self.balance / self.initial_balance,  # Normalized balance
-            # Normalized position value (ensure initial balance > 0)
-            (self.shares_held * self.data['close'].iloc[self.current_step] /
-             self.initial_balance) if self.initial_balance > ZERO_THRESHOLD else 0.0
-        ]
-        
         # Combine features and account info
-        observation = np.array(feature_data + account_info, dtype=np.float32)
+        observation = np.array(feature_data, dtype=np.float32)
 
         # --- DEBUG PRINTS FOR SHAPE DIAGNOSIS ---
         logger.debug(f"[OBS DEBUG] Features used: {self.features}")
         logger.debug(f"[OBS DEBUG] feature_data length: {len(feature_data)} (should be sequence_length * num_features)")
-        logger.debug(f"[OBS DEBUG] account_info: {account_info}")
         logger.debug(f"[OBS DEBUG] Final observation shape: {observation.shape}, dtype: {observation.dtype}")
         logger.debug(f"[OBS DEBUG] First 10 obs values: {observation[:10]}")
         # --- END DEBUG PRINTS ---
