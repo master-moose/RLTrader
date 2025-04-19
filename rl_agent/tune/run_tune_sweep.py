@@ -194,7 +194,7 @@ def define_search_space() -> Dict[str, Any]:
 
         # --- Additional RecurrentPPO Parameters ---
         # Entropy coefficient - Widen range slightly higher
-        "ent_coef": tune.loguniform(5e-3, 0.05),
+        "ent_coef": tune.loguniform(5e-3, 0.1),
         # Value function coefficient - Give slightly more weight
         "vf_coef": tune.uniform(0.5, 1.0),
         # PPO clip range - removed 0.3 as potentially too high
@@ -214,12 +214,12 @@ def define_search_space() -> Dict[str, Any]:
 
         # --- Reward Component Weights (Focus on stability and profit) --- #
         # Added portfolio_change_weight tuning
-        "portfolio_change_weight": tune.uniform(1.0, 5.0),
-        "drawdown_penalty_weight": tune.uniform(0.1, 0.5), # Reduced upper bound significantly
+        "portfolio_change_weight": tune.uniform(1.0, 7.0),
+        "drawdown_penalty_weight": tune.uniform(0.01, 0.2),
         # "fee_penalty_weight": tune.uniform(0.0, 0.5),    # REMOVED: Use default 0.0 as commission is 0
-        "idle_penalty_weight": tune.uniform(0.0, 0.05), # NEW: Added search for small idle penalty (was fixed 0)
-        "profit_bonus_weight": tune.uniform(0.5, 1.5), # Reduced upper bound back
-        "trade_penalty_weight": tune.uniform(0.0, 0.1),  # NEW: Reduced range, allow 0 (was 0.01-0.5)
+        "idle_penalty_weight": tune.uniform(0.0, 0.05),
+        "profit_bonus_weight": tune.uniform(0.5, 1.5),
+        "trade_penalty_weight": tune.uniform(0.0, 0.1),
     }
     
     return search_space
