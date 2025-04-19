@@ -339,6 +339,12 @@ def run_tune_experiment(args):
             "eval/mean_reward": "reward",
             "eval/explained_variance": "variance",
             "eval/combined_score": "combined",
+            "eval/sharpe_ratio_episode": "sharpe",
+            "eval/sortino_ratio": "sortino",
+            "eval/calmar_ratio": "calmar",
+            "eval/max_drawdown": "max_dd",
+            "eval/mean_ep_length": "ep_len",
+            "eval/total_trades": "trades",
             "time_total_s": "time(s)"
         },
         parameter_columns=list(search_space.keys()), # Show tuned hyperparameters
