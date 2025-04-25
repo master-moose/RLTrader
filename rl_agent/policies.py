@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm # Import weight_norm
 import numpy as np
-import gym
+import gymnasium as gym
 from typing import Dict, Optional, Any
 
 from stable_baselines3.common.policies import ActorCriticPolicy
@@ -202,6 +202,9 @@ class TcnExtractor(BaseFeaturesExtractor):
         self.features_per_timestep = features_per_timestep
         self.sequence_length = sequence_length
         self.time_series_dim = features_per_timestep * sequence_length
+        # Check observation space type using gymnasium alias
+        if not isinstance(observation_space, gym.spaces.Box) or len(observation_space.shape) != 1:
+            raise ValueError(f"TcnExtractor requires a 1D Box observation space, got {observation_space}")
         total_obs_dim = observation_space.shape[0]
         self.state_vars_dim = total_obs_dim - self.time_series_dim
 
@@ -331,6 +334,7 @@ class TcnPolicy(ActorCriticPolicy):
             raise ValueError("`sequence_length` must be provided to TcnPolicy policy_kwargs.")
         if features_per_timestep is None:
             raise ValueError("`features_per_timestep` must be provided via policy_kwargs.")
+        # Check observation space type using gymnasium alias
         if not isinstance(observation_space, gym.spaces.Box):
              raise ValueError(f"TcnPolicy requires a Box observation space, got {type(observation_space)}")
 
