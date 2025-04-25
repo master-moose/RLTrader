@@ -4,11 +4,18 @@ from torch.nn.utils import weight_norm # Import weight_norm
 import numpy as np
 import gymnasium as gym
 from typing import Dict, Optional, Any
+import logging
 
-from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, NatureCNN, MlpExtractor
 from stable_baselines3.common.type_aliases import Schedule
+from stable_baselines3.common.distributions import DiagGaussianDistribution, CategoricalDistribution # Add others if needed
+from stable_baselines3.common.preprocessing import get_flattened_obs_dim
+from stable_baselines3.common.utils import get_device
+from stable_baselines3.common.spaces import get_action_dim # <-- Added import
 
+# Get module logger
+logger = logging.getLogger("rl_agent.policies")
 
 # --- Define the Residual Block ---
 class TemporalBlock(nn.Module):
@@ -389,7 +396,13 @@ class TcnPolicy(ActorCriticPolicy):
             **policy_kwargs # Pass the cleaned kwargs
         )
 
-        # 4. Orthogonal initialization for policy/value heads (good practice)
+        # 4. Initialize log_std for continuous actions (if applicable)
+        if isinstance(action_space, gym.spaces.Box):
+            action_dim = get_action_dim(self.action_space)
+            # Initialize log_std as a learnable parameter
+            self.log_std = nn.Parameter(torch.zeros(action_dim), requires_grad=True)
+
+        # 5. Orthogonal initialization for policy/value heads (good practice)
         # The parent class's _build method already applies init_weights,
         # so we don't need to call it manually here.
         # self.init_weights(self.mlp_extractor)
@@ -435,4 +448,19 @@ class TcnPolicy(ActorCriticPolicy):
     def _get_action_dist_from_latent(self, latent_pi):
         """Get the action distribution from the latent features."""
         mean_actions = self.action_net(latent_pi)
-        return self.action_dist.proba_distribution(action_logits=mean_actions) 
+
+        # Check if action space is continuous
+        if isinstance(self.action_space, gym.spaces.Box):
+            if not hasattr(self, 'log_std'):
+                raise ValueError("log_std not initialized for continuous action space.")
+            # For continuous actions (Gaussian distribution)
+            # Ensure log_std is broadcastable to mean_actions shape
+            action_log_std = self.log_std.expand_as(mean_actions)
+            return self.action_dist.proba_distribution(mean_actions, action_log_std)
+        elif isinstance(self.action_space, gym.spaces.Discrete):
+            # For discrete actions (Categorical distribution)
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        else:
+            raise NotImplementedError(
+                f"Unsupported action space type: {type(self.action_space)}"
+            ) 
