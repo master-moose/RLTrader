@@ -148,8 +148,9 @@ class TradingEnvironment(Env):
                 )
 
         # --- Define action and observation spaces ---
-        # Action space: 0: Hold, 1: Go Long, 2: Go Short, 3: Close Position
-        self.action_space = spaces.Discrete(4)
+        # Action space: Continuous value between -1 (max short/close) and 1 (max long/close)
+        # Interpretation thresholds will be used in _take_action
+        self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
 
         # Observation space: features + pos_type + norm_entry_price
         # position_type: -1 (Short), 0 (Flat), 1 (Long)
@@ -209,8 +210,10 @@ class TradingEnvironment(Env):
                     f"Starting at {self.current_step}."
                 )
             else:
-                self.current_step = np.random.randint(min_start_index,
-                                                    max_start_index)
+                self.current_step = np.random.randint(
+                    min_start_index,
+                    max_start_index
+                )
             logger.debug(f"Starting from random position: {self.current_step}")
         else:
             self.current_step = self.sequence_length
@@ -245,7 +248,7 @@ class TradingEnvironment(Env):
         self.consecutive_holds = 0  # Track consecutive holds while FLAT
         # self.consecutive_buys = 0 # Removed
         # self.consecutive_sells = 0 # Removed
-        self.last_action = 0  # Assume initial action is Hold (0)
+        self.last_action = 0.0 # Initialize last action as float for continuous
         self.exploration_bonus_value = self.exploration_start
         self.total_fees_paid = 0.0
         self.failed_trades = 0  # General counter for failed actions
@@ -286,8 +289,13 @@ class TradingEnvironment(Env):
         prev_fees_paid = self.total_fees_paid
         prev_position_type = self.position_type  # Track previous position
 
-        # Execute the action
-        self._take_action(action)
+        # Extract the continuous action value
+        # Assuming action is a numpy array like [value]
+        continuous_action = action[0] if isinstance(action, np.ndarray) else action
+        continuous_action = np.clip(continuous_action, -1.0, 1.0) # Ensure within bounds
+
+        # Execute the action and get the interpreted discrete code
+        interpreted_action_code = self._take_action(continuous_action)
 
         # --- Update portfolio and check drawdown BEFORE incrementing step ---
         self._update_portfolio_value()  # Uses self.current_step price
@@ -326,15 +334,17 @@ class TradingEnvironment(Env):
 
         # Calculate reward based on change from t-1 to t
         fee_paid_this_step = self.total_fees_paid - prev_fees_paid
-        # Pass previous position type to reward calculation if needed
-        reward_info = self._calculate_reward(action, prev_portfolio_value,
+        # Pass previous position type and INTERPRETED action to reward calculation
+        reward_info = self._calculate_reward(interpreted_action_code,
+                                             prev_portfolio_value,
                                              fee_paid_this_step,
                                              prev_position_type)
         reward = reward_info['total_reward']
         self.rewards.append(reward)
 
         # --- Update consecutive holds (only when flat) ---
-        if self.position_type == 0 and action == 0:  # If flat and held
+        # Use interpreted action code for hold logic
+        if self.position_type == 0 and interpreted_action_code == 0:  # If flat and held
             self.consecutive_holds += 1
         else:
             self.consecutive_holds = 0  # Reset if not flat or didn't hold flat
@@ -404,12 +414,18 @@ class TradingEnvironment(Env):
             log_table += f"| Truncated           | {truncated!s:<9} |\n"
             log_table += f"| Reason              | {termination_reason:<9} |\n"
             log_table += f"| Final Port. Value   | {self.portfolio_value:<9.2f} |\n"
-            log_table += f"| Profit              | {self.portfolio_value - self.initial_balance:<9.2f} |\n"
-            log_table += f"| Return (%)          | {final_info.get('episode_return', 0.0)*100:<9.2f} |\n"
-            log_table += f"| Sharpe (Ep)       | {final_info.get('sharpe_ratio_episode', 0.0):<9.4f} |\n"
-            log_table += f"| Calmar              | {final_info.get('calmar_ratio', 0.0):<9.4f} |\n"
-            log_table += f"| Sortino             | {final_info.get('sortino_ratio', 0.0):<9.4f} |\n"
-            log_table += f"| Max Drawdown (%)    | {self.max_drawdown*100:<9.2f} |\n"
+            profit = self.portfolio_value - self.initial_balance
+            log_table += f"| Profit              | {profit:<9.2f} |\n"
+            ret_pct = final_info.get('episode_return', 0.0) * 100
+            log_table += f"| Return (%)          | {ret_pct:<9.2f} |\n"
+            sharpe_ep = final_info.get('sharpe_ratio_episode', 0.0)
+            log_table += f"| Sharpe (Ep)       | {sharpe_ep:<9.4f} |\n"
+            calmar_ep = final_info.get('calmar_ratio', 0.0)
+            log_table += f"| Calmar              | {calmar_ep:<9.4f} |\n"
+            sortino_ep = final_info.get('sortino_ratio', 0.0)
+            log_table += f"| Sortino             | {sortino_ep:<9.4f} |\n"
+            max_dd_pct = self.max_drawdown * 100
+            log_table += f"| Max Drawdown (%)    | {max_dd_pct:<9.2f} |\n"
             log_table += f"| Total Trades        | {self.total_trades:<9} |\n"
             log_table += f"| Longs               | {self.total_longs:<9} |\n"
             log_table += f"| Shorts              | {self.total_shorts:<9} |\n"
@@ -426,169 +442,147 @@ class TradingEnvironment(Env):
         observation = self._get_observation()  # Based on self.current_step (t+1)
         info = self._get_info()           # Based on self.current_step (t+1)
 
-        # Update last action taken
-        self.last_action = action
+        # Update last action taken (store the raw continuous action)
+        self.last_action = continuous_action
 
         # Gymnasium expects 5 return values
         return observation, reward, terminated, truncated, info
 
-    def _take_action(self, action):
+    def _take_action(self, action: float):
         """
-        Execute the trading action (Hold, Go Long, Go Short, Close Position).
+        Execute a trading decision based on a continuous action value.
+        Maps the continuous action to discrete intentions:
+        Go Long, Go Short, Close Position, or Hold.
 
         Args:
-            action: Action to take (0, 1, 2, 3)
+            action: Continuous action value between -1.0 and 1.0.
+
+        Returns:
+            Interpreted discrete action code (0: Hold, 1: Long Entry Attempt,
+                                            2: Short Entry Attempt, 3: Close Attempt)
         """
         current_price = self.data['close'].iloc[self.current_step]
         action_taken = False  # Flag to track if a trade action occurred
+        interpreted_action_code = 0 # Default to Hold
 
-        # --- Action Logic ---
-        if action == 0:  # Hold / Stay Flat
-            if self.position_type == 0:  # Only count holds if flat
-                self.total_holds += 1
-                # logger.debug(f"Step {self.current_step}: Held Flat.")
-            else:
-                # logger.debug(f"Step {self.current_step}: Held {'Long' if self.position_type == 1 else 'Short'} Position.") # noqa E501
-                pass  # No change if holding an existing position
+        # --- Define Thresholds ---
+        threshold_trade = 0.5  # Threshold to trigger a buy or sell entry
+        threshold_close = 0.1  # Threshold around 0 to trigger a close or hold flat
 
-        elif action == 1:  # Go Long
+        # --- Action Interpretation Logic ---
+
+        if action > threshold_trade:  # Try Go Long
+            interpreted_action_code = 1 # Intention: Go Long
             if self.position_type == 0:  # Can only go long if flat
                 invest_amount = self.balance * self.max_position
-                # Optional: Add min trade value check if needed
-                # min_trade_value = self.initial_balance * 0.005
-                # if invest_amount >= min_trade_value:
                 if (invest_amount > ZERO_THRESHOLD and
                         current_price > ZERO_THRESHOLD):
                     fee_multiplier = 1 + self.transaction_fee
-                    # Calculate shares based on cost including fee
-                    shares_to_buy = invest_amount / (current_price * fee_multiplier)
+                    # Shares based on cost including fee
+                    shares_num = invest_amount
+                    shares_den = (current_price * fee_multiplier)
+                    shares_to_buy = shares_num / shares_den
                     if shares_to_buy > ZERO_THRESHOLD:
                         cost = shares_to_buy * current_price
                         fee = cost * self.transaction_fee
                         self.balance -= (cost + fee)
-                        self.balance = max(0, self.balance)  # Ensure balance >= 0
+                        self.balance = max(0, self.balance) # Ensure >= 0
                         self.shares_held = shares_to_buy
-                        self.position_type = 1  # Set position to Long
+                        self.position_type = 1
                         self.entry_price = current_price
                         self.total_trades += 1
                         self.total_longs += 1
                         action_taken = True
                         trade_info = {
                             'step': self.current_step, 'type': 'long_entry',
-                            'price': current_price,
-                            'shares': self.shares_held,
-                            'cost': cost, 'fee': fee,
-                            'balance_after': self.balance
+                            'price': current_price, 'shares': self.shares_held,
+                            'cost': cost, 'fee': fee, 'balance_after': self.balance
                         }
                         self.trades.append(trade_info)
                         logger.debug(
-                            f"Step {self.current_step}: Entered LONG "
+                            f"Step {self.current_step}: [Act: {action:.2f} > {threshold_trade}] -> Entered LONG "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
                             f"(Cost: {cost:.2f}, Fee: {fee:.2f}) -> "
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
                         self.failed_trades += 1
-                        logger.debug(
-                            f"Step {self.current_step}: Attempted Long, but "
-                            f"calculated shares {shares_to_buy:.8f} "
-                            f"<= threshold."
-                        )
+                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but calculated shares {shares_to_buy:.8f} <= threshold.") # noqa E501
                 else:
                     self.failed_trades += 1
-                    logger.debug(
-                        f"Step {self.current_step}: Attempted Long, but "
-                        f"insufficient balance ({self.balance:.2f}) or "
-                        f"zero price."
-                    )
-                # else: # Min trade value check
-                #     self.failed_trades += 1
-                #     logger.debug(f"Step {self.current_step}: Attempted Long. Invest amount {invest_amount:.2f} < min trade value {min_trade_value:.2f}.") # noqa E501
-            else:  # Already in a position
-                self.failed_trades += 1
-                logger.debug(
-                    f"Step {self.current_step}: Attempted Long, but already "
-                    f"in a {'Long' if self.position_type == 1 else 'Short'} "
-                    f"position."
-                )
+                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but insufficient balance ({self.balance:.2f}) or zero price.") # noqa E501
+            else:  # Already in a position, treat as Hold
+                interpreted_action_code = 0 # Override intention: Hold
+                logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Wanted Long, but already in {'Long' if self.position_type == 1 else 'Short'}. Holding.") # noqa E501
 
-        elif action == 2:  # Go Short
+        elif action < -threshold_trade:  # Try Go Short
+            interpreted_action_code = 2 # Intention: Go Short
             if self.position_type == 0:  # Can only go short if flat
-                # Short amount based on max_position fraction of balance
                 short_value_target = self.balance * self.max_position
-                # Optional: Add min trade value check if needed
                 if (short_value_target > ZERO_THRESHOLD and
                         current_price > ZERO_THRESHOLD):
                     shares_to_short = short_value_target / current_price
                     if shares_to_short > ZERO_THRESHOLD:
                         proceeds = shares_to_short * current_price
                         fee = proceeds * self.transaction_fee
-                        self.balance += (proceeds - fee)  # Add proceeds minus fee
-                        self.shares_held = shares_to_short  # Store magnitude
-                        self.position_type = -1  # Set position to Short
+                        self.balance += (proceeds - fee) # Add net proceeds
+                        self.shares_held = shares_to_short
+                        self.position_type = -1
                         self.entry_price = current_price
                         self.total_trades += 1
                         self.total_shorts += 1
                         action_taken = True
                         trade_info = {
                             'step': self.current_step, 'type': 'short_entry',
-                            'price': current_price,
-                            'shares': self.shares_held,
-                            'proceeds': proceeds, 'fee': fee,
-                            'balance_after': self.balance
+                            'price': current_price, 'shares': self.shares_held,
+                            'proceeds': proceeds, 'fee': fee, 'balance_after': self.balance # noqa E501
                         }
                         self.trades.append(trade_info)
                         logger.debug(
-                            f"Step {self.current_step}: Entered SHORT "
+                            f"Step {self.current_step}: [Act: {action:.2f} < -{threshold_trade}] -> Entered SHORT "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
                             f"(Proceeds: {proceeds:.2f}, Fee: {fee:.2f}) -> "
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
                         self.failed_trades += 1
-                        logger.debug(
-                            f"Step {self.current_step}: Attempted Short, but "
-                            f"calculated shares {shares_to_short:.8f} "
-                            f"<= threshold."
-                        )
+                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but calculated shares {shares_to_short:.8f} <= threshold.") # noqa E501
                 else:
                     self.failed_trades += 1
-                    logger.debug(
-                        f"Step {self.current_step}: Attempted Short, but "
-                        f"insufficient target value "
-                        f"({short_value_target:.2f}) or zero price."
-                    )
-            else:  # Already in a position
-                self.failed_trades += 1
-                logger.debug(
-                    f"Step {self.current_step}: Attempted Short, but already "
-                    f"in a {'Long' if self.position_type == 1 else 'Short'} "
-                    f"position."
-                )
+                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but insufficient target value ({short_value_target:.2f}) or zero price.") # noqa E501
+            else:  # Already in a position, treat as Hold
+                interpreted_action_code = 0 # Override intention: Hold
+                logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Wanted Short, but already in {'Long' if self.position_type == 1 else 'Short'}. Holding.") # noqa E501
 
-        elif action == 3:  # Close Position
-            if self.position_type != 0:  # Can only close if Long or Short
+        elif abs(action) < threshold_close:  # Zone around zero: Try Close or Hold Flat
+            if self.position_type != 0:  # If in position, try Close
+                interpreted_action_code = 3 # Intention: Close
                 closed_pnl = self._close_position(current_price)
                 if closed_pnl is not None:  # Check if close was successful
                     action_taken = True
                     self.total_closes += 1
                     logger.debug(
-                        f"Step {self.current_step}: Closed Position. "
+                        f"Step {self.current_step}: [Act: {action:.2f} in +/-{threshold_close}] -> Closed Position. "
                         f"PnL: {closed_pnl:.2f} -> Bal: {self.balance:.2f}"
                     )
-                else:
-                    # _close_position logs the failure reason
+                else: # Close failed (e.g., insufficient funds for short close)
                     self.failed_trades += 1
-            else:  # Already flat
-                self.failed_trades += 1
-                logger.debug(
-                    f"Step {self.current_step}: Attempted Close, but already Flat."
-                )
+                    interpreted_action_code = 0 # Treat failed close as Hold
+                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Close, but failed. Holding position.") # noqa E501
+            else:  # Already flat, Hold Flat
+                interpreted_action_code = 0 # Intention: Hold Flat
+                self.total_holds += 1
+                logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in +/-{threshold_close}] -> Held Flat.")
 
-        # If a trade action was taken (entry or close), update fees
-        if action_taken:
-            # Fee calculation handled within action logic (buy/sell/close)
-            pass
+        else:  # Dead zone between close and trade thresholds: Hold Position
+            interpreted_action_code = 0 # Intention: Hold
+            pos_desc = ('Long' if self.position_type == 1 else
+                        'Short' if self.position_type == -1 else 'Flat')
+            logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in dead zone] -> Holding {pos_desc} Position.") # noqa E501
+
+        # Fee calculation is handled within the specific trade logic (buy/sell/close)
+
+        return interpreted_action_code
 
     def _close_position(self, closing_price):
         """
@@ -636,7 +630,8 @@ class TradingEnvironment(Env):
             fee = buy_cost * self.transaction_fee
 
             # Check if we have enough balance to buy back the short position
-            if self.balance < total_cost - ZERO_THRESHOLD:  # Allow float errors
+            # Allow for float errors
+            if self.balance < total_cost - ZERO_THRESHOLD:
                 logger.warning(
                     f"Step {self.current_step}: Insufficient balance "
                     f"({self.balance:.2f}) to close short position requiring "
@@ -718,13 +713,15 @@ class TradingEnvironment(Env):
             # Attempt to recover or terminate?
             # self.portfolio_value = self.initial_balance # Emergency reset?
 
-    def _calculate_reward(self, action, prev_portfolio_value,
+    def _calculate_reward(self, interpreted_action_code, prev_portfolio_value,
                           fee_paid_this_step, prev_position_type):
         """
         Calculate the reward based on multiple components.
 
         Args:
-            action: The action taken (0: Hold, 1: Long, 2: Short, 3: Close)
+            interpreted_action_code: The discrete action derived from the
+                                     continuous value (0: Hold, 1: Long Entry,
+                                     2: Short Entry, 3: Close).
             prev_portfolio_value: Portfolio value before the action & update
             fee_paid_this_step: Transaction fee incurred in this step
             prev_position_type: Position type (-1, 0, 1) before the action
@@ -780,24 +777,26 @@ class TradingEnvironment(Env):
         # 6. Direct Trade *Entry* Penalty
         trade_penalty = 0.0
         # Apply penalty if entering a new long (1) or short (2) position
-        if action in [1, 2]:
+        # Use the *interpreted* action code
+        if interpreted_action_code in [1, 2]:
             trade_penalty = -1.0  # Base penalty for entering a trade
         calculated_trade_penalty = trade_penalty * self.trade_penalty_weight
         reward_components['trade_penalty'] = calculated_trade_penalty
 
         # 7. Idle Penalty (Only when Flat)
         idle_penalty = 0.0
-        # Apply penalty if FLAT (pos_type=0) and Held (action=0)
+        # Apply penalty if FLAT (pos_type=0) and Held (interpreted_action_code=0)
         # for more than idle_threshold steps
-        if (self.position_type == 0 and action == 0 and
+        if (self.position_type == 0 and interpreted_action_code == 0 and
                 self.consecutive_holds > self.idle_threshold):
             idle_penalty = -1.0  # Base penalty for being idle too long
         reward_components['idle_penalty'] = idle_penalty * self.idle_penalty_weight  # noqa E501
 
         # 8. Profit/Closing Bonus (Only when Closing a position)
         profit_bonus = 0.0
-        # Check if action was Close (3) AND position actually changed
-        if action == 3 and prev_position_type != 0 and self.position_type == 0:
+        # Check if action was Close (interpreted_action_code=3)
+        # AND position actually changed from non-flat to flat
+        if interpreted_action_code == 3 and prev_position_type != 0 and self.position_type == 0:
             # PnL was calculated in _close_position
             # Find the PnL from the last trade entry in self.trades
             last_trade = self.trades[-1] if self.trades else None
@@ -859,7 +858,7 @@ class TradingEnvironment(Env):
             ])
             logger.debug(
                 f"Step {self.current_step} (EpStep {self.episode_step}) "
-                f"Act {action} -> Reward: {reward_components['total_reward']:.4f}"
+                f"ContAct {self.last_action:.2f} (Interpreted: {interpreted_action_code}) -> Reward: {reward_components['total_reward']:.4f}" # noqa E501
                 f" | Components: {component_str}"
             )
 
@@ -954,7 +953,7 @@ class TradingEnvironment(Env):
 
         # Combine features and position info
         observation_list = feature_data + [position_type_feature,
-                                         normalized_entry_price]
+                                           normalized_entry_price]
         observation = np.array(observation_list, dtype=np.float32)
 
         # --- Validate Observation Shape ---
@@ -999,7 +998,7 @@ class TradingEnvironment(Env):
             'shares_held': self.shares_held,       # Magnitude
             'position_type': self.position_type,  # -1, 0, 1
             'entry_price': self.entry_price,      # Price of entry
-            'asset_value': self.asset_value,      # Value if long, neg liab short
+            'asset_value': self.asset_value,      # Curr val (long) / neg liab (short)
             'portfolio_value': self.portfolio_value,
             'initial_balance': self.initial_balance,
             # Cash ratio: balance / portfolio_value when PV > 0
