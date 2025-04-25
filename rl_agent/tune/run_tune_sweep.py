@@ -20,8 +20,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 # Set environment variables for Ray
 os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
-# Set default cache location for Ray Air
-os.environ["RAY_AIR_LOCAL_CACHE_DIR"] = os.path.abspath("./ray_results")
 
 # Ray Tune imports with improved error handling
 RAY_AVAILABLE = False
