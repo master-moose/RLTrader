@@ -299,9 +299,15 @@ class TuneReportCallback(BaseCallback):
          )
 
         # Report to Ray Tune
-        if RAY_AVAILABLE and tune.is_session_enabled():
+        # Use the modern check for Ray Tune session
+        session_active = False
+        if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
+            session_active = ray.air.session.is_active()
+            
+        if session_active:
             try:
-                tune.report(**metrics_to_report)
+                # Use ray.air.session.report for newer versions
+                ray.air.session.report(metrics_to_report)
                 callback_logger.debug(
                     f"Reported to Ray Tune at step {self.num_timesteps}"
                 )
@@ -657,9 +663,18 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     for k, v in final_summary_metrics.items():
         trial_logger.info(f"  {k}: {v}")
 
-    if RAY_AVAILABLE and tune.is_session_enabled():
-        try: tune.report(**final_summary_metrics); trial_logger.info("Reported final metrics via tune.report")
-        except Exception as re: trial_logger.warning(f"Failed final tune report: {re}")
+    # Use the modern check for Ray Tune session
+    session_active = False
+    if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
+        session_active = ray.air.session.is_active()
+
+    if session_active:
+        try: 
+            # Use ray.air.session.report for newer versions
+            ray.air.session.report(final_summary_metrics) 
+            trial_logger.info("Reported final metrics via Ray AIR session")
+        except Exception as re: 
+            trial_logger.warning(f"Failed final Ray AIR session report: {re}")
 
 # --- Argument Parsing --- #
 
@@ -1672,9 +1687,18 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0)
         final_metrics["eval/combined_score"] = float(final_combined)
 
-    if RAY_AVAILABLE and tune.is_session_enabled():
-        try: tune.report(**final_metrics); train_logger.info("Reported final metrics via tune.report")
-        except Exception as re: train_logger.warning(f"Failed final tune report: {re}")
+    # Use the modern check for Ray Tune session
+    session_active = False
+    if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
+        session_active = ray.air.session.is_active()
+        
+    if session_active:
+        try: 
+            # Use ray.air.session.report for newer versions
+            ray.air.session.report(final_metrics) 
+            train_logger.info("Reported final metrics via Ray AIR session")
+        except Exception as re: 
+            train_logger.warning(f"Failed final Ray AIR session report: {re}")
 
     return model, final_metrics
 
@@ -1747,10 +1771,15 @@ def main():
         evaluate(config, args)
     else:
         print("Running in Training Mode")
-        # Check if Ray Tune is being used
-        if RAY_AVAILABLE and tune.is_session_enabled():
-            print("Detected Ray Tune session. Running tune_trainable.")
-            tune_trainable(config)
+        # Check if Ray Tune is being used (using the modern check)
+        session_active = False
+        if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
+            session_active = ray.air.session.is_active()
+            
+        if session_active:
+            print("Detected Ray Tune session (via AIR). Running train_rl_agent_tune.")
+            # Call the trainable directly when run via Tune
+            train_rl_agent_tune(config)
         else:
             print("No Ray Tune session detected. Running standard train.")
             train(config)
