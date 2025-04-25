@@ -258,6 +258,19 @@ python rl_agent/data/normalize_features.py \
 -   `data_generation_config.json`: Parameters for synthetic data generation (regimes, volatility, price process).
 -   `train_config.json`: Default parameters for RL training, environment, models, and hyperparameters. Specific settings can be overridden by command-line arguments or custom config files passed via `--config`.
 
+
+
+## Current Workflow
+
+-   Pull binance data
+-   Process data
+-   Normalize features
+-   Run Ray sweep to find best hyperparameters
+-   Take best performing hyperparameters and train RL agent
+-   Evaluate RL agent
+-   Rinse and repeat until model performance is satisfactory (I have yet to achieve satisfactory results)
+
+
 ## Notes
 
 -   Ensure data directories (`data/`, `models/`, `output/`, `logs/`) exist or are created (some scripts handle this).
