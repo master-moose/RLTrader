@@ -111,11 +111,12 @@ class TuneReportCallback(BaseCallback):
 
     def _normalize_and_combine_metrics(
         self, reward, explained_variance, sharpe_ratio, episode_return,
-        calmar_ratio, sortino_ratio, model_type: str = "ppo" # Add model_type
+        calmar_ratio, sortino_ratio, actor_loss, critic_loss, # Add losses
+        model_type: str = "ppo"
     ):
         """
         Create a normalized combined score weighting various performance metrics,
-        including bonuses for meeting specific ratio thresholds.
+        including bonuses for meeting specific ratio thresholds and penalties for high losses (for SAC).
 
         Args:
             reward: The mean reward value.
@@ -124,6 +125,8 @@ class TuneReportCallback(BaseCallback):
             episode_return: Episode return as a fraction.
             calmar_ratio: Calmar ratio for the episode.
             sortino_ratio: Sortino ratio for the episode.
+            actor_loss: Actor loss (typically > 0).
+            critic_loss: Critic loss (typically > 0).
             model_type: The type of model being trained (e.g., 'ppo', 'sac').
 
         Returns:
@@ -134,6 +137,7 @@ class TuneReportCallback(BaseCallback):
         TARGET_SORTINO = 1.5  # Can adjust this target
         TARGET_CALMAR = 0.5   # Can adjust this target
         METRIC_BONUS = 0.15   # Bonus added for each threshold met
+        LOSS_SCALE_FACTOR = 0.1 # Scale factor for loss normalization
 
         # --- Handle missing or invalid inputs --- #
         if reward is None or not isinstance(reward, (int, float, np.number)):
@@ -144,44 +148,50 @@ class TuneReportCallback(BaseCallback):
         if (sharpe_ratio is None
                 or not isinstance(sharpe_ratio, (int, float, np.number))
                 or not np.isfinite(sharpe_ratio)):
-            # Neutral Sharpe if invalid/infinite
-            sharpe_ratio = 0.0
+            sharpe_ratio = 0.0 # Neutral Sharpe if invalid/infinite
         if (episode_return is None
                 or not isinstance(episode_return, (int, float, np.number))
                 or not np.isfinite(episode_return)):
-            # Neutral return if invalid/infinite
-            episode_return = 0.0
+            episode_return = 0.0 # Neutral return if invalid/infinite
         if (calmar_ratio is None
                 or not isinstance(calmar_ratio, (int, float, np.number))
                 or not np.isfinite(calmar_ratio)):
-            # Neutral Calmar if invalid/infinite
-            calmar_ratio = 0.0
+            calmar_ratio = 0.0 # Neutral Calmar if invalid/infinite
         if (sortino_ratio is None
                 or not isinstance(sortino_ratio, (int, float, np.number))
                 or not np.isfinite(sortino_ratio)):
-            # Neutral Sortino if invalid/infinite
-            sortino_ratio = 0.0
+            sortino_ratio = 0.0 # Neutral Sortino if invalid/infinite
+        # Handle losses (default to infinity if missing, so normalized value is 0)
+        if (actor_loss is None
+                or not isinstance(actor_loss, (int, float, np.number))
+                or not np.isfinite(actor_loss)):
+            actor_loss = float('inf')
+        if (critic_loss is None
+                or not isinstance(critic_loss, (int, float, np.number))
+                or not np.isfinite(critic_loss)):
+            critic_loss = float('inf')
 
-        # --- Normalization (aiming for values roughly in [-1, 1]) --- #
+        # --- Normalization (aiming for values roughly in [-1, 1] or [0, 1]) --- #
         normalized_reward = np.tanh(reward / 1000.0)
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-        # Divisor 5 assumes typical range -5 to 5
-        normalized_sharpe = np.tanh(sharpe_ratio / 5.0)
+        normalized_sharpe = np.tanh(sharpe_ratio / 5.0) # Divisor 5 assumes typical range -5 to 5
         normalized_return = np.tanh(episode_return / 2.0)  # Scale by 2
-        # Divisor 2 assumes typical range -2 to 2
-        normalized_calmar = np.tanh(calmar_ratio / 2.0)
-        # Divisor 3 assumes typical range -3 to 3
-        normalized_sortino = np.tanh(sortino_ratio / 3.0)
+        normalized_calmar = np.tanh(calmar_ratio / 2.0) # Divisor 2 assumes typical range -2 to 2
+        normalized_sortino = np.tanh(sortino_ratio / 3.0) # Divisor 3 assumes typical range -3 to 3
+        # Normalize losses using exp(-loss*scale), higher value (closer to 1) is better
+        normalized_actor_loss = np.exp(-actor_loss * LOSS_SCALE_FACTOR)
+        normalized_critic_loss = np.exp(-critic_loss * LOSS_SCALE_FACTOR)
 
         # --- Weighted Combination (Base Score) --- #
         # Weights for metrics
         w_reward = 0.25
-        w_variance = 0.10 if model_type != "sac" else 0.0 # Zero weight for SAC
+        w_variance = 0.10 if model_type != "sac" else 0.0 # Zero weight for SAC variance
         w_sharpe = 0.15
-        w_sortino = 0.25
-        w_calmar = 0.25
-        # Removing direct return weight, focus on risk-adjusted
-        w_return = 0.0
+        w_sortino = 0.20 # Reduced weight slightly
+        w_calmar = 0.20 # Reduced weight slightly
+        w_return = 0.0 # Keep return weight 0
+        w_actor_loss = 0.05 if model_type == "sac" else 0.0 # Only for SAC
+        w_critic_loss = 0.05 if model_type == "sac" else 0.0 # Only for SAC
 
         # Calculate weighted sum
         combined_score_raw = (
@@ -191,9 +201,12 @@ class TuneReportCallback(BaseCallback):
             + w_return * normalized_return
             + w_calmar * normalized_calmar    # Added Calmar
             + w_sortino * normalized_sortino  # Added Sortino
+            + w_actor_loss * normalized_actor_loss   # Added Actor Loss (SAC only)
+            + w_critic_loss * normalized_critic_loss # Added Critic Loss (SAC only)
         )
 
-        # --- Add Threshold Bonuses ---
+        # --- Add Threshold Bonuses ---\
+        # (Existing bonus logic...)
         bonus_score = 0.0
         if sharpe_ratio > TARGET_SHARPE:
             bonus_score += METRIC_BONUS
@@ -214,12 +227,18 @@ class TuneReportCallback(BaseCallback):
         combined_score_with_bonuses = combined_score_raw + bonus_score
 
         # --- Shift to [0, 1] range --- #
-        # The raw score + bonuses might now range approx [-1, 1 + 3*METRIC_BONUS]
-        weights = [w_reward, w_variance, w_sharpe,
-                   w_sortino, w_calmar, w_return]
-        max_possible_score = sum(weights) + 3 * METRIC_BONUS
-        # Adjust min possible score based on whether variance is included
-        min_possible_score = -sum(weights)
+        # Define weights based on model type for min/max calculation
+        current_weights = [w_reward, w_sharpe, w_sortino, w_calmar]
+        if model_type != "sac":
+            current_weights.append(w_variance)
+        else: # For SAC, add loss weights
+            current_weights.extend([w_actor_loss, w_critic_loss])
+
+        # Max score includes positive weights and bonuses
+        max_possible_score = sum(w for w in current_weights if w > 0) + 3 * METRIC_BONUS
+        # Min score includes negative contributions (normalized metrics can be -1)
+        min_possible_score = -sum(abs(w) for w in current_weights if w > 0 and w not in [w_actor_loss, w_critic_loss]) # Losses are >=0 normalized
+
         score_range = max_possible_score - min_possible_score
 
         # Scale to [0, 1] based on the estimated range
@@ -228,12 +247,12 @@ class TuneReportCallback(BaseCallback):
                 (combined_score_with_bonuses - min_possible_score) / score_range
             )
         else:
-            combined_score_normalized = 0.5
+            combined_score_normalized = 0.5 # Fallback
 
         # Ensure final score is strictly within [0, 1]
         combined_score_final = np.clip(combined_score_normalized, 0.0, 1.0)
         logging.getLogger("rl_agent").debug(
-            f"  Combined Score: raw={combined_score_raw:.3f}, "
+            f"  Combined Score ({model_type}): raw={combined_score_raw:.3f}, "
             f"bonus={bonus_score:.3f}, "
             f"total={combined_score_with_bonuses:.3f}, "
             f"scaled={combined_score_final:.3f}"
@@ -273,31 +292,7 @@ class TuneReportCallback(BaseCallback):
                             pass
 
         # --- Log standard SB3 metrics periodically ---
-        log_freq = 1000 # Log every 1000 steps
-        if self.num_timesteps % log_freq == 0 and self.logger is not None and hasattr(self.logger, 'name_to_value'):
-            callback_logger = logging.getLogger("rl_agent.train")
-            sb3_metrics = {}
-            # Common metrics (adjust keys based on algorithm if needed)
-            keys_to_log = [
-                "time/fps",
-                "train/actor_loss",
-                "train/critic_loss",
-                "train/ent_loss",
-                # Add other relevant keys like rollout/ep_rew_mean if desired
-                "rollout/ep_rew_mean",
-                "rollout/ep_len_mean"
-            ]
-            for key in keys_to_log:
-                if key in self.logger.name_to_value:
-                    try:
-                        # Attempt to convert to float for consistent formatting
-                        sb3_metrics[key] = float(self.logger.name_to_value[key])
-                    except (ValueError, TypeError):
-                        sb3_metrics[key] = self.logger.name_to_value[key] # Keep original if conversion fails
-            
-            if sb3_metrics: # Only log if we found any metrics
-                metrics_str = ", ".join([f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in sb3_metrics.items()])
-                callback_logger.info(f"[SB3 Metrics @ {self.num_timesteps}] {metrics_str}")
+        # REMOVED: Logging moved back to _on_rollout_end for better timing
 
         # --- Store FINAL metrics from DONE environments --- #
         if (hasattr(self, 'locals') and self.locals and
@@ -329,6 +324,22 @@ class TuneReportCallback(BaseCallback):
                         except (TypeError, ValueError):
                             ep_metrics[k] = 0.0
 
+                    # --- Fetch latest SAC losses (if applicable) ---
+                    actor_loss = float('inf') # Default to infinite loss if not found
+                    critic_loss = float('inf')
+                    model_type = self.model.config.get("model_type", "ppo") # Get model type
+                    if model_type == "sac" and self.logger is not None and hasattr(self.logger, 'name_to_value'):
+                        actor_loss_val = self.logger.name_to_value.get("train/actor_loss")
+                        critic_loss_val = self.logger.name_to_value.get("train/critic_loss")
+                        try:
+                            actor_loss = float(actor_loss_val) if actor_loss_val is not None and np.isfinite(float(actor_loss_val)) else float('inf')
+                        except (ValueError, TypeError):
+                            actor_loss = float('inf')
+                        try:
+                            critic_loss = float(critic_loss_val) if critic_loss_val is not None and np.isfinite(float(critic_loss_val)) else float('inf')
+                        except (ValueError, TypeError):
+                            critic_loss = float('inf')
+
                     # --- Calculate Combined Score for this episode --- #
                     # Use last known explained variance as best proxy
                     combined_score = self._normalize_and_combine_metrics(
@@ -338,7 +349,9 @@ class TuneReportCallback(BaseCallback):
                         episode_return=ep_metrics['return'],
                         calmar_ratio=ep_metrics['calmar'],
                         sortino_ratio=ep_metrics['sortino'],
-                        model_type=self.model.config.get("model_type", "ppo") # Pass model type
+                        actor_loss=actor_loss,   # Pass fetched actor loss
+                        critic_loss=critic_loss, # Pass fetched critic loss
+                        model_type=model_type    # Pass model type
                     )
 
                     # --- Report directly to Ray Tune --- #
@@ -360,7 +373,13 @@ class TuneReportCallback(BaseCallback):
                                 "eval/sortino_ratio": ep_metrics['sortino'],
                                 "eval/calmar_ratio": ep_metrics['calmar'],
                                 "eval/mean_return_pct": ep_metrics['return'] * 100,
+                                # Add losses if SAC
+                                "eval/actor_loss": actor_loss if model_type == "sac" else None,
+                                "eval/critic_loss": critic_loss if model_type == "sac" else None,
                             }
+                            # Remove None values before reporting
+                            metrics_to_report = {k: v for k, v in metrics_to_report.items() if v is not None}
+
                             ray.air.session.report(metrics_to_report)
                             callback_logger.debug(
                                 f"Reported episode end metrics at step "
