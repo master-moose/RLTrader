@@ -99,8 +99,15 @@ class TcnPolicy(ActorCriticPolicy):
         tcn_params: Optional[Dict[str, Any]] = None,
         sequence_length: Optional[int] = 60,
         features_per_timestep: Optional[int] = None,
+        # ADDED: features_dim for clarity (will be inferred if None)
+        features_dim: Optional[int] = None, 
         **kwargs
     ):
+        # Initialize the parent class - IMPORTANT: This will call _build,
+        # which will in turn call our overridden _build_mlp_extractor
+        
+        # --- REVISED INIT SEQUENCE ---
+        # 1. Store TCN params and essential dimensions
         # Initialize default TCN parameters if not provided
         self.tcn_params = {
             "num_filters": 64,
@@ -108,55 +115,43 @@ class TcnPolicy(ActorCriticPolicy):
             "kernel_size": 3,
             "dropout": 0.2
         }
-        
-        # Override defaults with provided parameters
         if tcn_params is not None:
             self.tcn_params.update(tcn_params)
-        
-        # Dynamically infer sequence_length and features_per_timestep
-        features_dim = int(np.prod(observation_space.shape))
-        # print(f"[TCNPolicy][DEBUG] observation_space.shape: {observation_space.shape} (features_dim={features_dim})")
-        orig_sequence_length = sequence_length
-        orig_features_per_timestep = features_per_timestep
-        # If features_per_timestep is not provided, use the number of features in the config
+            
+        # Use the provided sequence_length and features_per_timestep
+        if sequence_length is None:
+            raise ValueError("`sequence_length` must be provided to TcnPolicy.")
         if features_per_timestep is None:
-            # Try to get features from kwargs or config
-            features = None
-            if 'features' in kwargs:
-                features = kwargs['features']
-            elif hasattr(self, 'features'):
-                features = self.features
-            if features is not None:
-                if isinstance(features, str):
-                    features_list = [f.strip() for f in features.split(',') if f.strip()]
-                elif isinstance(features, list):
-                    features_list = [str(f) for f in features]
-                else:
-                    raise ValueError("Could not determine features_per_timestep from features config.")
-                # Filter out features with _4h or _1d suffixes
-                filtered_features = [f for f in features_list if not (f.endswith('_4h') or f.endswith('_1d'))]
-                features_per_timestep = len(filtered_features)
-                # print(f"[TCNPolicy][DEBUG] features list (raw): {features_list}")
-                # print(f"[TCNPolicy][DEBUG] features list (filtered for main timeframe): {filtered_features}")
-                # print(f"[TCNPolicy][DEBUG] features_per_timestep inferred: {features_per_timestep}")
-            else:
-                raise ValueError("features_per_timestep not provided and features list not found in config/kwargs.")
-        # Now set sequence_length
-        if features_dim % features_per_timestep != 0:
-            # print(f"[TCNPolicy][ERROR] features_dim: {features_dim}, features_per_timestep: {features_per_timestep}")
-            # print(f"[TCNPolicy][ERROR] features list: {features if features is not None else 'N/A'}")
-            raise ValueError(f"Observation dimension {features_dim} is not divisible by features_per_timestep {features_per_timestep}. Check your features list and data shape.")
-        sequence_length = features_dim // features_per_timestep
-        # print(f"[TCNPolicy][DEBUG] Using sequence_length={sequence_length}, features_per_timestep={features_per_timestep} (features_dim={features_dim})")
+            raise ValueError("`features_per_timestep` must be provided to TcnPolicy via policy_kwargs.")
+            
         self.sequence_length = sequence_length
         self.features_per_timestep = features_per_timestep
-        # Store these parameters for later use in _build
-        self._tcn = None
-        # Remove 'features' from kwargs before calling super().__init__
+        self.observation_space = observation_space
+        self.action_space = action_space
+        
+        # --- Infer features_dim if not provided --- 
+        if features_dim is None:
+            if isinstance(observation_space, gym.spaces.Box) and len(observation_space.shape) == 1:
+                self.features_dim = observation_space.shape[0]
+            else:
+                # Try to get it from kwargs or raise error
+                self.features_dim = kwargs.get("features_dim")
+                if self.features_dim is None:
+                    raise ValueError("Could not infer features_dim. Please provide it in policy_kwargs.")
+        else:
+            self.features_dim = features_dim
+        # --- End inference ---
+            
+        self._tcn = None # To be initialized in _build
+        
+        # 2. Call the parent __init__ which triggers _build
+        # Remove 'features' from kwargs if present
         if 'features' in kwargs:
             del kwargs['features']
-        # Initialize the parent class - IMPORTANT: This will call _build,
-        # which will in turn call our overridden _build_mlp_extractor
+        # Remove features_dim if we inferred it
+        if 'features_dim' in kwargs and features_dim is None:
+             del kwargs['features_dim']
+             
         super(TcnPolicy, self).__init__(
             observation_space,
             action_space,
@@ -164,6 +159,7 @@ class TcnPolicy(ActorCriticPolicy):
             *args,
             **kwargs
         )
+        # --- END REVISED INIT SEQUENCE ---
     
     def _build(self, lr_schedule):
         """
@@ -235,77 +231,103 @@ class TcnPolicy(ActorCriticPolicy):
         if self._tcn is None:
             raise ValueError("TCN must be initialized before building the MLP extractor.")
             
+        # Capture outer class members needed inside TcnExtractor
+        outer_tcn = self._tcn
+        outer_features_per_timestep = self.features_per_timestep
+        outer_sequence_length = self.sequence_length
+        outer_features_dim = self.features_dim # Total observation dimension
+        
         class TcnExtractor(nn.Module):
-            def __init__(self_extractor, tcn, features_per_timestep, sequence_length, features_dim):
+            def __init__(self_extractor):
                 super(TcnExtractor, self_extractor).__init__()
                 
-                self_extractor.tcn = tcn  # The TCN module
-                self_extractor.features_per_timestep = features_per_timestep
-                self_extractor.sequence_length = sequence_length
-                self_extractor.features_dim = features_dim
+                self_extractor.tcn = outer_tcn
+                self_extractor.features_per_timestep = outer_features_per_timestep
+                self_extractor.sequence_length = outer_sequence_length
+                self_extractor.features_dim = outer_features_dim # Store total obs dim
+                self_extractor.time_series_dim = self_extractor.features_per_timestep * self_extractor.sequence_length
+                self_extractor.state_vars_dim = self_extractor.features_dim - self_extractor.time_series_dim
                 
+                # Check if state variables exist
+                if self_extractor.state_vars_dim < 0:
+                    raise ValueError(f"Calculated state_vars_dim is negative ({self_extractor.state_vars_dim}). Check features_dim ({self_extractor.features_dim}), features_per_timestep ({self_extractor.features_per_timestep}), and sequence_length ({self_extractor.sequence_length}).")
+                elif self_extractor.state_vars_dim > 0:
+                    print(f"[TcnExtractor] Detected {self_extractor.state_vars_dim} state variables based on dimensions.")
+                else:
+                    print("[TcnExtractor] No state variables detected (time_series_dim matches features_dim).")
+                    
                 # Calculate the output dimension after TCN processing
-                # This is the number of filters * sequence_length
-                num_filters = tcn.num_filters if hasattr(tcn, 'num_filters') else 64  # Default if not available
-                self_extractor.output_dim = num_filters * sequence_length
+                num_filters = self_extractor.tcn.output_dim # Use TCN's own output_dim property
+                self_extractor.tcn_output_dim = num_filters * self_extractor.sequence_length
                 
-                # Initialize policy and value networks with the expected output dimensions
+                # Calculate the input dimension for the policy/value networks
+                # It's the flattened TCN output PLUS the state variables
+                self_extractor.combined_latent_dim = self_extractor.tcn_output_dim + self_extractor.state_vars_dim
+                
+                # Define policy and value networks based on the combined dimension
+                latent_layer_size = 64 # Example size, could be configurable
                 self_extractor.policy_net = nn.Sequential(
-                    nn.Linear(self_extractor.output_dim, 64),
+                    nn.Linear(self_extractor.combined_latent_dim, latent_layer_size),
+                    nn.ReLU()
+                )
+                self_extractor.value_net = nn.Sequential(
+                    nn.Linear(self_extractor.combined_latent_dim, latent_layer_size),
                     nn.ReLU()
                 )
                 
-                self_extractor.value_net = nn.Sequential(
-                    nn.Linear(self_extractor.output_dim, 64),
-                    nn.ReLU()
-                )
+                # --- Add latent_dim_pi and latent_dim_vf properties --- #
+                # These should reflect the output size of the respective networks
+                self_extractor.latent_dim_pi = latent_layer_size 
+                self_extractor.latent_dim_vf = latent_layer_size
+                # ------------------------------------------------------ #
                 
             def forward(self_extractor, features):
-                # Debug prints for shape diagnosis (suppressed)
                 batch_size = features.shape[0]
-                seq_len = self_extractor.sequence_length
-                feat_per_timestep = self_extractor.features_per_timestep
-                total_expected = batch_size * seq_len * feat_per_timestep
-                # print(f"[DEBUG] features.shape: {features.shape}")
-                # print(f"[DEBUG] batch_size: {batch_size}")
-                # print(f"[DEBUG] sequence_length: {seq_len}")
-                # print(f"[DEBUG] features_per_timestep: {feat_per_timestep}")
-                # print(f"[DEBUG] batch_size * sequence_length * features_per_timestep: {total_expected}")
-                # print(f"[DEBUG] features.numel(): {features.numel()}")
-                # First reshape to (batch_size, sequence_length, features_per_timestep)
-                reshaped_features = features.view(batch_size, self_extractor.sequence_length, 
-                                                self_extractor.features_per_timestep)
-                # Then transpose to (batch_size, features_per_timestep, sequence_length)
-                reshaped_features = reshaped_features.transpose(1, 2)
+                
+                # Separate time-series data and state variables
+                time_series_data = features[:, :self_extractor.time_series_dim]
+                if self_extractor.state_vars_dim > 0:
+                    state_vars = features[:, self_extractor.time_series_dim:]
+                else:
+                    state_vars = None # No state variables
+                    
+                # Reshape time-series data for TCN: (batch, features_per_step, seq_len)
+                reshaped_ts_data = time_series_data.view(
+                    batch_size, 
+                    self_extractor.sequence_length, 
+                    self_extractor.features_per_timestep
+                ).transpose(1, 2)
+                
                 # Process through TCN
-                tcn_output = self_extractor.tcn(reshaped_features)
-                # Get the actual output shape from the TCN
-                # actual_output_shape = tcn_output.shape
-                # print(f"TCN output shape: {actual_output_shape}")
-                # Flatten the output for the policy and value networks
-                flattened = tcn_output.reshape(batch_size, -1)
-                actual_flattened_dim = flattened.shape[1]
-                # Check if the expected output dimension matches the actual output
-                if self_extractor.output_dim != actual_flattened_dim:
-                    # print(f"TCN output dimension mismatch: expected {self_extractor.output_dim}, "
-                    #       f"got {actual_flattened_dim}. Adjusting networks.")
-                    # Update the output dimension
-                    self_extractor.output_dim = actual_flattened_dim
-                    # Recreate the policy and value networks with the correct dimensions
-                    device = flattened.device
-                    self_extractor.policy_net = nn.Sequential(
-                        nn.Linear(actual_flattened_dim, 64),
-                        nn.ReLU()
-                    ).to(device)
-                    self_extractor.value_net = nn.Sequential(
-                        nn.Linear(actual_flattened_dim, 64),
-                        nn.ReLU()
-                    ).to(device)
+                tcn_output = self_extractor.tcn(reshaped_ts_data)
+                
+                # Flatten TCN output: (batch, tcn_output_dim)
+                flattened_tcn_output = tcn_output.reshape(batch_size, -1)
+                
+                # Combine TCN output with state variables (if they exist)
+                if state_vars is not None:
+                    combined_features = torch.cat((flattened_tcn_output, state_vars), dim=1)
+                else:
+                    combined_features = flattened_tcn_output
+                
+                # --- Check combined dimension consistency --- #
+                if combined_features.shape[1] != self_extractor.combined_latent_dim:
+                     # This might happen if TCN output dim changes dynamically (unlikely but possible)
+                     print(f"[WARN] Combined dimension mismatch. Expected {self_extractor.combined_latent_dim}, Got {combined_features.shape[1]}. Re-adjusting Linear layers.")
+                     self_extractor.combined_latent_dim = combined_features.shape[1]
+                     device = combined_features.device
+                     latent_layer_size = 64 # Keep consistent
+                     self_extractor.policy_net[0] = nn.Linear(self_extractor.combined_latent_dim, latent_layer_size).to(device)
+                     self_extractor.value_net[0] = nn.Linear(self_extractor.combined_latent_dim, latent_layer_size).to(device)
+                # --- End check --- #
+                     
                 # Forward through the policy and value networks
-                policy_latent = self_extractor.policy_net(flattened)
-                value_latent = self_extractor.value_net(flattened)
+                policy_latent = self_extractor.policy_net(combined_features)
+                value_latent = self_extractor.value_net(combined_features)
+                
                 return policy_latent, value_latent
 
+            # forward_actor and forward_critic remain the same
             def forward_actor(self_extractor, features):
                 policy_latent, _ = self_extractor.forward(features)
                 return policy_latent
@@ -314,12 +336,8 @@ class TcnPolicy(ActorCriticPolicy):
                 _, value_latent = self_extractor.forward(features)
                 return value_latent
                 
-        return TcnExtractor(
-            self._tcn, 
-            self.features_per_timestep, 
-            self.sequence_length, 
-            self.features_dim
-        )
+        # We don't pass features_dim here anymore, it's accessed via the outer scope
+        return TcnExtractor()
 
     def forward(self, obs, deterministic=False):
         """Forward pass through the network."""
