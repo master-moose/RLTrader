@@ -7,7 +7,7 @@ This project implements and trains Reinforcement Learning (RL) agents (DQN, PPO,
 -   **Data Fetching:** Connects to Binance via CCXT to download historical OHLCV data (`fetch_binance_data.py`).
 -   **Data Processing:** Processes raw data, likely involving feature engineering (`process_historic_data.py`).
 -   **Synthetic Data Generation:** Creates realistic, regime-based synthetic market data for robust training (`generate_data.py`, `generate_10y_data.py`).
--   **LSTM Model Training:** Trains an LSTM model, potentially for feature extraction or price prediction (`train_improved_lstm.py`).
+-   **LSTM Model Training:** Trains an LSTM model, initially used for feature extraction or price prediction, though currently not used as I'm focusing on TCN features over LSTM. (`train_improved_lstm.py`).
 -   **RL Agent Training:** Trains various RL agents (DQN, PPO, A2C, SAC, QRDQN, RecurrentPPO) using Stable Baselines3 and SB3 Contrib (`train_dqn.py` -> `rl_agent/train.py`).
     -   Supports custom LSTM and TCN feature extractors.
     -   Integrates with Ray Tune for hyperparameter optimization.
@@ -71,9 +71,10 @@ This project implements and trains Reinforcement Learning (RL) agents (DQN, PPO,
 
 ## Prerequisites
 
--   Python 3.8+
+-   Python 3.10+
 -   Required Python packages (see `requirements.txt`)
 -   An environment supporting PyTorch (CPU or GPU)
+-   CUDA 12.4+ (12.8 is recommended for optimal performance)
 
 ## Installation
 
@@ -121,21 +122,51 @@ python process_historic_data.py --input_file data/raw/btc_usdt_15m.csv --output_
 
 **c) Generate Synthetic Data (Optional):**
 
--   Configure parameters in `data_generation_config.json`.
--   Run generation:
-    ```bash
-    # Generate standard amount (e.g., 1 year)
-    python generate_data.py --config data_generation_config.json --output_dir data/synthetic --num_samples 35040 # Adjust num_samples as needed
+-   **Purpose:** Synthetic data generation was added to test the performance of the RL agent in a more controlled environment, and to have a large amount of data to train on. Though historical data is preferred, using the synthetic data allows for more granular control over the market conditions - as well as providing a more stable environment for training.
+-   **Scripts:** `generate_data.py` is the core script, while `generate_10y_data.py` is a convenience wrapper to generate a specific long duration.
 
-    # Or generate 10 years of data
-    python generate_10y_data.py --config data_generation_config.json --output_dir data/synthetic_10y
+-   **Regime-Based Generation:** The generation process aims for realism by simulating distinct market regimes:
+    -   `Uptrend:` Characterized by positive price drift, normal volatility, and lower mean reversion.
+    -   `Downtrend:` Negative drift, often higher volatility than uptrends.
+    -   `Ranging:` No significant drift, lower volatility, and higher mean reversion.
+    -   `Volatility Expansion:` High volatility, high volume, often short-lived bursts.
+    -   `Volatility Contraction:` Very low volatility, low volume, often preceding expansion phases.
+    -   The script generates a sequence of these regimes based on defined probabilities and durations, using a Markov transition matrix to model realistic shifts between regimes (e.g., volatility contraction is more likely to transition to volatility expansion).
+
+-   **Simulation Process:**
+    1.  **Regime Sequence:** A sequence of regimes matching the desired `num_samples` is generated.
+    2.  **Price Process:** A price path is simulated, typically using a process like Geometric Brownian Motion (GBM) or an Ornstein-Uhlenbeck (OU) process. The parameters of this process (drift `mu`, volatility `sigma`, mean reversion strength) are dynamically adjusted at each step based on the *current* market regime from the generated sequence.
+    3.  **OHLCV Generation:** Realistic Open, High, Low prices are derived from the simulated closing price path and regime-dependent volatility. Volume is also simulated based on the current regime's `volume_factor`.
+    4.  **Feature Calculation:** Standard technical indicators (RSI, MACD, Bollinger Bands, etc. - *verify which ones are actually included in `generate_data.py`*) are calculated on the generated OHLCV data.
+    5.  **Labeling (Optional but typical):** Price direction labels for supervised learning (like for the LSTM) might be generated based on future price movements.
+
+-   **Configuration:**
+    -   Primary configuration is done via a JSON file (default: `data_generation_config.json`). This file typically specifies:
+        -   `base_price`: Initial starting price.
+        -   `base_volatility`: Baseline volatility level.
+        -   `regime_distribution`: Probabilities for initially selecting each regime.
+        -   Overrides for individual regime parameters (drift, volatility, mean reversion, volume factor, duration range).
+        -   Transition matrix probabilities between regimes.
+    -   **Command-line arguments:**
+        -   `--num_samples`: Total number of time steps (e.g., 15-minute intervals) to generate.
+        -   `--output_dir`: Directory to save the generated data (e.g., `data/synthetic/`).
+        -   `--config`: Path to the configuration JSON file.
+        -   `--seed`: Random seed for reproducibility.
+
+-   **Output:** The script saves the generated data, typically split into training, validation, and test sets, in HDF5 format (`*.h5`) within the specified output directory. Each HDF5 file may contain multiple keys if different timeframes are generated or processed.
+
+-   **Running Generation:**
+    ```bash
+    # Generate a specific number of samples (e.g., ~1 year of 15m data)
+    python generate_data.py --config data_generation_config.json --output_dir data/synthetic --num_samples 35040 --seed 42
+
+    # Generate 10 years of data using the convenience script
+    python generate_10y_data.py --config data_generation_config.json --output_dir data/synthetic_10y --seed 42
     ```
--   Generates OHLCV data with different market regimes.
--   Saves splits (train/val/test) in HDF5 format to the specified output directory.
 
 **d) Normalize Features:**
 
--   After processing or generating data, normalize the features. This step is crucial for many models, especially neural networks.
+-   After processing or generating data, normalize the features.
 -   The script `rl_agent/data/normalize_features.py` handles normalization for both CSV and multi-key HDF5 files.
 -   Available methods: `minmax`, `zscore`, `robust`.
 -   Given the potential outliers and volatility in cryptocurrency data, the `robust` method (which uses median and interquartile range) is often preferred as it's less sensitive to extreme values.
@@ -230,6 +261,5 @@ python rl_agent/data/normalize_features.py \
 ## Notes
 
 -   Ensure data directories (`data/`, `models/`, `output/`, `logs/`) exist or are created (some scripts handle this).
--   Training RL agents can be computationally intensive and time-consuming.
 -   Hyperparameter tuning (using Ray Tune or manually) is crucial for optimal performance.
 -   Monitor training progress using TensorBoard (`tensorboard --logdir logs/tensorboard/`). 
