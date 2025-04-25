@@ -3,8 +3,7 @@ import torch.nn as nn
 from torch.nn.utils import weight_norm # Import weight_norm
 import numpy as np
 import gym
-from typing import Dict, List, Tuple, Type, Union, Optional, Any
-import logging
+from typing import Dict, Optional, Any
 
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -20,22 +19,23 @@ class TemporalBlock(nn.Module):
         kernel_size: int,
         stride: int,
         dilation: int,
-        padding: int,
+        padding: int, # This is the padding calculated for causality
         dropout: float = 0.2,
     ):
         super(TemporalBlock, self).__init__()
         # Apply weight normalization to convolutional layers
+        # Set padding=0 here because causal padding is handled by self.pad1/pad2
         self.conv1 = weight_norm(
             nn.Conv1d(
                 n_inputs,
                 n_outputs,
                 kernel_size,
                 stride=stride,
-                padding=padding,
+                padding=0, # Set internal Conv1d padding to 0
                 dilation=dilation,
             )
         )
-        # Padding layer for causal convolution
+        # Padding layer for causal convolution (applied before conv)
         self.pad1 = nn.ConstantPad1d((padding, 0), 0)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
@@ -46,7 +46,7 @@ class TemporalBlock(nn.Module):
                 n_outputs,
                 kernel_size,
                 stride=stride,
-                padding=padding,
+                padding=0, # Set internal Conv1d padding to 0
                 dilation=dilation,
             )
         )
@@ -55,6 +55,7 @@ class TemporalBlock(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
 
         # Combine layers into a sequential block
+        # Padding -> Conv -> ReLU -> Dropout
         self.net = nn.Sequential(
             self.pad1, self.conv1, self.relu1, self.dropout1,
             self.pad2, self.conv2, self.relu2, self.dropout2
@@ -64,22 +65,32 @@ class TemporalBlock(nn.Module):
         self.downsample = (
             nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
         )
-        self.relu = nn.ReLU() # Final activation for the block
+        self.relu = nn.ReLU()  # Final activation for the block
 
         self.init_weights()
 
     def init_weights(self):
         # Initialize weights for better stability
-        self.conv1.weight.data.normal_(0, 0.01)
-        self.conv2.weight.data.normal_(0, 0.01)
+        # Use He initialization (Kaiming Normal) which is common for ReLU
+        nn.init.kaiming_normal_(self.conv1.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.conv2.weight, mode='fan_in', nonlinearity='relu')
+        # Optional: Initialize bias terms to zero
+        if self.conv1.bias is not None:
+            nn.init.zeros_(self.conv1.bias)
+        if self.conv2.bias is not None:
+            nn.init.zeros_(self.conv2.bias)
+
         if self.downsample is not None:
-            self.downsample.weight.data.normal_(0, 0.01)
+            nn.init.kaiming_normal_(self.downsample.weight, mode='fan_in', nonlinearity='relu')
+            if self.downsample.bias is not None:
+                nn.init.zeros_(self.downsample.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.net(x)
         # Apply downsample if needed, otherwise use input directly
         res = x if self.downsample is None else self.downsample(x)
-        return self.relu(out + res) # Add residual connection
+        # The causal padding should ensure out and res have the same length
+        return self.relu(out + res)  # Add residual connection
 
 
 # --- Refactored TCN using TemporalBlocks ---
@@ -90,34 +101,40 @@ class TCN(nn.Module):
     def __init__(
         self,
         input_channels: int,
-        num_filters: int, # Can be a single int or list for varying filters per layer
-        num_layers: Optional[int] = None, # Used if num_filters is int
+        num_filters: int,  # Filters per layer if int, or list of filters
+        num_layers: Optional[int] = None,  # Used if num_filters is int
         kernel_size: int = 3,
         dropout: float = 0.2,
     ):
         super(TCN, self).__init__()
-        print(f"[TCN][INIT-Residual] input_channels={input_channels}, num_filters={num_filters}, num_layers={num_layers}, kernel_size={kernel_size}, dropout={dropout}")
+        print(f"[TCN][INIT-Residual] input_channels={input_channels}, "
+              f"num_filters={num_filters}, num_layers={num_layers}, "
+              f"kernel_size={kernel_size}, dropout={dropout}")
 
         layers = []
-        num_levels = num_layers if isinstance(num_filters, int) else len(num_filters)
-        
-        if num_layers is None and isinstance(num_filters, int):
-             raise ValueError("num_layers must be specified if num_filters is an integer")
+        self._input_channels = input_channels # Store for checks
+
+        # Determine the number of levels and filter list
+        if isinstance(num_filters, int):
+            if num_layers is None:
+                raise ValueError("num_layers must be specified if num_filters is an integer")
+            num_levels = num_layers
+            num_filters_list = [num_filters] * num_layers
+        elif isinstance(num_filters, list):
+            num_levels = len(num_filters)
+            num_filters_list = num_filters
+            if num_layers is not None:
+                print("Warning: num_layers ignored because num_filters is a list.")
+        else:
+            raise ValueError("num_filters must be an int or a list of ints")
 
         for i in range(num_levels):
             dilation_size = 2**i
             # Determine input/output channels for this block
-            in_channels = input_channels if i == 0 else num_filters_list[i - 1]
-            out_channels = num_filters if isinstance(num_filters, int) else num_filters[i]
-            
-            # Create a list of filters if a single int was provided
-            if isinstance(num_filters, int):
-                 num_filters_list = [num_filters] * num_layers
-            else:
-                 num_filters_list = num_filters
+            in_channels = self._input_channels if i == 0 else num_filters_list[i - 1]
+            out_channels = num_filters_list[i]
 
-            # Calculate padding for causal convolution
-            # Padding depends on kernel size and dilation
+            # Calculate padding for causal convolution within the block
             padding_size = (kernel_size - 1) * dilation_size
 
             layers.append(
@@ -125,9 +142,9 @@ class TCN(nn.Module):
                     in_channels,
                     out_channels,
                     kernel_size,
-                    stride=1, # Stride is typically 1 for TCN
+                    stride=1,  # Stride is typically 1 for TCN
                     dilation=dilation_size,
-                    padding=padding_size,
+                    padding=padding_size,  # Pass calculated padding
                     dropout=dropout,
                 )
             )
@@ -137,59 +154,164 @@ class TCN(nn.Module):
         self.output_dim = num_filters_list[-1]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input shape handling (same as before)
-        if len(x.shape) != 3:
-            print(f"Warning: Expected 3D input (batch_size, channels, sequence_length), got {x.shape}")
-            # Basic reshape/transpose attempts (might need adjustment based on actual input)
-            if len(x.shape) == 2: # Simple case: assume (batch, features) -> (batch, channels, seq_len)
-                # This reshape is highly dependent on how features are flattened
-                # It's better to handle this upstream or make it explicit
-                print("ERROR: 2D input handling in TCN forward is ambiguous. Ensure input is 3D (batch, channels, seq_len).")
-                # Placeholder: Attempting a guess based on input_channels
-                batch_size, total_features = x.shape
-                # We don't know seq_len here without ambiguity
-                # Need input_channels to be explicitly passed or known
-                # For now, raise error to force correct input shape
-                raise ValueError("TCN received 2D input. Reshape upstream to (batch, channels, sequence_length).")
+        # Input shape: Expected (batch_size, channels, sequence_length)
 
-            elif len(x.shape) > 3:
-                 batch_size = x.shape[0]
-                 # Assuming last dim is sequence length, flatten others into channels
-                 channels = int(np.prod(x.shape[1:-1]))
-                 seq_len = x.shape[-1]
-                 x = x.reshape(batch_size, channels, seq_len)
-                 print(f"Reshaped >3D input to {x.shape}")
-        else:
-             # Check if channels and sequence length are swapped
-             # Heuristic: if dim 1 > dim 2, assume (batch, seq_len, channels)
-             if x.shape[1] > x.shape[2]:
-                 # Check if dim 2 matches expected input channels
-                 first_block_in_channels = self.network[0].conv1.in_channels
-                 if x.shape[2] == first_block_in_channels:
-                      print(f"Input shape {x.shape} matches (batch, seq_len, channels). Transposing.")
-                      x = x.transpose(1, 2)
-                 else:
-                      print(f"Warning: Input shape {x.shape} is 3D but doesn't fit (batch, channels={first_block_in_channels}, seq_len) or (batch, seq_len, channels={first_block_in_channels}). Check input format.")
-             elif x.shape[1] != self.network[0].conv1.in_channels:
-                 # If shape is (batch, channels, seq_len) but channels don't match
-                 print(f"Warning: Input shape {x.shape} channels ({x.shape[1]}) don't match TCN expected input channels ({self.network[0].conv1.in_channels}).")
+        # 1. Initial Shape Check
+        if x.ndim != 3:
+            print(f"ERROR: TCN Expected 3D input (batch, channels, seq_len), got {x.shape}. Reshape upstream.")
+            raise ValueError(f"TCN received non-3D input: {x.shape}. Must be (batch, channels, sequence_length).")
 
+        # 2. Channel Dimension Check
+        if x.shape[1] != self._input_channels:
+            # Check if dimensions might be swapped (batch, seq_len, channels)
+            if x.shape[2] == self._input_channels:
+                print(f"Warning: TCN input shape {x.shape} suggests (batch, seq_len, channels). Transposing to (batch, channels, seq_len).")
+                x = x.transpose(1, 2)
+            else:
+                # If not swapped, it's a definite channel mismatch
+                print(f"[TCN][ERROR] Input channels mismatch! Expected: {self._input_channels}, Got: {x.shape[1]}, Input shape: {x.shape}")
+                raise RuntimeError(
+                    f"TCN input channel mismatch: got {x.shape[1]}, expected {self._input_channels}. "
+                    f"Ensure input data has the correct number of features per timestep ({self._input_channels}) "
+                    f"and is shaped (batch, channels={self._input_channels}, sequence_length)."
+                )
 
-        # --- Add assertion for channel mismatch ---
-        # Get expected channels from the first conv layer of the first block
-        expected_channels = self.network[0].conv1.in_channels
-        if x.shape[1] != expected_channels:
-            print(f"[TCN][ERROR] Input channels: {x.shape[1]}, Expected: {expected_channels}, Input shape: {x.shape}")
-            # Provide more context in the error
-            raise RuntimeError(f"TCN input channel mismatch: got {x.shape[1]}, expected {expected_channels}. Ensure input data has the correct number of features per timestep and is shaped (batch, channels, sequence_length).")
+        # --- Assertion (Redundant if above checks pass, but good sanity check) ---
+        if x.shape[1] != self._input_channels:
+            # This should ideally not be reached if the checks above are correct
+            raise RuntimeError(f"Internal TCN Error: Channel dimension mismatch after checks. Expected {self._input_channels}, got {x.shape[1]}.")
 
         # Process through the network
         return self.network(x)
 
 
+# --- TCN Feature Extractor --- #
+class TcnExtractor(BaseFeaturesExtractor):
+    """
+    Feature extractor using a TCN to process the time-series part of the observation.
+    Assumes observation is flattened: [time_series_features | state_variables]
+    Time series features are expected to be [timestep_1_feature_1, ..., timestep_1_feature_N, ...,
+                                            timestep_L_feature_1, ..., timestep_L_feature_N]
+    """
+    def __init__(self, observation_space: gym.spaces.Box,
+                 features_per_timestep: int,
+                 sequence_length: int,
+                 tcn_params: Dict[str, Any]):
+
+        # Calculate dimensions
+        self.features_per_timestep = features_per_timestep
+        self.sequence_length = sequence_length
+        self.time_series_dim = features_per_timestep * sequence_length
+        total_obs_dim = observation_space.shape[0]
+        self.state_vars_dim = total_obs_dim - self.time_series_dim
+
+        if self.state_vars_dim < 0:
+            raise ValueError(
+                f"Calculated state_vars_dim is negative ({self.state_vars_dim}). "
+                f"Check observation_space shape ({total_obs_dim}), "
+                f"features_per_timestep ({features_per_timestep}), "
+                f"and sequence_length ({sequence_length})."
+            )
+        elif self.state_vars_dim > 0:
+            print(f"[TcnExtractor] Detected {self.state_vars_dim} state variables.")
+        else:
+            print("[TcnExtractor] No state variables detected.")
+
+        # --- Create the TCN --- #
+        tcn_init_kwargs = {
+            "input_channels": self.features_per_timestep,
+            "num_filters": tcn_params.get("num_filters", 64),
+            "kernel_size": tcn_params.get("kernel_size", 3),
+            "dropout": tcn_params.get("dropout", 0.2)
+        }
+        # Add num_layers only if num_filters is an int
+        if isinstance(tcn_init_kwargs["num_filters"], int):
+            tcn_init_kwargs["num_layers"] = tcn_params.get("num_layers", 4)
+
+        self.tcn = TCN(**tcn_init_kwargs)
+        # --------------------- #
+
+        # Output dim after TCN processing (flattened)
+        tcn_output_filters = self.tcn.output_dim
+        tcn_flat_output_dim = tcn_output_filters * self.sequence_length
+
+        # Final features dim is flattened TCN output + state variables
+        combined_features_dim = tcn_flat_output_dim + self.state_vars_dim
+
+        # Call parent constructor AFTER calculating final features_dim
+        super().__init__(observation_space, features_dim=combined_features_dim)
+
+        print(f"[TcnExtractor] Initialized. Time series dim: {self.time_series_dim}, "
+              f"State vars dim: {self.state_vars_dim}, TCN output dim (flat): {tcn_flat_output_dim}, "
+              f"Total output features_dim: {self._features_dim}")
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        # observations shape: (batch_size, total_obs_dim)
+        batch_size = observations.shape[0]
+
+        # Separate time-series data and state variables
+        time_series_data = observations[:, :self.time_series_dim]
+        if self.state_vars_dim > 0:
+            state_vars = observations[:, self.time_series_dim:]
+        else:
+            state_vars = None  # No state variables
+
+        # Reshape time-series data for TCN: (batch, channels, seq_len)
+        try:
+            # Channels = features_per_timestep
+            reshaped_ts_data = time_series_data.view(
+                batch_size,
+                self.features_per_timestep,
+                self.sequence_length
+            )
+        except RuntimeError as e:
+            print(f"[TcnExtractor][ERROR] Reshape failed. Input time_series_data shape: {time_series_data.shape}")
+            print(f"  Attempted reshape to ({batch_size}, {self.features_per_timestep}, {self.sequence_length})")
+            print(f"  Total elements expected: {batch_size * self.features_per_timestep * self.sequence_length}")
+            print(f"  Total elements actual: {time_series_data.numel()}")
+            print(f"  Original observations.shape: {observations.shape}")
+            raise e # Re-raise the error after printing info
+
+        # Process through TCN
+        # tcn_output shape: (batch, num_filters, seq_len)
+        tcn_output = self.tcn(reshaped_ts_data)
+
+        # Flatten TCN output: (batch, num_filters * seq_len)
+        flattened_tcn_output = tcn_output.reshape(batch_size, -1)
+
+        # --- Check Flattened Dim --- # (Optional Sanity Check)
+        expected_flattened_dim = self.tcn.output_dim * self.sequence_length
+        if flattened_tcn_output.shape[1] != expected_flattened_dim:
+            print(f"[TcnExtractor][WARN] Flattened TCN output dimension mismatch! Should not happen.")
+            # Handle potential error or adjust downstream, but ideally TCN maintains dims
+            # For safety, raise error if mismatch occurs
+            raise RuntimeError(f"Flattened TCN dim mismatch: Expected {expected_flattened_dim}, got {flattened_tcn_output.shape[1]}")
+        # ------------------------- #
+
+        # Combine TCN output with state variables (if they exist)
+        if state_vars is not None:
+            # Ensure state_vars is 2D (batch_size, state_vars_dim)
+            if state_vars.ndim != 2 or state_vars.shape[0] != batch_size:
+                raise ValueError(f"State variables shape mismatch: Expected ({batch_size}, {self.state_vars_dim}), got {state_vars.shape}")
+            combined_features = torch.cat((flattened_tcn_output, state_vars), dim=1)
+        else:
+            combined_features = flattened_tcn_output
+
+        # --- Final Check on output dimension --- #
+        if combined_features.shape[1] != self._features_dim:
+             raise RuntimeError(
+                 f"[TcnExtractor][ERROR] Final combined feature dimension mismatch. "
+                 f"Expected self._features_dim: {self._features_dim}, Got: {combined_features.shape[1]}"
+             )
+        # --------------------------------------- #
+
+        return combined_features
+
+
+# --- TCN Policy (Uses TcnExtractor) --- #
 class TcnPolicy(ActorCriticPolicy):
     """
-    Policy using a Temporal Convolutional Network for feature extraction.
+    Policy using a TCN-based feature extractor.
     """
     def __init__(
         self,
@@ -197,152 +319,94 @@ class TcnPolicy(ActorCriticPolicy):
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
         *args,
-        # TCN specific parameters
+        # TCN specific parameters for the Extractor
         tcn_params: Optional[Dict[str, Any]] = None,
         sequence_length: Optional[int] = 60,
         features_per_timestep: Optional[int] = None,
-        # ADDED: features_dim for clarity (will be inferred if None)
-        features_dim: Optional[int] = None, 
+        # Standard ActorCriticPolicy args (e.g., net_arch, activation_fn)
         **kwargs
     ):
-        # Initialize the parent class - IMPORTANT: This will call _build,
-        # which will in turn call our overridden _build_mlp_extractor
-        
-        # --- REVISED INIT SEQUENCE ---
-        # 1. Store TCN params and essential dimensions
-        # Initialize default TCN parameters if not provided
-        self.tcn_params = {
-            "num_filters": 64,
-            "num_layers": 4,
-            "kernel_size": 3,
-            "dropout": 0.2
-        }
-        if tcn_params is not None:
-            self.tcn_params.update(tcn_params)
-            
-        # Use the provided sequence_length and features_per_timestep
+        # 1. Validate required TCN parameters
         if sequence_length is None:
-            raise ValueError("`sequence_length` must be provided to TcnPolicy.")
+            raise ValueError("`sequence_length` must be provided to TcnPolicy policy_kwargs.")
         if features_per_timestep is None:
-            raise ValueError("`features_per_timestep` must be provided to TcnPolicy via policy_kwargs.")
-            
-        self.sequence_length = sequence_length
-        self.features_per_timestep = features_per_timestep
-        self.observation_space = observation_space
-        self.action_space = action_space
-        
-        # --- Infer features_dim if not provided --- 
-        if features_dim is None:
-            if isinstance(observation_space, gym.spaces.Box) and len(observation_space.shape) == 1:
-                self.features_dim = observation_space.shape[0]
-            else:
-                # Try to get it from kwargs or raise error
-                self.features_dim = kwargs.get("features_dim")
-                if self.features_dim is None:
-                    raise ValueError("Could not infer features_dim. Please provide it in policy_kwargs.")
-        else:
-            self.features_dim = features_dim
-        # --- End inference ---
-            
-        self._tcn = None # To be initialized in _build
-        
-        # 2. Call the parent __init__ which triggers _build
-        # Remove 'features' from kwargs if present
-        if 'features' in kwargs:
-            del kwargs['features']
-        # Remove features_dim if we inferred it
-        if 'features_dim' in kwargs and features_dim is None:
-             del kwargs['features_dim']
-             
-        super(TcnPolicy, self).__init__(
+            raise ValueError("`features_per_timestep` must be provided via policy_kwargs.")
+
+        # 2. Prepare policy_kwargs for ActorCriticPolicy's __init__
+        # - Set the features_extractor_class
+        # - Set the features_extractor_kwargs needed by TcnExtractor
+        # - Do NOT pass TCN specific args directly to parent
+        policy_kwargs = kwargs.copy()
+        policy_kwargs["features_extractor_class"] = TcnExtractor
+        policy_kwargs["features_extractor_kwargs"] = {
+            "features_per_timestep": features_per_timestep,
+            "sequence_length": sequence_length,
+            "tcn_params": tcn_params if tcn_params is not None else {},
+        }
+
+        # 3. Call the parent __init__
+        # It will internally create the TcnExtractor and calculate features_dim
+        super().__init__(
             observation_space,
             action_space,
             lr_schedule,
             *args,
-            **kwargs
+            **policy_kwargs # Pass the modified kwargs
         )
-        # --- END REVISED INIT SEQUENCE ---
-    
-    def _build(self, lr_schedule):
+
+        # 4. Orthogonal initialization for policy/value heads (good practice)
+        self.init_weights(self.mlp_extractor) # Initialize extractor layers if needed
+        self.init_weights(self.action_net, std=0.01)
+        self.init_weights(self.value_net, std=1)
+
+    # Override _build method only if absolutely necessary
+    # ActorCriticPolicy._build handles extractor creation and head setup
+    # def _build(self, lr_schedule):
+    #     super()._build(lr_schedule)
+
+    # Override init_weights for orthogonal initialization
+    @staticmethod
+    def init_weights(module: nn.Module, std: float = np.sqrt(2)) -> None:
         """
-        Completely override the _build method from ActorCriticPolicy to ensure
-        proper initialization sequence for the TCN-based policy.
+        Initialize the weights of the network with orthogonal initialization.
+
+        :param module: Module to initialize
+        :param std: Standard deviation for initialization (gain)
         """
-        # 1. Create the underlying TCN first
-        self._tcn = TCN(
-            input_channels=self.features_per_timestep,
-            # Pass num_filters and num_layers from tcn_params
-            num_filters=self.tcn_params["num_filters"],
-            num_layers=self.tcn_params["num_layers"],
-            kernel_size=self.tcn_params["kernel_size"],
-            dropout=self.tcn_params["dropout"]
-        )
-        
-        # 2. Create our custom mlp_extractor using the TCN
-        self.mlp_extractor = self._build_mlp_extractor()
-        
-        # 3. Add required properties for compatibility with parent class
-        self.mlp_extractor.latent_dim_pi = 64  # Output dim of policy net in TcnExtractor
-        self.mlp_extractor.latent_dim_vf = 64  # Output dim of value net in TcnExtractor
-        
-        # 4. Create action net (for policy output) - handle different action space types
-        # Get the type name as a string to handle both gym and gymnasium
-        action_space_type = self.action_space.__class__.__name__
-        
-        if action_space_type == "Discrete":
-            # For discrete actions (Discrete from gym or gymnasium)
-            action_net_output_dim = self.action_space.n
-        elif action_space_type == "Box":
-            # For continuous actions (Box from gym or gymnasium)
-            action_net_output_dim = int(np.prod(self.action_space.shape))
-        elif action_space_type == "MultiDiscrete":
-            # For multi-discrete actions
-            action_net_output_dim = sum(self.action_space.nvec)
-        elif action_space_type == "MultiBinary":
-            # For multi-binary actions
-            action_net_output_dim = self.action_space.n
-        # --- ADDED: Handle MultiDiscrete action spaces from Gymnasium --- #
-        elif action_space_type == "MultiDiscrete" and hasattr(self.action_space, 'nvec'):
-             action_net_output_dim = int(np.sum(self.action_space.nvec))
-        # --------------------------------------------------------------- #
-        else:
-            raise ValueError(f"Unsupported action space: {type(self.action_space)}")
-        
-        self.action_net = nn.Linear(self.mlp_extractor.latent_dim_pi, action_net_output_dim)
-        
-        # 5. Create value net (for value function) - same as in ActorCriticPolicy
-        self.value_net = nn.Linear(self.mlp_extractor.latent_dim_vf, 1)
-        
-        # 6. Initialize weights - similar to ActorCriticPolicy
-        # Initialize policy weights
-        module_gains = {
-            self.mlp_extractor: 1.0,
-            self.action_net: 0.01,
-            self.value_net: 1.0,
-        }
-        for module, gain in module_gains.items():
-            module.apply(lambda m: self.init_weights(m, gain=gain))
-            
-        # 7. Set up optimizer
-        self.optimizer = self.optimizer_class(self.parameters(), lr=lr_schedule(1), **self.optimizer_kwargs)
+        for layer in module.modules():
+            if isinstance(layer, (nn.Linear, nn.Conv1d, nn.Conv2d)):
+                # Orthogonal initialization for weights
+                torch.nn.init.orthogonal_(layer.weight, gain=std)
+                # Initialize bias terms to zero
+                if layer.bias is not None:
+                    layer.bias.data.fill_(0.0)
+
+    # Forward method should typically NOT be overridden unless changing
+    # how policy/value heads are used. ActorCriticPolicy handles this.
+    # def forward(self, obs: torch.Tensor, deterministic: bool = False):
+    #     return super().forward(obs, deterministic)
+
+    # _get_action_dist_from_latent remains the same as ActorCriticPolicy
+
+    # predict_values remains the same as ActorCriticPolicy
 
     @property
     def tcn(self):
         """Safe access to TCN with error handling."""
-        if self._tcn is None:
+        if self.features_extractor is None:
             raise ValueError("TCN not initialized properly. Check if tcn_params is provided correctly.")
-        return self._tcn
+        return self.features_extractor.tcn
 
     def _build_mlp_extractor(self):
         """Build a TCN-based feature extractor."""
-        if self._tcn is None:
+        if self.features_extractor is None:
             raise ValueError("TCN must be initialized before building the MLP extractor.")
             
         # Capture outer class members needed inside TcnExtractor
-        outer_tcn = self._tcn
+        outer_tcn = self.tcn
         outer_features_per_timestep = self.features_per_timestep
         outer_sequence_length = self.sequence_length
-        outer_features_dim = self.features_dim # Total observation dimension
+        outer_features_dim = self._features_dim # Total observation dimension
         
         class TcnExtractor(nn.Module):
             def __init__(self_extractor):
