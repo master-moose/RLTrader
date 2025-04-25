@@ -390,29 +390,27 @@ class TcnPolicy(ActorCriticPolicy):
         )
 
         # 4. Orthogonal initialization for policy/value heads (good practice)
-        # Heads are now part of the mlp_extractor in default ActorCriticPolicy
-        # Initialize the actual mlp_extractor (which contains the heads)
-        self.init_weights(self.mlp_extractor)
-        # Action net might be separate depending on action space, init it too.
-        if hasattr(self, 'action_net'):
-            self.init_weights(self.action_net, std=0.01)
-        # Value net is usually part of mlp_extractor.vf_net or separate
-        if hasattr(self, 'value_net'):
-             self.init_weights(self.value_net, std=1)
+        # The parent class's _build method already applies init_weights,
+        # so we don't need to call it manually here.
+        # self.init_weights(self.mlp_extractor)
+        # if hasattr(self, 'action_net'):
+        #     self.init_weights(self.action_net, std=0.01)
+        # if hasattr(self, 'value_net'):
+        #     self.init_weights(self.value_net, std=1)
 
     # Override init_weights for orthogonal initialization of heads
     @staticmethod
-    def init_weights(module: nn.Module, std: float = np.sqrt(2)) -> None:
+    def init_weights(module: nn.Module, gain: float = 1) -> None:  # Changed std to gain
         """
         Initialize the weights of the network with orthogonal initialization.
 
         :param module: Module to initialize
-        :param std: Standard deviation for initialization (gain)
+        :param gain: Gain factor for orthogonal initialization
         """
         for layer in module.modules():
             if isinstance(layer, (nn.Linear, nn.Conv1d, nn.Conv2d)):
                 # Orthogonal initialization for weights
-                torch.nn.init.orthogonal_(layer.weight, gain=std)
+                torch.nn.init.orthogonal_(layer.weight, gain=gain) # Use gain here
                 # Initialize bias terms to zero
                 if layer.bias is not None:
                     layer.bias.data.fill_(0.0)
