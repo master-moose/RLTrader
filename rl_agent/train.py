@@ -369,12 +369,8 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         "eval/combined_score": 0.5,
         "config": train_config
     }
-    if RAY_AVAILABLE and tune.is_session_enabled():
-        trial_logger.info("Reporting initial metrics to Ray Tune")
-        try:
-            tune.report(**initial_metrics)
-        except Exception as report_err:
-            trial_logger.warning(f"Initial report failed: {report_err}")
+    trial_logger.info("Reporting initial metrics to Ray Tune")
+    tune.report(**initial_metrics)
 
     seed = train_config.get("seed")
     if seed is None:
