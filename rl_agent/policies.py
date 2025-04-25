@@ -13,7 +13,7 @@ from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.distributions import DiagGaussianDistribution, CategoricalDistribution # Add others if needed
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim
 from stable_baselines3.common.utils import get_device
-from stable_baselines3.common.spaces import get_action_dim # <-- Added import
+from stable_baselines3.common.env_util import get_action_dim  # <-- Corrected import
 
 # Get module logger
 logger = logging.getLogger("rl_agent.policies")
