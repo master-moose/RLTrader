@@ -315,7 +315,7 @@ class TcnPolicy(ActorCriticPolicy):
     """
     def __init__(
         self,
-        observation_space: gym.spaces.Space,
+        observation_space: gym.spaces.Box, # Ensure Box space
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
         *args,
@@ -331,18 +331,33 @@ class TcnPolicy(ActorCriticPolicy):
             raise ValueError("`sequence_length` must be provided to TcnPolicy policy_kwargs.")
         if features_per_timestep is None:
             raise ValueError("`features_per_timestep` must be provided via policy_kwargs.")
+        if not isinstance(observation_space, gym.spaces.Box):
+             raise ValueError(f"TcnPolicy requires a Box observation space, got {type(observation_space)}")
 
         # 2. Prepare policy_kwargs for ActorCriticPolicy's __init__
         # - Set the features_extractor_class
         # - Set the features_extractor_kwargs needed by TcnExtractor
-        # - Do NOT pass TCN specific args directly to parent
-        policy_kwargs = kwargs.copy()
+        # - Ensure standard kwargs (like net_arch, activation_fn) are handled
+        # - Remove TCN specific args before calling parent
+        policy_kwargs = kwargs.copy() # Start with user-provided kwargs
+
+        # Set default net_arch and activation_fn if not provided
+        policy_kwargs.setdefault("net_arch", [dict(pi=[64], vf=[64])]) # Default SB3 MLP arch
+        policy_kwargs.setdefault("activation_fn", nn.Tanh) # Default SB3 activation
+
         policy_kwargs["features_extractor_class"] = TcnExtractor
         policy_kwargs["features_extractor_kwargs"] = {
             "features_per_timestep": features_per_timestep,
             "sequence_length": sequence_length,
             "tcn_params": tcn_params if tcn_params is not None else {},
         }
+
+        # --- IMPORTANT: Remove keys not accepted by ActorCriticPolicy.__init__ ---
+        policy_kwargs.pop("tcn_params", None)
+        policy_kwargs.pop("sequence_length", None)
+        policy_kwargs.pop("features_per_timestep", None)
+        policy_kwargs.pop("features_dim", None) # Explicitly remove features_dim if present
+        # ------------------------------------------------------------------------ #
 
         # 3. Call the parent __init__
         # It will internally create the TcnExtractor and calculate features_dim
@@ -351,20 +366,21 @@ class TcnPolicy(ActorCriticPolicy):
             action_space,
             lr_schedule,
             *args,
-            **policy_kwargs # Pass the modified kwargs
+            **policy_kwargs # Pass the cleaned kwargs
         )
 
         # 4. Orthogonal initialization for policy/value heads (good practice)
-        self.init_weights(self.mlp_extractor) # Initialize extractor layers if needed
-        self.init_weights(self.action_net, std=0.01)
-        self.init_weights(self.value_net, std=1)
+        # Heads are now part of the mlp_extractor in default ActorCriticPolicy
+        # Initialize the actual mlp_extractor (which contains the heads)
+        self.init_weights(self.mlp_extractor)
+        # Action net might be separate depending on action space, init it too.
+        if hasattr(self, 'action_net'):
+            self.init_weights(self.action_net, std=0.01)
+        # Value net is usually part of mlp_extractor.vf_net or separate
+        if hasattr(self, 'value_net'):
+             self.init_weights(self.value_net, std=1)
 
-    # Override _build method only if absolutely necessary
-    # ActorCriticPolicy._build handles extractor creation and head setup
-    # def _build(self, lr_schedule):
-    #     super()._build(lr_schedule)
-
-    # Override init_weights for orthogonal initialization
+    # Override init_weights for orthogonal initialization of heads
     @staticmethod
     def init_weights(module: nn.Module, std: float = np.sqrt(2)) -> None:
         """
@@ -380,15 +396,6 @@ class TcnPolicy(ActorCriticPolicy):
                 # Initialize bias terms to zero
                 if layer.bias is not None:
                     layer.bias.data.fill_(0.0)
-
-    # Forward method should typically NOT be overridden unless changing
-    # how policy/value heads are used. ActorCriticPolicy handles this.
-    # def forward(self, obs: torch.Tensor, deterministic: bool = False):
-    #     return super().forward(obs, deterministic)
-
-    # _get_action_dist_from_latent remains the same as ActorCriticPolicy
-
-    # predict_values remains the same as ActorCriticPolicy
 
     @property
     def tcn(self):
