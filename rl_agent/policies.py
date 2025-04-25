@@ -7,6 +7,7 @@ from typing import Dict, Optional, Any
 import logging
 
 from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
+from stable_baselines3.sac.policies import SACPolicy # Added import
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, NatureCNN, MlpExtractor
 from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.distributions import DiagGaussianDistribution, CategoricalDistribution # Add others if needed
@@ -463,4 +464,81 @@ class TcnPolicy(ActorCriticPolicy):
         else:
             raise NotImplementedError(
                 f"Unsupported action space type: {type(self.action_space)}"
-            ) 
+            )
+
+
+# --- TCN SAC Policy (Uses TcnExtractor) --- #
+# Import SACPolicy if not already imported at the top
+# from stable_baselines3.sac.policies import SACPolicy
+
+class TcnSacPolicy(SACPolicy):
+    """
+    Policy using a TCN-based feature extractor for SAC.
+    """
+    def __init__(
+        self,
+        observation_space: gym.spaces.Box,
+        action_space: gym.spaces.Box, # SAC requires Box action space
+        lr_schedule: Schedule,
+        *args,
+        # TCN specific parameters for the Extractor
+        tcn_params: Optional[Dict[str, Any]] = None,
+        sequence_length: Optional[int] = 60,
+        features_per_timestep: Optional[int] = None,
+        # Standard SACPolicy args (e.g., net_arch, activation_fn, n_critics)
+        **kwargs
+    ):
+        # 1. Validate required TCN and SAC parameters
+        if sequence_length is None:
+            raise ValueError("`sequence_length` must be provided to TcnSacPolicy policy_kwargs.")
+        if features_per_timestep is None:
+            raise ValueError("`features_per_timestep` must be provided via policy_kwargs.")
+        if not isinstance(observation_space, gym.spaces.Box):
+            raise ValueError(f"TcnSacPolicy requires a Box observation space, got {type(observation_space)}")
+        if not isinstance(action_space, gym.spaces.Box):
+             raise ValueError(f"TcnSacPolicy requires a Box action space for SAC, got {type(action_space)}")
+
+        # 2. Prepare kwargs for SACPolicy's __init__
+        policy_kwargs = kwargs.copy()
+
+        # Set defaults for SAC if not provided (common SAC defaults)
+        policy_kwargs.setdefault("net_arch", [256, 256]) # Default SAC MLP arch for actor/critic
+        policy_kwargs.setdefault("activation_fn", nn.ReLU) # Common activation for SAC
+        policy_kwargs.setdefault("n_critics", 2) # Standard SAC setup
+        policy_kwargs.setdefault("share_features_extractor", True) # Typically share extractor
+
+        policy_kwargs["features_extractor_class"] = TcnExtractor
+        policy_kwargs["features_extractor_kwargs"] = {
+            "features_per_timestep": features_per_timestep,
+            "sequence_length": sequence_length,
+            "tcn_params": tcn_params if tcn_params is not None else {},
+        }
+
+        # --- IMPORTANT: Remove keys not accepted by SACPolicy.__init__ ---
+        policy_kwargs.pop("tcn_params", None)
+        policy_kwargs.pop("sequence_length", None)
+        policy_kwargs.pop("features_per_timestep", None)
+        # --------------------------------------------------------------- #
+
+        # 3. Call the parent SACPolicy __init__
+        super().__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            *args,
+            **policy_kwargs # Pass the cleaned kwargs
+        )
+
+        # SACPolicy's _build method handles initialization
+
+    # Override make_features_extractor if needed, but SACPolicy handles it
+    # def make_features_extractor(self) -> TcnExtractor:
+    #     """Creates the TCN feature extractor."""
+    #     # The features_extractor is already created by the parent class
+    #     # using features_extractor_class and features_extractor_kwargs
+    #     return self.features_extractor
+
+    # init_weights might be useful if customizing initialization beyond SB3 defaults
+    # @staticmethod
+    # def init_weights(module: nn.Module, gain: float = 1) -> None:
+    #     TcnPolicy.init_weights(module, gain) # Reuse TcnPolicy's method if desired 

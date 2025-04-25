@@ -769,7 +769,7 @@ def parse_args():
     general.add_argument(
         "--model_type", type=str, default="recurrentppo", # Changed default
         choices=[
-            "dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo"
+            "dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo", "tcn_sac"
         ],
         help="RL algorithm to use"
     )
@@ -925,7 +925,8 @@ def parse_args():
     # --- PPO/A2C Specific Parameters --- #
     ppo = parser.add_argument_group('PPO/A2C Specific Parameters')
     ppo.add_argument("--n_steps", type=int, default=2048)
-    ppo.add_argument("--ent_coef", type=str, default="0.01")
+    ppo.add_argument("--ent_coef", type=str, default="0.01",
+                       help="Entropy coefficient (PPO/A2C: float, SAC: float or 'auto')")
     ppo.add_argument("--vf_coef", type=float, default=0.5)
     ppo.add_argument("--n_epochs", type=int, default=10)
     ppo.add_argument("--clip_range", type=float, default=0.2)
@@ -935,6 +936,10 @@ def parse_args():
     # --- SAC Specific Parameters --- #
     sac = parser.add_argument_group('SAC Specific Parameters')
     sac.add_argument("--tau", type=float, default=0.005)
+    sac.add_argument("--use_sde", action="store_true",
+                       help="Use State Dependent Exploration (SDE) for SAC")
+    sac.add_argument("--sde_sample_freq", type=int, default=-1,
+                       help="Sample frequency for SDE (if --use_sde is set)")
 
     # --- LSTM/Network Architecture --- #
     network = parser.add_argument_group('Network Architecture')
@@ -1311,6 +1316,77 @@ def create_model(
         logger.info(f"TCN-PPO configuration: layers={tcn_params['num_layers']}, filters={tcn_params['num_filters']}, kernel={tcn_params['kernel_size']}, dropout={tcn_params['dropout']}, features/step={actual_features_per_timestep}")
         model = PPO(**model_kwargs)
 
+    elif model_type == "tcn_sac":
+        lr = config["learning_rate"]
+        lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
+
+        # Extract TCN-specific parameters from config
+        tcn_params = {
+            "num_filters": config.get("tcn_num_filters", 64),
+            "num_layers": config.get("tcn_num_layers", 4),
+            "kernel_size": config.get("tcn_kernel_size", 3),
+            "dropout": config.get("tcn_dropout", 0.2)
+        }
+        
+        # Get sequence length from config
+        sequence_length = config.get("sequence_length", 60)
+        
+        # --- Infer actual features per timestep ---
+        if not isinstance(env.observation_space, gym.spaces.Box):
+             raise ValueError(f"TcnSacPolicy requires a Box observation space, got {type(env.observation_space)}")
+    
+        obs_shape = env.observation_space.shape
+        if len(obs_shape) != 1:
+            raise ValueError(f"TcnSacPolicy requires a 1D observation space shape (features_dim,), got {obs_shape}")
+        
+        total_obs_dim = obs_shape[0]
+        expected_feature_dim = total_obs_dim - 2 # Assuming 2 state vars
+        if expected_feature_dim <= 0 or expected_feature_dim % sequence_length != 0:
+            raise ValueError(
+                f"Observation dimension ({total_obs_dim}) minus 2 is not cleanly divisible by sequence length ({sequence_length}). "
+                f"Cannot infer features per timestep for TCN+SAC.")
+        
+        actual_features_per_timestep = expected_feature_dim // sequence_length 
+        logger.info(f"Inferred actual features per timestep for TCN+SAC: {actual_features_per_timestep} (Obs dim: {total_obs_dim}, Seq len: {sequence_length})")
+        # --- End inference ---
+
+        # Pass TCN parameters and feature info to the policy
+        # Update policy_kwargs with TCN details for TcnSacPolicy
+        policy_kwargs.update({
+            "tcn_params": tcn_params,
+            "sequence_length": sequence_length,
+            "features_per_timestep": actual_features_per_timestep,
+            # Note: TcnSacPolicy does not take features_dim in its __init__
+            # but the TcnExtractor it uses needs it implicitly.
+            # The extractor calculates its output `_features_dim` correctly internally.
+        })
+
+        # Handle SAC specific ent_coef
+        ent_coef_value = config.get("ent_coef", "auto")
+        if isinstance(ent_coef_value, str) and ent_coef_value.lower() == 'auto':
+            sac_ent_coef = 'auto'
+        else:
+            try: sac_ent_coef = float(ent_coef_value)
+            except ValueError: sac_ent_coef = 'auto'; logger.warning(f"Invalid SAC ent_coef '{ent_coef_value}'. Defaulting auto.")
+
+        # Update model_kwargs with SAC algorithm parameters
+        model_kwargs.update({
+            "policy": TcnSacPolicy, # Use the new policy
+            "learning_rate": lr_schedule,
+            "buffer_size": config.get("buffer_size", 1000000), # SAC default buffer size
+            "batch_size": config.get("batch_size", 256), # SAC default batch size
+            "learning_starts": config.get("learning_starts", 100), # SAC default learning starts
+            "gradient_steps": config.get("gradient_steps", 1), # SAC default gradient steps
+            "target_update_interval": config.get("target_update_interval", 1), # SAC default target update
+            "tau": config.get("tau", 0.005), # SAC default tau
+            "ent_coef": sac_ent_coef,
+            "use_sde": config.get("use_sde", False), # Optional SAC param
+            "sde_sample_freq": config.get("sde_sample_freq", -1) # Optional SAC param
+        })
+
+        logger.info(f"TCN-SAC configuration: layers={tcn_params['num_layers']}, filters={tcn_params['num_filters']}, kernel={tcn_params['kernel_size']}, dropout={tcn_params['dropout']}, features/step={actual_features_per_timestep}")
+        model = SAC(**model_kwargs)
+
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -1454,7 +1530,8 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
         "lstm_dqn": DQN, # LSTM handled by feature extractor
         "qrdqn": QRDQN,
         "recurrentppo": RecurrentPPO,
-        "tcn_ppo": PPO  # TCN is handled by TcnPolicy
+        "tcn_ppo": PPO,  # TCN is handled by TcnPolicy
+        "tcn_sac": SAC  # Added for tcn_sac
     }
     if model_type_str not in model_cls_map:
         eval_logger.error(f"Unknown model type '{model_type_str}' specified in config.")
