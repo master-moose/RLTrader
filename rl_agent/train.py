@@ -111,7 +111,7 @@ class TuneReportCallback(BaseCallback):
 
     def _normalize_and_combine_metrics(
         self, reward, explained_variance, sharpe_ratio, episode_return,
-        calmar_ratio, sortino_ratio
+        calmar_ratio, sortino_ratio, model_type: str = "ppo" # Add model_type
     ):
         """
         Create a normalized combined score weighting various performance metrics,
@@ -124,6 +124,7 @@ class TuneReportCallback(BaseCallback):
             episode_return: Episode return as a fraction.
             calmar_ratio: Calmar ratio for the episode.
             sortino_ratio: Sortino ratio for the episode.
+            model_type: The type of model being trained (e.g., 'ppo', 'sac').
 
         Returns:
             A combined normalized score between 0 and 1 (higher is better).
@@ -173,9 +174,9 @@ class TuneReportCallback(BaseCallback):
         normalized_sortino = np.tanh(sortino_ratio / 3.0)
 
         # --- Weighted Combination (Base Score) --- #
-        # Adjusted weights (ensure they sum reasonably, e.g., to 1.0)
+        # Weights for metrics
         w_reward = 0.25
-        w_variance = 0.10  # Reduced weight for variance
+        w_variance = 0.10 if model_type != "sac" else 0.0 # Zero weight for SAC
         w_sharpe = 0.15
         w_sortino = 0.25
         w_calmar = 0.25
@@ -217,7 +218,8 @@ class TuneReportCallback(BaseCallback):
         weights = [w_reward, w_variance, w_sharpe,
                    w_sortino, w_calmar, w_return]
         max_possible_score = sum(weights) + 3 * METRIC_BONUS
-        min_possible_score = -sum(weights)  # Approx lower bound
+        # Adjust min possible score based on whether variance is included
+        min_possible_score = -sum(weights)
         score_range = max_possible_score - min_possible_score
 
         # Scale to [0, 1] based on the estimated range
@@ -335,7 +337,8 @@ class TuneReportCallback(BaseCallback):
                         sharpe_ratio=ep_metrics['sharpe'],
                         episode_return=ep_metrics['return'],
                         calmar_ratio=ep_metrics['calmar'],
-                        sortino_ratio=ep_metrics['sortino']
+                        sortino_ratio=ep_metrics['sortino'],
+                        model_type=self.model.config.get("model_type", "ppo") # Pass model type
                     )
 
                     # --- Report directly to Ray Tune --- #
@@ -379,13 +382,50 @@ class TuneReportCallback(BaseCallback):
 
     def _on_rollout_end(self) -> None:
         """
-        Log summary statistics at the end of each rollout.
-        Reporting to Ray Tune is now handled in _on_step when an episode ends.
+        Log aggregated metrics and SB3 internal metrics at the end of a rollout.
+        Report metrics to Ray Tune.
         """
         callback_logger = logging.getLogger("rl_agent.train")
-        # --- Get Mean Reward from Monitor Buffer --- #
+
+        # --- Log standard SB3 metrics ---
+        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            sb3_metrics = {}
+            keys_to_log = [
+                "time/fps",
+                "train/actor_loss",
+                "train/critic_loss",
+                "train/ent_loss",
+                "rollout/ep_rew_mean",
+                "rollout/ep_len_mean",
+                "train/explained_variance", # Added variance here
+                # Add other SB3 standard keys if relevant
+            ]
+            for key in keys_to_log:
+                if key in self.logger.name_to_value:
+                    try:
+                        sb3_metrics[key] = float(self.logger.name_to_value[key])
+                    except (ValueError, TypeError):
+                        sb3_metrics[key] = self.logger.name_to_value[key]
+
+            if sb3_metrics:
+                metrics_str = ", ".join([f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in sb3_metrics.items()])
+                # Use DEBUG level for potentially verbose SB3 internal logs
+                callback_logger.debug(f"[SB3 Metrics @ Rollout End] {metrics_str}")
+                
+        # --- Update last known variance (if available from SB3 logs) ---
+        if "train/explained_variance" in sb3_metrics:
+             self.last_explained_variance = sb3_metrics["train/explained_variance"]
+
+        # --- Log Aggregated Stats (Existing Logic - Adapted) --- #
+        # We report individual episode metrics in _on_step now.
+        # This section can be used for logging *averages* if needed,
+        # but the primary reporting happens per-episode.
+        # Let's log the mean reward from the Monitor buffer if available.
         reward_value = 0.0
+        variance_value = self.last_explained_variance # Use the last value fetched
         num_completed_eps = 0
+
+        # Accessing ep_info_buffer directly from model (as done in original SB3)
         if (hasattr(self.model, "ep_info_buffer") and
                 len(self.model.ep_info_buffer) > 0):
             ep_rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
@@ -398,16 +438,11 @@ class TuneReportCallback(BaseCallback):
 
         # REMOVED: Averaging logic for rollout_metrics_buffer
 
-        # Use last known explained variance for logging consistency
-        variance_value = self.last_explained_variance
-
-        # REMOVED: Combined score calculation is not needed here for reporting
-
-        # --- Log as Markdown Table (Shows Monitor/Rollout View) --- #
-        log_table = "| Metric (Rollout View) | Value     |\n"
-        log_table += "| :---------------------- | :-------- |\n"
-        log_table += f"| Timesteps               | {self.num_timesteps:<9} |\n"
-        log_table += f"| Completed Eps (Monitor) | {num_completed_eps:<9} |\n"
+        # Simple log table for rollout end
+        log_table = "+" + "-"*25 + "+" + "-"*11 + "+\n"
+        log_table += f"| Rollout End Summary       | Value     |\n"
+        log_table += "+" + "-"*25 + "+" + "-"*11 + "+\n"
+        log_table += f"| Completed Episodes      | {num_completed_eps:<9} |\n"
         log_table += f"| Mean Reward (Monitor)   | {reward_value:<9.3f} |\n"
         # Financial metrics are no longer averaged here
         log_table += f"| Mean Return (%)         | N/A       |\n" # Indicate N/A
@@ -420,6 +455,7 @@ class TuneReportCallback(BaseCallback):
         callback_logger.info(f"Rollout End Log:\n{log_table}")
 
         # REMOVED: Ray Tune reporting section
+        # Reporting is now done in _on_step when an episode finishes
 
 # --- Ray Tune Trainable Function --- #
 
@@ -693,9 +729,11 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                     except (ValueError, TypeError): last_variance = 0.0
 
                 temp_cb = TuneReportCallback()
-                combo_score = temp_cb._normalize_and_combine_metrics(last_reward, last_variance, 0.0, 0.0, 0.0, 0.0)
+                combo_score = temp_cb._normalize_and_combine_metrics(last_reward, last_variance, 0.0, 0.0, 0.0, 0.0,
+                                                                    model_type=train_config.get("model_type", "ppo"))
                 failure_metrics["eval/mean_reward"] = last_reward
-                failure_metrics["eval/explained_variance"] = last_variance
+                if train_config.get("model_type", "ppo") != "sac":
+                    failure_metrics["eval/explained_variance"] = last_variance
                 failure_metrics["eval/combined_score"] = combo_score
                 trial_logger.info(f"Reporting failure: {failure_metrics}")
 
@@ -781,7 +819,8 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         final_summary_metrics["final_logger_explained_variance"] = final_variance
 
         temp_cb = TuneReportCallback()
-        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0)
+        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0,
+                                                                model_type=train_config.get("model_type", "ppo"))
         final_summary_metrics["eval/combined_score"] = float(final_combined)
 
     trial_logger.info("Final Summary Metrics:")
@@ -1883,10 +1922,16 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         except (ValueError, TypeError): final_variance = 0.0
 
         final_metrics["eval/mean_reward"] = final_reward
-        final_metrics["eval/explained_variance"] = final_variance
+        # Conditionally add explained variance if not SAC
+        if config.get("model_type", "ppo") != "sac":
+            final_metrics["eval/explained_variance"] = final_variance
 
         temp_cb = TuneReportCallback()
-        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0)
+        # Pass model_type here
+        final_combined = temp_cb._normalize_and_combine_metrics(
+            final_reward, final_variance, 0.0, 0.0, 0.0, 0.0,
+            model_type=config.get("model_type", "ppo") # Get model type from config
+        )
         final_metrics["eval/combined_score"] = float(final_combined)
 
     # Use the modern check for Ray Tune session
