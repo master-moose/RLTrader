@@ -32,6 +32,7 @@ try:
         from ray.tune.search.optuna import OptunaSearch
         from ray.tune.search.hyperopt import HyperOptSearch
         from ray.tune import CLIReporter
+        from ray.air.config import CheckpointConfig  # Import CheckpointConfig
         # Remove RunConfig import since it's not available in Ray 2.5.1
         RAY_AVAILABLE = True
     except (ImportError, AttributeError) as e:
@@ -278,7 +279,10 @@ def run_tune_experiment(args):
 
     # Ensure Ray results directory exists
     ensure_dir_exists(args.local_dir)
-    
+    # Convert local_dir to absolute path for pyarrow compatibility
+    storage_path_abs = os.path.abspath(os.path.expanduser(args.local_dir))
+    print(f"Using absolute storage path: {storage_path_abs}")
+
     # Initialize Ray
     if args.ray_address:
         ray.init(address=args.ray_address)
@@ -364,9 +368,9 @@ def run_tune_experiment(args):
         num_samples=args.num_samples,
         scheduler=scheduler,
         search_alg=search_alg,
-        storage_path=args.local_dir,
+        storage_path=storage_path_abs,  # Use the absolute path
         name=args.exp_name,
-        keep_checkpoints_num=2,
+        checkpoint_config=CheckpointConfig(num_to_keep=2), # Use new API
         progress_reporter=reporter,
         verbose=1,
     )
