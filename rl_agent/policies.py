@@ -198,10 +198,11 @@ class TcnExtractor(BaseFeaturesExtractor):
                  sequence_length: int,
                  tcn_params: Dict[str, Any]):
 
-        # Calculate dimensions
+        # --- Step 1: Calculate all dimensions BEFORE calling super().__init__ --- #
         self.features_per_timestep = features_per_timestep
         self.sequence_length = sequence_length
         self.time_series_dim = features_per_timestep * sequence_length
+        
         # Check observation space type using gymnasium alias
         if not isinstance(observation_space, gym.spaces.Box) or len(observation_space.shape) != 1:
             raise ValueError(f"TcnExtractor requires a 1D Box observation space, got {observation_space}")
@@ -215,12 +216,24 @@ class TcnExtractor(BaseFeaturesExtractor):
                 f"features_per_timestep ({features_per_timestep}), "
                 f"and sequence_length ({sequence_length})."
             )
-        elif self.state_vars_dim > 0:
-            print(f"[TcnExtractor] Detected {self.state_vars_dim} state variables.")
+        
+        # Need to determine the TCN output dimension to calculate the final extractor output dim
+        # Temporarily determine TCN output filters based on params
+        temp_num_filters = tcn_params.get("num_filters", 64)
+        if isinstance(temp_num_filters, list):
+            tcn_output_filters = temp_num_filters[-1] 
         else:
-            print("[TcnExtractor] No state variables detected.")
+            tcn_output_filters = temp_num_filters
+        
+        tcn_flat_output_dim = tcn_output_filters * self.sequence_length
+        combined_features_dim = tcn_flat_output_dim + self.state_vars_dim
+        # --- End Dimension Calculation ---
 
-        # --- Create the TCN --- #
+        # --- Step 2: Call the parent constructor with the FINAL features_dim --- #
+        super().__init__(observation_space, features_dim=combined_features_dim)
+        # ----------------------------------------------------------------------- #
+
+        # --- Step 3: Now create and assign submodules (like the TCN) --- #
         tcn_init_kwargs = {
             "input_channels": self.features_per_timestep,
             "num_filters": tcn_params.get("num_filters", 64),
@@ -232,18 +245,13 @@ class TcnExtractor(BaseFeaturesExtractor):
             tcn_init_kwargs["num_layers"] = tcn_params.get("num_layers", 4)
 
         self.tcn = TCN(**tcn_init_kwargs)
-        # --------------------- #
+        # --- End Submodule Creation --- #
 
-        # Output dim after TCN processing (flattened)
-        tcn_output_filters = self.tcn.output_dim
-        tcn_flat_output_dim = tcn_output_filters * self.sequence_length
-
-        # Final features dim is flattened TCN output + state variables
-        combined_features_dim = tcn_flat_output_dim + self.state_vars_dim
-
-        # Call parent constructor AFTER calculating final features_dim
-        super().__init__(observation_space, features_dim=combined_features_dim)
-
+        # Print info after everything is set up
+        if self.state_vars_dim > 0:
+            print(f"[TcnExtractor] Detected {self.state_vars_dim} state variables.")
+        else:
+            print("[TcnExtractor] No state variables detected.")
         print(f"[TcnExtractor] Initialized. Time series dim: {self.time_series_dim}, "
               f"State vars dim: {self.state_vars_dim}, TCN output dim (flat): {tcn_flat_output_dim}, "
               f"Total output features_dim: {self._features_dim}")
