@@ -418,6 +418,12 @@ def run_tune_experiment(args):
         "eval/mean_return_pct": "return%",     # From Callback
         "eval/explained_variance": "exp_var",   # From Callback
         # Add other metrics from the callback if desired
+        "eval/total_trades": "trades",
+        "eval/total_longs": "longs",
+        "eval/total_shorts": "shorts",
+        "eval/portfolio_value": "port_val",
+        "eval/max_drawdown_pct": "max_dd%",
+        "eval/total_fees_paid": "fees",
         # "eval/max_drawdown": "max_dd",
         # "eval/total_trades": "trades",
         "time_total_s": "time(s)"

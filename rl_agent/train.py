@@ -376,6 +376,14 @@ class TuneReportCallback(BaseCallback):
                                 # Add losses if SAC
                                 "eval/actor_loss": actor_loss if model_type == "sac" else None,
                                 "eval/critic_loss": critic_loss if model_type == "sac" else None,
+                                # --- ADD TRADING METRICS ---
+                                "eval/total_trades": final_info.get('total_trades', 0),
+                                "eval/total_longs": final_info.get('total_longs', 0),
+                                "eval/total_shorts": final_info.get('total_shorts', 0),
+                                "eval/portfolio_value": final_info.get('portfolio_value', 0.0),
+                                "eval/max_drawdown_pct": final_info.get('max_drawdown', 0.0) * 100,
+                                "eval/total_fees_paid": final_info.get('total_fees_paid', 0.0),
+                                # --- END ADD TRADING METRICS ---
                             }
                             # Remove None values before reporting
                             metrics_to_report = {k: v for k, v in metrics_to_report.items() if v is not None}
