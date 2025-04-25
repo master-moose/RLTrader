@@ -109,7 +109,14 @@ def parse_args():
         help="RL algorithm model type to use"
     )
     # ------------------------------ #
-    
+
+    # --- Add Num Envs Argument --- #
+    parser.add_argument(
+        "--num_envs", type=int, default=None,
+        help="Number of parallel environments per trial (overrides calculation from cpus_per_trial)"
+    )
+    # ---------------------------- #
+
     args = parser.parse_args()
     
     # Create a class to match the expected arguments structure
