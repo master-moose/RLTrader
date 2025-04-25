@@ -346,6 +346,14 @@ class TcnPolicy(ActorCriticPolicy):
         if not isinstance(observation_space, gym.spaces.Box):
              raise ValueError(f"TcnPolicy requires a Box observation space, got {type(observation_space)}")
 
+        # --- Store TCN params needed by _build_mlp_extractor BEFORE super init ---
+        self.features_per_timestep = features_per_timestep
+        self.sequence_length = sequence_length
+        # We also need access to the tcn_params dict later, let's store it too
+        # Use an empty dict if None is passed
+        self.tcn_params = tcn_params if tcn_params is not None else {}
+        # -----------------------------------------------------------------------
+
         # 2. Prepare policy_kwargs for ActorCriticPolicy's __init__
         # - Set the features_extractor_class
         # - Set the features_extractor_kwargs needed by TcnExtractor
