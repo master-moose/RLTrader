@@ -1,0 +1,39 @@
+Failure # 1 (occurred at 2025-04-25_11-33-49)
+[36mray::ImplicitFunc.train()[39m (pid=7912, ip=127.0.0.1, actor_id=bafe3f1969d851ccd67f05f801000000, repr=train_rl_agent_tune)
+  File "python\ray\_raylet.pyx", line 1883, in ray._raylet.execute_task
+  File "python\ray\_raylet.pyx", line 1824, in ray._raylet.execute_task.function_executor
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\_private\function_manager.py", line 696, in actor_method_executor
+    return method(__ray_actor, *args, **kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\util\tracing\tracing_helper.py", line 463, in _resume_span
+    return method(self, *_args, **_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\trainable.py", line 331, in train
+    raise skipped from exception_cause(skipped)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\air\_internal\util.py", line 107, in run
+    self._ret = self._target(*self._args, **self._kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\function_trainable.py", line 45, in <lambda>
+    training_func=lambda: self._trainable_func(self.config),
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\util\tracing\tracing_helper.py", line 463, in _resume_span
+    return method(self, *_args, **_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\function_trainable.py", line 261, in _trainable_func
+    output = fn()
+  File "C:\Users\user\Desktop\ltsm-dqn\rl_agent\train.py", line 536, in train_rl_agent_tune
+    model.learn(
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\ppo\ppo.py", line 311, in learn
+    return super().learn(
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\on_policy_algorithm.py", line 324, in learn
+    continue_training = self.collect_rollouts(self.env, callback, self.rollout_buffer, n_rollout_steps=self.n_steps)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\on_policy_algorithm.py", line 218, in collect_rollouts
+    new_obs, rewards, dones, infos = env.step(clipped_actions)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\vec_env\base_vec_env.py", line 222, in step
+    return self.step_wait()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\vec_env\vec_normalize.py", line 181, in step_wait
+    obs, rewards, dones, infos = self.venv.step_wait()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\vec_env\subproc_vec_env.py", line 137, in step_wait
+    results = [remote.recv() for remote in self.remotes]
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\vec_env\subproc_vec_env.py", line 137, in <listcomp>
+    results = [remote.recv() for remote in self.remotes]
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\multiprocessing\connection.py", line 250, in recv
+    buf = self._recv_bytes()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\multiprocessing\connection.py", line 321, in _recv_bytes
+    raise EOFError
+EOFError

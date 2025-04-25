@@ -1,0 +1,8 @@
+Failure # 1 (occurred at 2025-04-25_13-32-06)
+The actor died unexpectedly before finishing this task.
+	class_name: ImplicitFunc
+	actor_id: 0817bcd851f50c493e011bcf01000000
+	pid: 24436
+	namespace: 8fa69ba1-18d3-4bbc-a322-a0a2ecb231a0
+	ip: 127.0.0.1
+The actor is dead because its worker process has died. Worker exit type: SYSTEM_ERROR Worker exit detail: Worker unexpectedly exits with a connection error code 10054. An existing connection was forcibly closed by the remote host. There are some potential root causes. (1) The process is killed by SIGKILL by OOM killer due to high memory usage. (2) ray stop --force is called. (3) The worker is crashed unexpectedly due to SIGSEGV or other unexpected errors.

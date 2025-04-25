@@ -1,0 +1,31 @@
+Failure # 1 (occurred at 2025-04-25_11-30-57)
+[36mray::ImplicitFunc.train()[39m (pid=1140, ip=127.0.0.1, actor_id=933206aa3f1a34eee2a5de7b01000000, repr=train_rl_agent_tune)
+  File "python\ray\_raylet.pyx", line 1883, in ray._raylet.execute_task
+  File "python\ray\_raylet.pyx", line 1824, in ray._raylet.execute_task.function_executor
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\_private\function_manager.py", line 696, in actor_method_executor
+    return method(__ray_actor, *args, **kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\util\tracing\tracing_helper.py", line 463, in _resume_span
+    return method(self, *_args, **_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\trainable.py", line 331, in train
+    raise skipped from exception_cause(skipped)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\air\_internal\util.py", line 107, in run
+    self._ret = self._target(*self._args, **self._kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\function_trainable.py", line 45, in <lambda>
+    training_func=lambda: self._trainable_func(self.config),
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\util\tracing\tracing_helper.py", line 463, in _resume_span
+    return method(self, *_args, **_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\function_trainable.py", line 261, in _trainable_func
+    output = fn()
+  File "C:\Users\user\Desktop\ltsm-dqn\rl_agent\train.py", line 504, in train_rl_agent_tune
+    model = create_model(env=train_env, config=train_config)
+  File "C:\Users\user\Desktop\ltsm-dqn\rl_agent\train.py", line 1221, in create_model
+    model = PPO(**model_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\ppo\ppo.py", line 171, in __init__
+    self._setup_model()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\ppo\ppo.py", line 174, in _setup_model
+    super()._setup_model()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\on_policy_algorithm.py", line 135, in _setup_model
+    self.policy = self.policy_class(  # type: ignore[assignment]
+  File "C:\Users\user\Desktop\ltsm-dqn\rl_agent\policies.py", line 140, in __init__
+    raise ValueError("Could not infer features_dim. Please provide it in policy_kwargs.")
+ValueError: Could not infer features_dim. Please provide it in policy_kwargs.

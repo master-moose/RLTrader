@@ -290,22 +290,23 @@ class TradingEnvironment(Env):
         # --- Update portfolio and check drawdown BEFORE incrementing step ---
         self._update_portfolio_value() # Uses self.current_step price
 
-        # Update max portfolio value based on value at step t
+        # Update max portfolio value based on value at step t (for metrics/rewards)
         self.max_portfolio_value = max(self.max_portfolio_value,
                                        self.portfolio_value)
 
-        # Calculate drawdown based on value at step t
-        current_drawdown = 0.0
+        # Calculate drawdown based on peak value at step t (for metrics/rewards)
+        current_drawdown_from_peak = 0.0
         # Avoid division by zero if max_portfolio_value is zero or negative
         if self.max_portfolio_value > ZERO_THRESHOLD:
-            current_drawdown = max(0.0, (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value) # noqa E501 Ensure drawdown isn't negative
-        self.max_drawdown = max(self.max_drawdown, current_drawdown)
+            current_drawdown_from_peak = max(0.0, (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value) # noqa E501 Ensure drawdown isn't negative
+        self.max_drawdown = max(self.max_drawdown, current_drawdown_from_peak) # Track max drawdown from peak
 
-        # Check for early stopping based on drawdown at step t
-        drawdown_terminated = False
-        # Using 0.50 as the termination threshold
-        if self.max_drawdown > 0.50:
-            drawdown_terminated = True
+        # Check for early stopping based on drawdown from INITIAL BALANCE at step t
+        initial_balance_drawdown_terminated = False
+        # Using 0.50 (50%) of initial balance as the termination threshold
+        termination_portfolio_threshold = self.initial_balance * 0.50
+        if self.portfolio_value < termination_portfolio_threshold:
+            initial_balance_drawdown_terminated = True
 
         # --------------------------------------------------------------------
 
@@ -345,8 +346,8 @@ class TradingEnvironment(Env):
                                 self.episode_step >= self.max_steps)
 
         # Determine termination/truncation
-        # Terminate if drawdown > 50% OR end of data reached
-        terminated = drawdown_terminated or is_end_of_data
+        # Terminate if drawdown from initial balance > 50% OR end of data reached
+        terminated = initial_balance_drawdown_terminated or is_end_of_data
         # Truncate ONLY if max steps reached AND not already terminated
         truncated = is_max_steps_reached and not terminated
         # ---------------------------------------------------
@@ -354,8 +355,12 @@ class TradingEnvironment(Env):
         # --- Log Termination/Truncation Reason ---
         termination_reason = "None"
         if terminated:
-            if drawdown_terminated:
-                termination_reason = f"Drawdown > 50% ({self.max_drawdown:.2%})"
+            if initial_balance_drawdown_terminated:
+                # Calculate drawdown from initial for logging clarity
+                drawdown_pct_from_initial = 0.0
+                if self.initial_balance > ZERO_THRESHOLD:
+                    drawdown_pct_from_initial = max(0.0, (self.initial_balance - self.portfolio_value) / self.initial_balance) # noqa E501
+                termination_reason = f"Drawdown > 50% of Initial Balance ({drawdown_pct_from_initial:.2%})" # noqa E501
             elif is_end_of_data:
                 termination_reason = "End of Data"
         elif truncated:

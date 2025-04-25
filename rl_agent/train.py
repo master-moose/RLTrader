@@ -15,8 +15,7 @@ import logging
 import os
 import sys
 import time
-import traceback  # Added for potential use
-import copy # ADDED IMPORT
+import copy  # Added import
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # --- Third-Party Imports --- #
@@ -30,7 +29,6 @@ from stable_baselines3 import A2C, DQN, PPO, SAC
 from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.logger import Logger as SB3Logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
 from stable_baselines3.common.vec_env import (
@@ -49,7 +47,7 @@ try:
     import ray
     from ray import tune
     # Unused imports removed: ASHAScheduler, OptunaSearch, HyperOptSearch
-    from ray.tune import CLIReporter  # Keep CLIReporter
+    # from ray.tune import CLIReporter # Keep CLIReporter # Unused
     RAY_AVAILABLE = True
 except ImportError:
     # Detailed error handling in run_tune_sweep.py
@@ -88,11 +86,14 @@ class TuneReportCallback(BaseCallback):
     """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
     def __init__(self):
         super().__init__(verbose=0)
-        self.last_explained_variance = 0.0 # Store last known variance
-        self.last_sharpe_ratio = 0.0 # Store last known sharpe ratio from env info
-        self.last_episode_return = 0.0 # Store last known episode return from env info
-        self.last_calmar_ratio = 0.0 # Store last known calmar ratio
-        self.last_sortino_ratio = 0.0 # Store last known sortino ratio
+        # Store last known variance
+        self.last_explained_variance = 0.0
+        # Store last known sharpe ratio from env info
+        self.last_sharpe_ratio = 0.0
+        # Store last known episode return from env info
+        self.last_episode_return = 0.0
+        self.last_calmar_ratio = 0.0  # Store last known calmar ratio
+        self.last_sortino_ratio = 0.0  # Store last known sortino ratio
 
     def _on_init(self) -> None:
         """Ensure the logger is available."""
@@ -105,9 +106,13 @@ class TuneReportCallback(BaseCallback):
             "TuneReportCallback initialized - reporting metrics at rollout end."
         )
 
-    def _normalize_and_combine_metrics(self, reward, explained_variance, sharpe_ratio, episode_return, calmar_ratio, sortino_ratio):
+    def _normalize_and_combine_metrics(
+        self, reward, explained_variance, sharpe_ratio, episode_return,
+        calmar_ratio, sortino_ratio
+    ):
         """
-        Create a normalized combined score weighting various performance metrics.
+        Create a normalized combined score weighting various performance metrics,
+        including bonuses for meeting specific ratio thresholds.
 
         Args:
             reward: The mean reward value.
@@ -120,36 +125,59 @@ class TuneReportCallback(BaseCallback):
         Returns:
             A combined normalized score between 0 and 1 (higher is better).
         """
+        # --- Target Thresholds and Bonuses ---
+        TARGET_SHARPE = 1.0
+        TARGET_SORTINO = 1.5  # Can adjust this target
+        TARGET_CALMAR = 0.5   # Can adjust this target
+        METRIC_BONUS = 0.15   # Bonus added for each threshold met
+
         # --- Handle missing or invalid inputs --- #
         if reward is None or not isinstance(reward, (int, float, np.number)):
             reward = 0.0
-        if explained_variance is None or not isinstance(explained_variance, (int, float, np.number)):
+        if (explained_variance is None
+                or not isinstance(explained_variance, (int, float, np.number))):
             explained_variance = 0.0
-        if sharpe_ratio is None or not isinstance(sharpe_ratio, (int, float, np.number)) or not np.isfinite(sharpe_ratio):
-            sharpe_ratio = 0.0 # Neutral Sharpe if invalid/infinite
-        if episode_return is None or not isinstance(episode_return, (int, float, np.number)) or not np.isfinite(episode_return):
-            episode_return = 0.0 # Neutral return if invalid/infinite
-        if calmar_ratio is None or not isinstance(calmar_ratio, (int, float, np.number)) or not np.isfinite(calmar_ratio):
-            calmar_ratio = 0.0 # Neutral Calmar if invalid/infinite
-        if sortino_ratio is None or not isinstance(sortino_ratio, (int, float, np.number)) or not np.isfinite(sortino_ratio):
-            sortino_ratio = 0.0 # Neutral Sortino if invalid/infinite
+        if (sharpe_ratio is None
+                or not isinstance(sharpe_ratio, (int, float, np.number))
+                or not np.isfinite(sharpe_ratio)):
+            # Neutral Sharpe if invalid/infinite
+            sharpe_ratio = 0.0
+        if (episode_return is None
+                or not isinstance(episode_return, (int, float, np.number))
+                or not np.isfinite(episode_return)):
+            # Neutral return if invalid/infinite
+            episode_return = 0.0
+        if (calmar_ratio is None
+                or not isinstance(calmar_ratio, (int, float, np.number))
+                or not np.isfinite(calmar_ratio)):
+            # Neutral Calmar if invalid/infinite
+            calmar_ratio = 0.0
+        if (sortino_ratio is None
+                or not isinstance(sortino_ratio, (int, float, np.number))
+                or not np.isfinite(sortino_ratio)):
+            # Neutral Sortino if invalid/infinite
+            sortino_ratio = 0.0
 
         # --- Normalization (aiming for values roughly in [-1, 1]) --- #
         normalized_reward = np.tanh(reward / 1000.0)
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-        normalized_sharpe = np.tanh(sharpe_ratio / 5.0) # Divisor 5 assumes typical range -5 to 5
-        normalized_return = np.tanh(episode_return / 2.0) # Scale by 2
-        normalized_calmar = np.tanh(calmar_ratio / 2.0) # Divisor 2 assumes typical range -2 to 2
-        normalized_sortino = np.tanh(sortino_ratio / 3.0) # Divisor 3 assumes typical range -3 to 3
+        # Divisor 5 assumes typical range -5 to 5
+        normalized_sharpe = np.tanh(sharpe_ratio / 5.0)
+        normalized_return = np.tanh(episode_return / 2.0)  # Scale by 2
+        # Divisor 2 assumes typical range -2 to 2
+        normalized_calmar = np.tanh(calmar_ratio / 2.0)
+        # Divisor 3 assumes typical range -3 to 3
+        normalized_sortino = np.tanh(sortino_ratio / 3.0)
 
-        # --- Weighted Combination --- #
-        # Adjusted weights for new set of metrics
+        # --- Weighted Combination (Base Score) --- #
+        # Adjusted weights (ensure they sum reasonably, e.g., to 1.0)
         w_reward = 0.25
-        w_variance = 0.10 # Reduced weight for variance
+        w_variance = 0.10  # Reduced weight for variance
         w_sharpe = 0.15
         w_sortino = 0.25
         w_calmar = 0.25
-        w_return = 0.0 # Removing direct return weight, focus on risk-adjusted
+        # Removing direct return weight, focus on risk-adjusted
+        w_return = 0.0
 
         # Calculate weighted sum
         combined_score_raw = (
@@ -157,47 +185,91 @@ class TuneReportCallback(BaseCallback):
             + w_variance * normalized_variance
             + w_sharpe * normalized_sharpe
             + w_return * normalized_return
-            + w_calmar * normalized_calmar   # Added Calmar
-            + w_sortino * normalized_sortino # Added Sortino
+            + w_calmar * normalized_calmar    # Added Calmar
+            + w_sortino * normalized_sortino  # Added Sortino
         )
 
-        # --- Shift to [0, 1] range --- #
-        # Raw score range is roughly [-1, 1] given the weights and normalizations.
-        # Shift and scale to map [-1, 1] to [0, 1]
-        combined_score_normalized = (combined_score_raw + 1.0) / 2.0
+        # --- Add Threshold Bonuses ---
+        bonus_score = 0.0
+        if sharpe_ratio > TARGET_SHARPE:
+            bonus_score += METRIC_BONUS
+            logging.getLogger("rl_agent").debug(
+                f"  Sharpe bonus added ({sharpe_ratio:.2f} > {TARGET_SHARPE})"
+            )
+        if sortino_ratio > TARGET_SORTINO:
+            bonus_score += METRIC_BONUS
+            logging.getLogger("rl_agent").debug(
+                f"  Sortino bonus added ({sortino_ratio:.2f} > {TARGET_SORTINO})"
+            )
+        if calmar_ratio > TARGET_CALMAR:
+            bonus_score += METRIC_BONUS
+            logging.getLogger("rl_agent").debug(
+                f"  Calmar bonus added ({calmar_ratio:.2f} > {TARGET_CALMAR})"
+            )
 
-        # Ensure final score is within [0, 1]
+        combined_score_with_bonuses = combined_score_raw + bonus_score
+
+        # --- Shift to [0, 1] range --- #
+        # The raw score + bonuses might now range approx [-1, 1 + 3*METRIC_BONUS]
+        weights = [w_reward, w_variance, w_sharpe,
+                   w_sortino, w_calmar, w_return]
+        max_possible_score = sum(weights) + 3 * METRIC_BONUS
+        min_possible_score = -sum(weights)  # Approx lower bound
+        score_range = max_possible_score - min_possible_score
+
+        # Scale to [0, 1] based on the estimated range
+        if score_range > 0:
+            combined_score_normalized = (
+                (combined_score_with_bonuses - min_possible_score) / score_range
+            )
+        else:
+            combined_score_normalized = 0.5
+
+        # Ensure final score is strictly within [0, 1]
         combined_score_final = np.clip(combined_score_normalized, 0.0, 1.0)
+        logging.getLogger("rl_agent").debug(
+            f"  Combined Score: raw={combined_score_raw:.3f}, "
+            f"bonus={bonus_score:.3f}, "
+            f"total={combined_score_with_bonuses:.3f}, "
+            f"scaled={combined_score_final:.3f}"
+        )
 
         return combined_score_final
 
     def _on_step(self) -> bool:
         """
-        Update the last known metrics (variance, sharpe, return) after each training step.
-        Try fetching directly from the logger's internal dictionary or locals.
-        Also fetches risk metrics from the environment info dictionary.
+        Update the last known metrics (variance, sharpe, return) after each
+        training step. Try fetching directly from the logger's internal
+        dictionary or locals. Also fetches risk metrics from the environment
+        info dictionary.
         """
         # --- Update Explained Variance (existing logic) --- #
         if self.logger is not None and hasattr(self.logger, 'name_to_value'):
-            logged_variance = self.logger.name_to_value.get("train/explained_variance", None)
+            logged_variance = self.logger.name_to_value.get(
+                "train/explained_variance", None
+            )
             if logged_variance is not None:
                 try:
                     self.last_explained_variance = float(logged_variance)
                 except (ValueError, TypeError):
                     pass
-            else: # Fallback to locals if not in logger yet
-                 if hasattr(self, 'locals') and self.locals:
-                    possible_keys = ["explained_variance", "train/explained_variance"]
-                    for key in possible_keys:
-                        if key in self.locals:
-                            try:
-                                self.last_explained_variance = float(self.locals[key])
-                                break
-                            except (ValueError, TypeError, KeyError):
-                                pass
+            # Fallback to locals if not in logger yet
+            elif hasattr(self, 'locals') and self.locals:
+                possible_keys = ["explained_variance",
+                                 "train/explained_variance"]
+                for key in possible_keys:
+                    if key in self.locals:
+                        try:
+                            self.last_explained_variance = float(
+                                self.locals[key]
+                            )
+                            break
+                        except (ValueError, TypeError, KeyError):
+                            pass
 
         # --- Update Sharpe, Return, and Calmar/Sortino from Env Info --- #
-        if hasattr(self, 'locals') and self.locals and 'infos' in self.locals and self.locals['infos']:
+        if (hasattr(self, 'locals') and self.locals and
+                'infos' in self.locals and self.locals['infos']):
             # Assuming VecEnv, get info from the first environment
             info = self.locals['infos'][0]
 
@@ -209,7 +281,8 @@ class TuneReportCallback(BaseCallback):
                     if np.isfinite(sharpe_val):
                         self.last_sharpe_ratio = sharpe_val
                 except (ValueError, TypeError):
-                     pass # Keep last valid value if conversion fails
+                    # Keep last valid value if conversion fails
+                    pass
 
             # Get episode_return (key name from TradingEnvironment)
             return_key = 'episode_return'
@@ -217,9 +290,10 @@ class TuneReportCallback(BaseCallback):
                 try:
                     return_val = float(info[return_key])
                     if np.isfinite(return_val):
-                         self.last_episode_return = return_val
+                        self.last_episode_return = return_val
                 except (ValueError, TypeError):
-                    pass # Keep last valid value if conversion fails
+                    # Keep last valid value if conversion fails
+                    pass
 
             # Get Calmar ratio
             calmar_key = 'calmar_ratio'

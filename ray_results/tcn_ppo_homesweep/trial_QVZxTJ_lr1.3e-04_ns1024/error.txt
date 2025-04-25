@@ -1,0 +1,29 @@
+Failure # 1 (occurred at 2025-04-25_11-20-25)
+[36mray::ImplicitFunc.train()[39m (pid=4344, ip=127.0.0.1, actor_id=91e0150e3b011625f71cb84f01000000, repr=train_rl_agent_tune)
+  File "python\ray\_raylet.pyx", line 1883, in ray._raylet.execute_task
+  File "python\ray\_raylet.pyx", line 1824, in ray._raylet.execute_task.function_executor
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\_private\function_manager.py", line 696, in actor_method_executor
+    return method(__ray_actor, *args, **kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\util\tracing\tracing_helper.py", line 463, in _resume_span
+    return method(self, *_args, **_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\trainable.py", line 331, in train
+    raise skipped from exception_cause(skipped)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\air\_internal\util.py", line 107, in run
+    self._ret = self._target(*self._args, **self._kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\function_trainable.py", line 45, in <lambda>
+    training_func=lambda: self._trainable_func(self.config),
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\util\tracing\tracing_helper.py", line 463, in _resume_span
+    return method(self, *_args, **_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\ray\tune\trainable\function_trainable.py", line 261, in _trainable_func
+    output = fn()
+  File "C:\Users\user\Desktop\ltsm-dqn\rl_agent\train.py", line 428, in train_rl_agent_tune
+    train_env = make_vec_env(
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\env_util.py", line 125, in make_vec_env
+    vec_env = vec_env_cls([make_env(i + start_index) for i in range(n_envs)], **vec_env_kwargs)
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\site-packages\stable_baselines3\common\vec_env\subproc_vec_env.py", line 127, in __init__
+    observation_space, action_space = self.remotes[0].recv()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\multiprocessing\connection.py", line 250, in recv
+    buf = self._recv_bytes()
+  File "C:\Users\user\AppData\Local\Programs\Python\Python310\lib\multiprocessing\connection.py", line 321, in _recv_bytes
+    raise EOFError
+EOFError
