@@ -401,6 +401,8 @@ def run_tune_experiment(args):
         sort_by_metric=True,
         metric="eval/combined_score", # Metric used for sorting
         mode="max", # Sort mode
+        # Infer and report the best metric value found so far after 2 trials report
+        infer_limit=2,
         # Optional: Customize max report frequency
         # max_report_frequency=60
     )
