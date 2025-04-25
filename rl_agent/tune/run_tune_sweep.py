@@ -14,6 +14,7 @@ import os
 import sys
 import traceback
 from typing import Dict, Any
+import shortuuid  # Add this import
 
 # Add parent directory to path for local imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -172,6 +173,11 @@ def parse_args():
         help="Timesteps per trial"
     )
     
+    parser.add_argument("--search-algo", type=str, default="optuna", choices=["basic", "optuna", "hyperopt"], help="Search algorithm to use (basic random, Optuna, HyperOpt)")
+    parser.add_argument("--ray-address", type=str, default=None, help="Ray cluster address (e.g., 'auto' or 'ray://<head_node_ip>:10001')")
+    parser.add_argument("--verbose", type=int, default=1, help="Verbosity level for trial logging (0=warning, 1=info, 2=debug)")
+    parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel environments per trial (overrides calculation from cpus_per_trial)")
+
     return parser.parse_args()
 
 def define_search_space() -> Dict[str, Any]:
@@ -223,6 +229,23 @@ def define_search_space() -> Dict[str, Any]:
     
     return search_space
 
+def short_trial_dirname_creator(trial):
+    """Creates a shorter directory name using the trial ID and first few params."""
+    # Example: trial_f8a3b1_lr0.001_ns2048
+    try:
+        parts = [f"trial_{shortuuid.uuid(name=trial.trial_id)[:6]}"]
+        # Add a few key hyperparameter values for easier identification
+        lr = trial.config.get("learning_rate")
+        ns = trial.config.get("n_steps")
+        if lr:
+            parts.append(f"lr{lr:.1e}")
+        if ns:
+            parts.append(f"ns{ns}")
+        return "_".join(parts)
+    except Exception as e:
+        # Fallback if config access fails
+        return f"trial_{shortuuid.uuid(name=trial.trial_id)[:6]}"
+
 def run_tune_experiment(args):
     """Run the Ray Tune experiment"""
     
@@ -266,16 +289,24 @@ def run_tune_experiment(args):
     print(f"Setting verbosity level for trials: {base_config['verbose']}")
     # ---------------------------------------------------
 
-    # --- Explicitly set num_envs based on cpus_per_trial ---
-    # Remove the potentially inaccurate comment from DEFAULT_CONFIG
-    if "# num_envs is calculated dynamically based on available CPUs" in DEFAULT_CONFIG:
-        del DEFAULT_CONFIG["# num_envs is calculated dynamically based on available CPUs"] # Or adjust comment if needed
+    # --- Set num_envs directly if provided, otherwise keep previous logic (or a default) ---
+    if args.num_envs is not None:
+        base_config["num_envs"] = args.num_envs
+        print(f"INFO: Explicitly setting num_envs to {args.num_envs} from command line argument.")
+        # Remove the potentially inaccurate comment from DEFAULT_CONFIG if setting num_envs directly
+        if "# num_envs is calculated dynamically based on available CPUs" in DEFAULT_CONFIG:
+            del DEFAULT_CONFIG["# num_envs is calculated dynamically based on available CPUs"]
+    else:
+        # Keep the old logic as a fallback if --num_envs is not provided
+        cpus_per_trial_arg = getattr(args, 'cpus_per_trial', 1.0)
+        num_envs_to_set = max(1, int(cpus_per_trial_arg))
+        base_config["num_envs"] = num_envs_to_set
+        print(f"INFO: Setting num_envs to {num_envs_to_set} based on --cpus_per_trial={cpus_per_trial_arg} (use --num_envs to override).")
+        # Optionally keep or remove the comment depending on desired default behavior
+        if "# num_envs is calculated dynamically based on available CPUs" in DEFAULT_CONFIG:
+             del DEFAULT_CONFIG["# num_envs is calculated dynamically based on available CPUs"] # Or adjust comment
 
-    cpus_per_trial_arg = getattr(args, 'cpus_per_trial', 1.0) # Default to 1 if not provided
-    num_envs_to_set = max(1, int(cpus_per_trial_arg))
-    base_config["num_envs"] = num_envs_to_set
-    print(f"INFO: Explicitly setting num_envs to {num_envs_to_set} based on --cpus_per_trial={cpus_per_trial_arg}")
-    # -------------------------------------------------------
+    # ---------------------------------------------------------------------------------------
 
     # Ensure Ray results directory exists
     ensure_dir_exists(args.local_dir)
@@ -373,6 +404,7 @@ def run_tune_experiment(args):
         checkpoint_config=CheckpointConfig(num_to_keep=2), # Use new API
         progress_reporter=reporter,
         verbose=1,
+        trial_dirname_creator=short_trial_dirname_creator,  # Add this line
     )
     
     print(f"Tuning completed! Analyzed {analysis.trials} trials")
