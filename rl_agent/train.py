@@ -270,6 +270,33 @@ class TuneReportCallback(BaseCallback):
                         except (ValueError, TypeError, KeyError):
                             pass
 
+        # --- Log standard SB3 metrics periodically ---
+        log_freq = 1000 # Log every 1000 steps
+        if self.num_timesteps % log_freq == 0 and self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            callback_logger = logging.getLogger("rl_agent.train")
+            sb3_metrics = {}
+            # Common metrics (adjust keys based on algorithm if needed)
+            keys_to_log = [
+                "time/fps",
+                "train/actor_loss",
+                "train/critic_loss",
+                "train/ent_loss",
+                # Add other relevant keys like rollout/ep_rew_mean if desired
+                "rollout/ep_rew_mean",
+                "rollout/ep_len_mean"
+            ]
+            for key in keys_to_log:
+                if key in self.logger.name_to_value:
+                    try:
+                        # Attempt to convert to float for consistent formatting
+                        sb3_metrics[key] = float(self.logger.name_to_value[key])
+                    except (ValueError, TypeError):
+                        sb3_metrics[key] = self.logger.name_to_value[key] # Keep original if conversion fails
+            
+            if sb3_metrics: # Only log if we found any metrics
+                metrics_str = ", ".join([f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in sb3_metrics.items()])
+                callback_logger.info(f"[SB3 Metrics @ {self.num_timesteps}] {metrics_str}")
+
         # --- Store FINAL metrics from DONE environments --- #
         if (hasattr(self, 'locals') and self.locals and
                 'infos' in self.locals and 'dones' in self.locals):
