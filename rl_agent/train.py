@@ -72,6 +72,7 @@ from rl_agent.utils import (
     setup_sb3_logger
 )
 from rl_agent.policies import TcnPolicy
+from .policies import TcnSacPolicy
 
 
 # --- Global Settings --- #
