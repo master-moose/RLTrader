@@ -361,16 +361,14 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     trial_logger = logging.getLogger("rl_agent")
 
     # --- Initial Reporting and Seeding ---
-    initial_metrics = {
-        "timesteps": 0,
-        "training_iteration": 0,
-        "eval/mean_reward": 0.0,
-        "eval/explained_variance": 0.0,
-        "eval/combined_score": 0.5,
-        "config": train_config
-    }
-    trial_logger.info("Reporting initial metrics to Ray Tune")
-    tune.report(**initial_metrics)
+    # Removed initial_metrics dictionary and the initial tune.report() call
+    # as it caused TypeErrors with unexpected keyword arguments.
+    # Reporting will be handled by the TuneReportCallback during training.
+    # initial_metrics = {
+    #     "config": train_config
+    # }
+    # trial_logger.info("Reporting initial metrics to Ray Tune")
+    # tune.report(**initial_metrics)
 
     seed = train_config.get("seed")
     if seed is None:
@@ -797,7 +795,6 @@ def parse_args():
     rewards.add_argument("--sharpe_reward_weight", type=float, default=0.5)
     rewards.add_argument("--fee_penalty_weight", type=float, default=2.0)
     rewards.add_argument("--benchmark_reward_weight", type=float, default=0.5)
-    rewards.add_argument("--consistency_penalty_weight", type=float, default=0.2)
     rewards.add_argument("--idle_penalty_weight", type=float, default=0.1)
     rewards.add_argument("--profit_bonus_weight", type=float, default=0.5)
     rewards.add_argument("--exploration_bonus_weight", type=float, default=0.1)
@@ -976,9 +973,10 @@ def create_env(
 
     reward_param_keys = [
         "portfolio_change_weight", "drawdown_penalty_weight", "sharpe_reward_weight",
-        "fee_penalty_weight", "benchmark_reward_weight", "consistency_penalty_weight",
+        "fee_penalty_weight", "benchmark_reward_weight", # Removed "consistency_penalty_weight",
         "idle_penalty_weight", "profit_bonus_weight", "exploration_bonus_weight",
-        "sharpe_window", "consistency_threshold", "idle_threshold",
+        "sharpe_window", # Removed "consistency_threshold",
+        "idle_threshold",
         "exploration_start", "exploration_end", "exploration_decay_rate",
         "trade_penalty_weight"
     ]
@@ -1171,17 +1169,41 @@ def create_model(
             "dropout": config.get("tcn_dropout", 0.2)
         }
         
-        # Get sequence length from environment config
+        # Get sequence length from config
         sequence_length = config.get("sequence_length", 60)
         
-        # Pass TCN parameters to the policy
+        # --- Infer actual features per timestep from environment's observation space ---
+        # The 'env' passed here is the VecNormalize-wrapped environment
+        if not isinstance(env.observation_space, gym.spaces.Box):
+             raise ValueError(f"TcnPolicy requires a Box observation space, got {type(env.observation_space)}")
+    
+        obs_shape = env.observation_space.shape
+        if len(obs_shape) != 1:
+            raise ValueError(f"TcnPolicy requires a 1D observation space shape (features_dim,), got {obs_shape}")
+        
+        total_obs_dim = obs_shape[0] # This includes features * seq_len + 2 state vars
+        # Infer actual features per timestep, accounting for the 2 state variables
+        expected_feature_dim = total_obs_dim - 2 
+        if expected_feature_dim <= 0 or expected_feature_dim % sequence_length != 0:
+            raise ValueError(
+                f"Observation dimension ({total_obs_dim}) minus 2 is not cleanly divisible by sequence length ({sequence_length}). "
+                f"Cannot infer features per timestep. Check environment observation space or config.")
+        
+        actual_features_per_timestep = expected_feature_dim // sequence_length 
+        logger.info(f"Inferred actual features per timestep for TCN: {actual_features_per_timestep} (Obs dim: {total_obs_dim}, Seq len: {sequence_length})")
+        # --- End inference ---
+
+        # Pass TCN parameters and feature info to the policy
         policy_kwargs.update({
             "tcn_params": tcn_params,
-            "sequence_length": sequence_length
+            "sequence_length": sequence_length,
+            "features_per_timestep": actual_features_per_timestep, # Use the inferred value
+            "features_dim": total_obs_dim # <<< ADD THIS LINE >>>
         })
         # --- PATCH: Pass features list to policy_kwargs for TcnPolicy ---
-        if "features" in config:
-            policy_kwargs["features"] = config["features"]
+        # This is redundant now as we pass num_features_per_timestep
+        # if "features" in config:
+        #     policy_kwargs["features"] = config["features"]
         
         model_kwargs.update({
             "policy": TcnPolicy,
@@ -1196,7 +1218,7 @@ def create_model(
             "max_grad_norm": config["max_grad_norm"]
         })
         
-        logger.info(f"TCN-PPO configuration: layers={tcn_params['num_layers']}, filters={tcn_params['num_filters']}, kernel={tcn_params['kernel_size']}, dropout={tcn_params['dropout']}")
+        logger.info(f"TCN-PPO configuration: layers={tcn_params['num_layers']}, filters={tcn_params['num_filters']}, kernel={tcn_params['kernel_size']}, dropout={tcn_params['dropout']}, features/step={actual_features_per_timestep}")
         model = PPO(**model_kwargs)
 
     else:
@@ -1290,9 +1312,10 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
         "random_start",
         # Reward component keys
         "portfolio_change_weight", "drawdown_penalty_weight", "sharpe_reward_weight",
-        "fee_penalty_weight", "benchmark_reward_weight", "consistency_penalty_weight",
+        "fee_penalty_weight", "benchmark_reward_weight", # Removed "consistency_penalty_weight",
         "idle_penalty_weight", "profit_bonus_weight", "exploration_bonus_weight",
-        "sharpe_window", "consistency_threshold", "idle_threshold",
+        "sharpe_window", # Removed "consistency_threshold",
+        "idle_threshold",
         "exploration_start", "exploration_end", "exploration_decay_rate",
         "trade_penalty_weight"
     ]
