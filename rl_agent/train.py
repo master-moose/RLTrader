@@ -598,10 +598,20 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     model.set_logger(sb3_logger_instance)
 
     # --- Callbacks Setup --- #
-    rollout_steps = n_steps * num_envs
+    model_type = train_config.get("model_type", "recurrentppo").lower()
+    n_steps = train_config.get("n_steps") # Already fetched earlier, re-get for clarity or use variable
+    num_envs = train_config.get("num_envs", 1)
     base_eval_freq = train_config.get("eval_freq", 10000)
-    effective_eval_freq = max(base_eval_freq, rollout_steps)
-    trial_logger.info(f"Effective eval_freq = {effective_eval_freq}")
+
+    # Calculate effective_eval_freq differently based on model type
+    if 'ppo' in model_type and n_steps is not None:
+        rollout_steps = n_steps * num_envs
+        effective_eval_freq = max(base_eval_freq, rollout_steps)
+        trial_logger.info(f"PPO model: Effective eval_freq = {effective_eval_freq} (max({base_eval_freq}, {rollout_steps}))")
+    else:
+        # For non-PPO models, just use the base eval frequency
+        effective_eval_freq = base_eval_freq
+        trial_logger.info(f"{model_type.upper()} model: Effective eval_freq = {effective_eval_freq}")
 
     tune_early_stopping_patience = 0 # Disabled for debugging
     trial_logger.info(f"Tune early_stopping_patience = {tune_early_stopping_patience}")
@@ -609,7 +619,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     callbacks = get_callback_list(
         eval_env=eval_env,
         log_dir=log_dir,
-        eval_freq=max(config.get("eval_freq", 10000), 5000),
+        eval_freq=effective_eval_freq, # Use calculated effective frequency
         n_eval_episodes=train_config.get("n_eval_episodes", 5),
         save_freq=config.get("save_freq", 10000),
         keep_checkpoints=config.get("keep_checkpoints", 3),
