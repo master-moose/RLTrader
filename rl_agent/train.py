@@ -354,8 +354,8 @@ class TuneReportCallback(BaseCallback):
 
         # Get explained variance from SB3 logger
         variance_value = 0.0
-        if hasattr(self.model, 'logger') and hasattr(model.logger, 'name_to_value'): # noqa
-            log_vals = model.logger.name_to_value # noqa
+        if hasattr(self.model, 'logger') and hasattr(self.model.logger, 'name_to_value'): # noqa
+            log_vals = self.model.logger.name_to_value # noqa
             variance_value = log_vals.get("train/explained_variance", 0.0)
             try:
                 variance_value = float(variance_value)
