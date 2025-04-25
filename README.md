@@ -43,6 +43,7 @@ This project implements and trains Reinforcement Learning (RL) agents (DQN, PPO,
 │   ├── callbacks.py         # Custom SB3 callbacks (logging, checkpoints)
 │   ├── data/
 │   │   └── data_loader.py   # Loads data for RL environment
+│   │   └── normalize_features.py # Script for feature normalization
 │   ├── environment/
 │   │   └── trading_env.py   # Custom Gym trading environment
 │   ├── models.py            # Custom SB3 policy networks/feature extractors (LSTM)
@@ -64,6 +65,7 @@ This project implements and trains Reinforcement Learning (RL) agents (DQN, PPO,
 ├── train_config.json        # Default config for RL training
 ├── evaluate_*.py            # Scripts for evaluating models
 ├── progressive_learning.py  # Script for progressive learning experiments
+├── rl_agent/data/normalize_features.py # Utility script for feature normalization (outside package?)
 └── ...                      # Other utility/testing scripts
 ```
 
@@ -115,7 +117,7 @@ python process_historic_data.py --input_file data/raw/btc_usdt_15m.csv --output_
 ```
 
 -   Modify `process_historic_data.py` to add desired features.
--   Takes raw data, adds features, and saves processed splits (train/val/test) likely in HDF5 format to `data/processed/`.
+-   Takes raw data, adds features, and saves processed splits (train/val/test) in HDF5 format to `data/processed/`.
 
 **c) Generate Synthetic Data (Optional):**
 
@@ -130,6 +132,27 @@ python process_historic_data.py --input_file data/raw/btc_usdt_15m.csv --output_
     ```
 -   Generates OHLCV data with different market regimes.
 -   Saves splits (train/val/test) in HDF5 format to the specified output directory.
+
+**d) Normalize Features:**
+
+-   After processing or generating data, normalize the features. This step is crucial for many models, especially neural networks.
+-   The script `rl_agent/data/normalize_features.py` handles normalization for both CSV and multi-key HDF5 files.
+-   Available methods: `minmax`, `zscore`, `robust`.
+-   Given the potential outliers and volatility in cryptocurrency data, the `robust` method (which uses median and interquartile range) is often preferred as it's less sensitive to extreme values.
+-   Essential columns like OHLCV can be preserved in their original form using `--preserve_columns`.
+
+```bash
+# Example: Normalize features in processed data using the robust method
+python rl_agent/data/normalize_features.py \
+    --input_dir data/processed \
+    --output_dir data/processed_normalized \
+    --method robust \
+    --file_pattern "*.h5" \
+    --preserve_columns "open,high,low,close,volume" \
+    --suffix "_normalized" \
+    --force # Optional: Overwrite existing files
+```
+- Remember to use the normalized data directory (e.g., `data/processed_normalized`) as the `--data_dir` for subsequent training steps.
 
 ### 2. Train LSTM Model (Optional)
 
@@ -151,6 +174,9 @@ python process_historic_data.py --input_file data/raw/btc_usdt_15m.csv --output_
 
     # Example: Train DQN with default MLP features on synthetic data
     python train_dqn.py --agent DQN --config train_config.json --data_dir data/synthetic --total_timesteps 500000 --save_path models/rl/dqn_mlp_synthetic --tb_log_name DQN_MLP_Synthetic
+
+    # Example: Train PPO using *normalized* processed data
+    python train_dqn.py --agent PPO --config train_config.json --data_dir data/processed_normalized --total_timesteps 1000000 --save_path models/rl/ppo_normalized --tb_log_name PPO_Normalized
     ```
 -   **Key Arguments (via `train_dqn.py` -> `rl_agent/train.py`):**
     -   `--agent`: RL algorithm (e.g., `DQN`, `PPO`, `A2C`, `SAC`, `QRDQN`, `RecurrentPPO`).

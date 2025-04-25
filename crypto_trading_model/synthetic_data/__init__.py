@@ -1,1 +1,0 @@
-"""Synthetic data generation for cryptocurrency trading models."""
