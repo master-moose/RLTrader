@@ -468,27 +468,38 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     sb3_logger_instance = setup_sb3_logger(log_dir=sb3_log_dir)
 
     # --- Dependent Parameters (e.g., batch_size) ---
+    model_type = train_config.get("model_type", "recurrentppo").lower()
     num_envs = train_config.get("num_envs", 8)
-    n_steps = train_config.get("n_steps", 2048)
-    total_steps_per_rollout = n_steps * num_envs
-    if "batch_size" not in train_config:
-        train_config["batch_size"] = min(total_steps_per_rollout, 4096)
-        trial_logger.info(
-            f"Setting batch_size={train_config['batch_size']} "
-            f"(n_steps={n_steps}, num_envs={num_envs})"
-        )
+    n_steps = train_config.get("n_steps") # Might be None for non-PPO
+
+    # Only calculate PPO-specific batch_size if using a PPO model and n_steps exists
+    if 'ppo' in model_type and n_steps is not None:
+        total_steps_per_rollout = n_steps * num_envs
+        if "batch_size" not in train_config:
+            train_config["batch_size"] = min(total_steps_per_rollout, 4096)
+            trial_logger.info(
+                f"Setting PPO batch_size={train_config['batch_size']} "
+                f"(n_steps={n_steps}, num_envs={num_envs})"
+            )
+        else:
+            # Existing checks for PPO batch_size validity
+            if train_config["batch_size"] > total_steps_per_rollout:
+                trial_logger.warning(
+                    f"batch_size ({train_config['batch_size']}) > "
+                    f"n_steps*num_envs ({total_steps_per_rollout}). Clipping."
+                )
+                train_config["batch_size"] = total_steps_per_rollout
+            elif total_steps_per_rollout % train_config["batch_size"] != 0:
+                trial_logger.warning(
+                    f"n_steps*num_envs ({total_steps_per_rollout}) not divisible "
+                    f"by batch_size ({train_config['batch_size']})."
+                )
+    elif "batch_size" not in train_config:
+        # For non-PPO models, if batch_size is not in config, let create_model handle it
+        trial_logger.info(f"batch_size not in config for {model_type}, using default in create_model")
     else:
-        if train_config["batch_size"] > total_steps_per_rollout:
-            trial_logger.warning(
-                f"batch_size ({train_config['batch_size']}) > "
-                f"n_steps*num_envs ({total_steps_per_rollout}). Clipping."
-            )
-            train_config["batch_size"] = total_steps_per_rollout
-        elif total_steps_per_rollout % train_config["batch_size"] != 0:
-            trial_logger.warning(
-                f"n_steps*num_envs ({total_steps_per_rollout}) not divisible "
-                f"by batch_size ({train_config['batch_size']})."
-            )
+        # If batch_size IS in config (e.g., from SAC search space), use it
+        trial_logger.info(f"Using batch_size={train_config['batch_size']} from config for {model_type}")
 
     # --- Environment Creation --- #
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")

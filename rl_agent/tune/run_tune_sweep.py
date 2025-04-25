@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     "shared_lstm": "shared",
     
     # Fixed environment params as requested
-    "sequence_length": 96,
+    "sequence_length": 64,
     # num_envs is calculated dynamically based on available CPUs
     "max_steps": 20000,
     
@@ -180,53 +180,87 @@ def parse_args():
 
     return parser.parse_args()
 
-def define_search_space() -> Dict[str, Any]:
-    """Define the hyperparameter search space for Ray Tune"""
-    
-    # Focus on stability parameters as requested in requirements
-    # Refined based on previous sweep results (50/50 terminated, best reward -24k)
-    # Further refined based on long run showing extreme drawdowns
+def define_search_space(model_type: str) -> Dict[str, Any]:
+    """Define the hyperparameter search space for Ray Tune based on model type."""
+
+    # --- Common Parameters ---
     search_space = {
-        # Learning rates to try (log scale)
-        # Narrowed range around previous best (1.7e-4)
-        "learning_rate": tune.loguniform(5e-5, 5e-4),
-
-        # Discount factors to try - removed extremes
+        # Learning rates - Adjust range based on typical values for algorithms
+        "learning_rate": tune.loguniform(1e-5, 1e-3), # Wider range for flexibility
+        # Discount factors
         "gamma": tune.choice([0.95, 0.99, 0.995]),
-
-        # PPO n_steps (horizon length) - re-explore slightly larger
-        "n_steps": tune.choice([1024, 2048, 4096]),
-
-        # --- Additional RecurrentPPO Parameters ---
-        # Entropy coefficient - Widen range slightly higher
-        "ent_coef": tune.loguniform(5e-3, 0.1),
-        # Value function coefficient - Give slightly more weight
-        "vf_coef": tune.uniform(0.5, 1.0),
-        # PPO clip range - removed 0.3 as potentially too high
-        "clip_range": tune.choice([0.1, 0.2]),
-        # GAE lambda - removed 0.99
-        "gae_lambda": tune.choice([0.9, 0.95, 0.98]),
-        # PPO epochs per update - Reduced range to try improving stability
-        "n_epochs": tune.choice([3, 5]),
-        # Gradient clipping norm - removed 2.0
-        "max_grad_norm": tune.choice([0.5, 1.0]),
-
-        # --- TCN Parameters (COMMENTED OUT - Using defaults from TcnPolicy) ---
-        # "tcn_num_layers": tune.choice([4, 5, 6]),
-        # "tcn_num_filters": tune.choice([32, 64, 128]),
-        # "tcn_kernel_size": tune.choice([3]),
-        # "tcn_dropout": tune.uniform(0.1, 0.3),
-
-        # --- Reward Component Weights (Focus on stability and profit) --- #
-        # Added portfolio_change_weight tuning
+        # Reward Component Weights (Focus on stability and profit)
         "portfolio_change_weight": tune.uniform(1.0, 7.0),
         "drawdown_penalty_weight": tune.uniform(0.01, 0.2),
-        # "fee_penalty_weight": tune.uniform(0.0, 0.5),    # REMOVED: Use default 0.0 as commission is 0
         "idle_penalty_weight": tune.uniform(0.0, 0.05),
         "profit_bonus_weight": tune.uniform(0.5, 1.5),
         "trade_penalty_weight": tune.uniform(0.0, 0.1),
     }
-    
+
+    # --- PPO-Specific Parameters ---
+    if 'ppo' in model_type:
+        print(f"Defining PPO-specific search space for {model_type}")
+        ppo_params = {
+            # PPO n_steps (horizon length)
+            "n_steps": tune.choice([512, 1024, 2048, 4096]), # Expanded choices
+            # Entropy coefficient
+            "ent_coef": tune.loguniform(1e-4, 0.1), # Slightly wider range lower end
+            # Value function coefficient
+            "vf_coef": tune.uniform(0.4, 1.0), # Slightly wider range
+            # PPO clip range
+            "clip_range": tune.choice([0.1, 0.2, 0.3]), # Re-added 0.3
+            # GAE lambda
+            "gae_lambda": tune.choice([0.9, 0.95, 0.98]),
+            # PPO epochs per update
+            "n_epochs": tune.choice([3, 5, 10]), # Added 10
+            # Gradient clipping norm
+            "max_grad_norm": tune.choice([0.5, 1.0, 2.0]), # Re-added 2.0
+        }
+        search_space.update(ppo_params)
+
+    # --- SAC-Specific Parameters ---
+    if 'sac' in model_type:
+        print(f"Defining SAC-specific search space for {model_type}")
+        sac_params = {
+            # Replay buffer size
+            "buffer_size": tune.choice([int(5e4), int(1e5), int(5e5)]), # Smaller options
+            # Batch size for SAC updates
+            "batch_size": tune.choice([256, 512, 1024]), # Typical SAC batches
+            # SAC target smoothing coefficient
+            "tau": tune.loguniform(0.001, 0.02),
+            # Number of gradient steps per sample
+            "gradient_steps": tune.choice([1, 2, 4]), # Allow more steps
+            # Timesteps before learning starts
+            "learning_starts": tune.choice([1000, 5000, 10000]), # Adjusted range
+            # SAC entropy coefficient (numeric only for tuning)
+            # Note: 'auto' is often default, consider fixing or tuning separately
+            "ent_coef": tune.loguniform(1e-4, 0.1),
+            # Add SDE tuning if desired
+            # "use_sde": tune.choice([True, False]),
+            # "sde_sample_freq": tune.choice([-1, 4, 8]), # Only if use_sde is True
+        }
+        search_space.update(sac_params)
+
+    # --- TCN-Specific Parameters (If model uses TCN) ---
+    if 'tcn' in model_type:
+        print(f"Defining TCN-specific search space for {model_type}")
+        tcn_params = {
+            "tcn_num_layers": tune.choice([3, 4, 5]),
+            "tcn_num_filters": tune.choice([32, 64, 96]),
+            "tcn_kernel_size": tune.choice([2, 3]),
+            "tcn_dropout": tune.uniform(0.05, 0.3),
+        }
+        search_space.update(tcn_params)
+
+    # Remove parameters not relevant for the specific model type
+    if 'ppo' not in model_type:
+        for k in ["n_steps", "vf_coef", "clip_range", "gae_lambda", "n_epochs", "max_grad_norm"]:
+            search_space.pop(k, None)
+    if 'sac' not in model_type:
+        for k in ["buffer_size", "batch_size", "tau", "gradient_steps", "learning_starts"]:
+            search_space.pop(k, None)
+    # Note: ent_coef is kept for both, but might need separate handling for SAC 'auto'
+
     return search_space
 
 def short_trial_dirname_creator(trial):
@@ -259,71 +293,62 @@ def run_tune_experiment(args):
         print("Using default base configuration")
     
     # Override base config with CLI arguments
-    base_config.update(vars(args))
+    # Convert args namespace to dict for easier update
+    cli_args_dict = {k: v for k, v in vars(args).items() if v is not None}
+    base_config.update(cli_args_dict)
+    print(f"Config after CLI overrides: {base_config}") # Debug print
     
-    # Add command line args to config
-    # Make sure paths are absolute for Ray workers
-    if args.data_path:
-        data_path = os.path.abspath(os.path.expanduser(args.data_path))
+    # Add command line args to config (ensure paths are absolute)
+    if base_config.get("data_path"):
+        data_path = os.path.abspath(os.path.expanduser(base_config["data_path"]))
         base_config["data_path"] = data_path
         print(f"Using data path: {data_path}")
     
-    if args.val_data_path:
-        val_data_path = os.path.abspath(os.path.expanduser(args.val_data_path))
+    if base_config.get("val_data_path"):
+        val_data_path = os.path.abspath(os.path.expanduser(base_config["val_data_path"]))
         base_config["val_data_path"] = val_data_path
         print(f"Using validation data path: {val_data_path}")
         
-    if args.data_key:
-        base_config["data_key"] = args.data_key
+    if base_config.get("data_key"):
+        base_config["data_key"] = base_config["data_key"]
     
     # Set timesteps per trial
-    base_config["total_timesteps"] = args.timesteps_per_trial
+    if args.timesteps_per_trial is not None:
+        base_config["total_timesteps"] = args.timesteps_per_trial
 
-    # --- Add default for cpu_only if not present ---
+    # Add defaults if not present
     base_config.setdefault("cpu_only", False)
-    # --------------------------------------------------
+    base_config.setdefault("verbose", 1) # Set default verbose from args or 1
+    base_config["verbose"] = args.verbose # Ensure CLI verbose overrides
 
-    # --- Add verbose setting from args (if available) ---
-    # Default to 1 (INFO) if not provided by the calling script
-    base_config["verbose"] = getattr(args, 'verbose', 1)
-    print(f"Setting verbosity level for trials: {base_config['verbose']}")
-    # ---------------------------------------------------
-
-    # --- Set num_envs directly if provided, otherwise keep previous logic (or a default) ---
+    # Determine num_envs based on CLI or CPU count
     if args.num_envs is not None:
         base_config["num_envs"] = args.num_envs
-        print(f"INFO: Explicitly setting num_envs to {args.num_envs} from command line argument.")
-        # Remove the potentially inaccurate comment from DEFAULT_CONFIG if setting num_envs directly
-        if "# num_envs is calculated dynamically based on available CPUs" in DEFAULT_CONFIG:
-            del DEFAULT_CONFIG["# num_envs is calculated dynamically based on available CPUs"]
+        print(f"INFO: Explicitly setting num_envs to {args.num_envs} from CLI.")
     else:
-        # Keep the old logic as a fallback if --num_envs is not provided
         cpus_per_trial_arg = getattr(args, 'cpus_per_trial', 1.0)
-        num_envs_to_set = max(1, int(cpus_per_trial_arg))
+        num_envs_to_set = max(1, int(cpus_per_trial_arg)) # Use at least 1 env
         base_config["num_envs"] = num_envs_to_set
-        print(f"INFO: Setting num_envs to {num_envs_to_set} based on --cpus_per_trial={cpus_per_trial_arg} (use --num_envs to override).")
-        # Optionally keep or remove the comment depending on desired default behavior
-        if "# num_envs is calculated dynamically based on available CPUs" in DEFAULT_CONFIG:
-             del DEFAULT_CONFIG["# num_envs is calculated dynamically based on available CPUs"] # Or adjust comment
-
-    # ---------------------------------------------------------------------------------------
+        print(f"INFO: Setting num_envs to {num_envs_to_set} based on cpus_per_trial={cpus_per_trial_arg}.")
 
     # Ensure Ray results directory exists
     ensure_dir_exists(args.local_dir)
-    # Convert local_dir to absolute path for pyarrow compatibility
     storage_path_abs = os.path.abspath(os.path.expanduser(args.local_dir))
     print(f"Using absolute storage path: {storage_path_abs}")
 
     # Initialize Ray
     if args.ray_address:
-        ray.init(address=args.ray_address)
+        ray.init(address=args.ray_address, ignore_reinit_error=True)
         print(f"Connected to Ray cluster at {args.ray_address}")
     else:
-        ray.init()
+        ray.init(ignore_reinit_error=True)
         print("Initialized Ray locally")
     
-    # Define the search space
-    search_space = define_search_space()
+    # <<<<< Get model_type from base_config to define search space >>>>>
+    model_type = base_config.get("model_type", "recurrentppo").lower()
+    search_space = define_search_space(model_type=model_type)
+    # <<<<< End change >>>>>
+
     print("Search space defined with parameters:")
     for param, space in search_space.items():
         print(f"  {param}: {space}")
@@ -332,10 +357,24 @@ def run_tune_experiment(args):
     full_config = base_config.copy()
     for param in search_space:
         if param in full_config:
-            del full_config[param]  # Remove from base config if in search space
-    
-    tune_config = {**full_config, **search_space}
-    
+            # Don't delete, allow base config to provide fixed values
+            # Only use search space if key isn't fixed in base_config
+            # This logic is tricky, let's just overwrite base_config with search_space
+            pass # Keep base config value if it exists
+        # Add search space param if not in base_config
+        elif param not in full_config:
+             full_config[param] = search_space[param] # Add if missing
+
+    # Construct the final tune_config by overlaying search space onto full_config
+    # This ensures fixed params from base_config remain, search params are added/overwritten
+    tune_config = full_config.copy()
+    tune_config.update(search_space)
+
+    print("\nFinal Tune Configuration (Fixed + Search Space):")
+    for k, v in sorted(tune_config.items()):
+        print(f"  {k}: {v}")
+    print("-" * 30)
+
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
