@@ -952,40 +952,46 @@ class TradingEnvironment(Env):
             finite_pv = [pv for pv in self.portfolio_values if np.isfinite(pv)]
             if len(finite_pv) > 1:
                  pv_array = np.array(finite_pv)
-                 # Calculate returns only where denominator is not near zero
-                 valid_indices = np.where(np.abs(pv_array[:-1]) > ZERO_THRESHOLD)[0] # noqa E501
-                 if len(valid_indices) > 0:
-                      portfolio_returns = np.diff(pv_array[valid_indices + 1]) / pv_array[valid_indices] # noqa E501
-                      if len(portfolio_returns) > 1:
-                           mean_return = np.mean(portfolio_returns)
-                           std_return = np.std(portfolio_returns)
-                           if std_return > ZERO_THRESHOLD:
-                               info['sharpe_ratio_episode'] = mean_return / std_return # noqa E501
-                           else:
-                               info['sharpe_ratio_episode'] = 0.0
-                      else:
-                           info['sharpe_ratio_episode'] = 0.0
+                 # --- REVISED RETURN CALCULATION ---
+                 # Calculate returns using the standard formula: (p[t] - p[t-1]) / p[t-1]
+                 # Only where the denominator p[t-1] is valid (not near zero)
+                 valid_denom_mask = np.abs(pv_array[:-1]) > ZERO_THRESHOLD
+                 
+                 if np.any(valid_denom_mask): # Check if there are any valid denominators
+                     # Select corresponding slices for numerator (diff) and denominator
+                     p_t = pv_array[1:][valid_denom_mask]    # Values at t where p[t-1] is valid
+                     p_t_minus_1 = pv_array[:-1][valid_denom_mask] # Valid denominator values at t-1
+                     
+                     # Ensure we have values after masking
+                     if p_t.size > 0 and p_t_minus_1.size > 0 and p_t.shape == p_t_minus_1.shape:
+                         # Calculate differences
+                         diffs = p_t - p_t_minus_1
+                         
+                         # Denominator already checked, but add safety clamp
+                         safe_denominators = np.where(np.abs(p_t_minus_1) > 1e-9, p_t_minus_1, 1e-9)
+                         
+                         portfolio_returns = diffs / safe_denominators
+                         
+                         # --- Sharpe Calculation (using calculated returns) ---
+                         if len(portfolio_returns) > 1:
+                              mean_return = np.mean(portfolio_returns)
+                              std_return = np.std(portfolio_returns)
+                              if std_return > ZERO_THRESHOLD:
+                                   info['sharpe_ratio_episode'] = mean_return / std_return
+                              else: info['sharpe_ratio_episode'] = 0.0
+                         else: info['sharpe_ratio_episode'] = 0.0
+                         # --- End Sharpe Calculation ---
+                         
+                     else: # Shape mismatch or empty after mask (should not happen with np.any check, but safety)
+                         logger.warning(f"_get_info: Shape mismatch or empty array after masking for return calc. p_t: {p_t.shape}, p_t-1: {p_t_minus_1.shape}. Setting Sharpe=0.")
+                         info['sharpe_ratio_episode'] = 0.0
                  else:
-                      info['sharpe_ratio_episode'] = 0.0
+                     # No valid denominators found
+                     info['sharpe_ratio_episode'] = 0.0
+                 # --- END REVISED RETURN CALCULATION ---
             else:
+                 # Not enough finite portfolio values for calculation
                  info['sharpe_ratio_episode'] = 0.0
-
-            # Rolling Sharpe (based on step returns used in reward)
-            if len(self.step_returns) >= self.sharpe_window:
-                # Use only finite step returns
-                finite_step_returns = [r for r in self.step_returns if np.isfinite(r)] # noqa E501
-                if len(finite_step_returns) >= self.sharpe_window:
-                     window_returns = np.array(finite_step_returns[-self.sharpe_window:]) # noqa E501
-                     mean_return = np.mean(window_returns)
-                     std_return = np.std(window_returns)
-                     if std_return > ZERO_THRESHOLD:
-                         info['sharpe_ratio_rolling'] = mean_return / std_return
-                     else:
-                         info['sharpe_ratio_rolling'] = 0.0
-                else:
-                     info['sharpe_ratio_rolling'] = 0.0 # Not enough finite data
-            else:
-                info['sharpe_ratio_rolling'] = 0.0 # Not enough data yet
         else:
             info['episode_return'] = 0.0
             info['sharpe_ratio_episode'] = 0.0
