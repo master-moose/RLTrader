@@ -17,6 +17,7 @@ import sys
 import time
 import copy  # Added import
 from typing import Any, Dict, List, Optional, Tuple, Callable
+from collections import deque # Add deque import
 
 # --- Third-Party Imports --- #
 import gymnasium as gym
@@ -84,16 +85,17 @@ logger = logging.getLogger("rl_agent")
 
 class TuneReportCallback(BaseCallback):
     """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
-    def __init__(self):
+    def __init__(self, rollout_buffer_size=100):
         super().__init__(verbose=0)
         # Store last known variance
         self.last_explained_variance = 0.0
-        # Store last known sharpe ratio from env info
-        self.last_sharpe_ratio = 0.0
-        # Store last known episode return from env info
-        self.last_episode_return = 0.0
-        self.last_calmar_ratio = 0.0  # Store last known calmar ratio
-        self.last_sortino_ratio = 0.0  # Store last known sortino ratio
+        # Buffer to store final metrics from completed episodes during rollout
+        self.rollout_metrics_buffer = deque(maxlen=rollout_buffer_size)
+        # Removing unused last_... variables for ratios/return
+        # self.last_sharpe_ratio = 0.0
+        # self.last_episode_return = 0.0
+        # self.last_calmar_ratio = 0.0
+        # self.last_sortino_ratio = 0.0
 
     def _on_init(self) -> None:
         """Ensure the logger is available."""
@@ -267,113 +269,124 @@ class TuneReportCallback(BaseCallback):
                         except (ValueError, TypeError, KeyError):
                             pass
 
-        # --- Update Sharpe, Return, and Calmar/Sortino from Env Info --- #
+        # --- Store FINAL metrics from DONE environments --- #
         if (hasattr(self, 'locals') and self.locals and
-                'infos' in self.locals and self.locals['infos']):
-            # Assuming VecEnv, get info from the first environment
-            info = self.locals['infos'][0]
+                'infos' in self.locals and 'dones' in self.locals):
+            infos = self.locals['infos']
+            dones = self.locals['dones']
+            for i, done in enumerate(dones):
+                if done:
+                    # Store relevant final metrics when an env is done
+                    final_info = infos[i].get("final_info", infos[i]) # SB3 Monitor puts final info here
+                    metrics = {
+                        'sharpe': final_info.get('sharpe_ratio_episode', 0.0),
+                        'return': final_info.get('episode_return', 0.0),
+                        'calmar': final_info.get('calmar_ratio', 0.0),
+                        'sortino': final_info.get('sortino_ratio', 0.0)
+                        # Add other final metrics if needed
+                    }
+                    # Ensure values are floats and finite
+                    for k, v in metrics.items():
+                        try:
+                            val = float(v)
+                            metrics[k] = val if np.isfinite(val) else 0.0
+                        except (TypeError, ValueError):
+                            metrics[k] = 0.0
 
-            # Get Sharpe ratio (key name from TradingEnvironment)
-            sharpe_key = 'sharpe_ratio_episode'
-            if sharpe_key in info:
-                try:
-                    sharpe_val = float(info[sharpe_key])
-                    if np.isfinite(sharpe_val):
-                        self.last_sharpe_ratio = sharpe_val
-                except (ValueError, TypeError):
-                    # Keep last valid value if conversion fails
-                    pass
-
-            # Get episode_return (key name from TradingEnvironment)
-            return_key = 'episode_return'
-            if return_key in info:
-                try:
-                    return_val = float(info[return_key])
-                    if np.isfinite(return_val):
-                        self.last_episode_return = return_val
-                except (ValueError, TypeError):
-                    # Keep last valid value if conversion fails
-                    pass
-
-            # Get Calmar ratio
-            calmar_key = 'calmar_ratio'
-            if calmar_key in info:
-                try:
-                    calmar_val = float(info[calmar_key])
-                    if np.isfinite(calmar_val):
-                        self.last_calmar_ratio = calmar_val
-                except (ValueError, TypeError):
-                    pass # Keep last valid value
-
-            # Get Sortino ratio
-            sortino_key = 'sortino_ratio'
-            if sortino_key in info:
-                try:
-                    sortino_val = float(info[sortino_key])
-                    if np.isfinite(sortino_val):
-                        self.last_sortino_ratio = sortino_val
-                except (ValueError, TypeError):
-                    pass # Keep last valid value
+                    self.rollout_metrics_buffer.append(metrics)
+                    logging.getLogger("rl_agent").debug(f"  Stored final metrics from env {i}: {metrics}")
 
         return True
 
     def _on_rollout_end(self) -> None:
         """
         Report metrics at the end of each rollout.
-        Uses ep_rew_mean from ep_info_buffer and fetches the most recent
-        explained_variance, sharpe_ratio, and episode return stored by _on_step.
+        Uses ep_rew_mean from ep_info_buffer and averages the final metrics
+        collected in rollout_metrics_buffer.
         """
         callback_logger = logging.getLogger("rl_agent")
-        callback_logger.debug(
-            f"Rollout end at step {self.num_timesteps}. Attempting report."
-        )
-        reward_value = 0.0  # Default reward
-
         # --- Get Mean Reward from Monitor Buffer --- #
-        if hasattr(self.model, "ep_info_buffer") and \
-           len(self.model.ep_info_buffer) > 0:
+        reward_value = 0.0
+        num_completed_eps = 0
+        if (hasattr(self.model, "ep_info_buffer") and
+                len(self.model.ep_info_buffer) > 0):
             ep_rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
             if ep_rewards:
                 reward_value = float(np.mean(ep_rewards))
-                callback_logger.debug(
-                    f"Mean reward ({len(ep_rewards)} eps): {reward_value:.4f}"
-                )
-        else:
-            callback_logger.debug(
-                f"No finished eps in rollout (step {self.num_timesteps}). R=0.0"
-            )
+                num_completed_eps = len(ep_rewards)
+                # callback_logger.debug(
+                #     f"Mean reward ({len(ep_rewards)} eps): {reward_value:.4f}"
+                # )
+        # else:
+        #     callback_logger.debug(
+        #         f"No finished eps in rollout (step {self.num_timesteps}). R=0.0"
+        #     )
 
-        # --- Use the metrics stored from _on_step --- #
+        # --- Average Final Metrics from Buffer --- #
+        avg_metrics = {
+            'sharpe': 0.0, 'return': 0.0, 'calmar': 0.0, 'sortino': 0.0
+        }
+        buffer_len = len(self.rollout_metrics_buffer)
+        if buffer_len > 0:
+            # Only average metrics from the episodes presumably completed in this rollout
+            # We use min(buffer_len, num_completed_eps) as a heuristic, assuming
+            # the buffer holds the latest completed episodes.
+            num_metrics_to_avg = min(buffer_len, max(1, num_completed_eps))
+            metrics_to_average = [self.rollout_metrics_buffer.popleft() for _ in range(num_metrics_to_avg)]
+
+            if metrics_to_average:
+                avg_metrics['sharpe'] = np.mean([m['sharpe'] for m in metrics_to_average])
+                avg_metrics['return'] = np.mean([m['return'] for m in metrics_to_average])
+                avg_metrics['calmar'] = np.mean([m['calmar'] for m in metrics_to_average])
+                avg_metrics['sortino'] = np.mean([m['sortino'] for m in metrics_to_average])
+
+            # Clear the buffer completely in case num_completed_eps was 0 or inaccurate
+            self.rollout_metrics_buffer.clear()
+
+        sharpe_value = avg_metrics['sharpe']
+        return_value = avg_metrics['return']
+        calmar_value = avg_metrics['calmar']
+        sortino_value = avg_metrics['sortino']
+
+        # Use last known variance (best available proxy)
         variance_value = self.last_explained_variance
-        sharpe_value = self.last_sharpe_ratio
-        return_value = self.last_episode_return # Get stored episode return
-        calmar_value = self.last_calmar_ratio   # Get stored Calmar
-        sortino_value = self.last_sortino_ratio # Get stored Sortino
-        callback_logger.debug(f"Using stored metrics: var={variance_value:.4f}, shp={sharpe_value:.4f}, ret={return_value:.4f}, cal={calmar_value:.4f}, sor={sortino_value:.4f}")
 
         # --- Prepare and Report Metrics --- #
-        # Use the updated combined score calculation
-        combined_score = self._normalize_and_combine_metrics(reward_value, variance_value, sharpe_value, return_value, calmar_value, sortino_value)
+        combined_score = self._normalize_and_combine_metrics(
+            reward_value, variance_value, sharpe_value, return_value,
+            calmar_value, sortino_value
+        )
 
         metrics_to_report = {
             "eval/mean_reward": reward_value,
             "eval/explained_variance": variance_value,
-            "eval/sharpe_ratio": sharpe_value, # Report sharpe
-            "eval/episode_return": return_value, # Report episode return
-            "eval/calmar_ratio": calmar_value,   # Report Calmar
-            "eval/sortino_ratio": sortino_value, # Report Sortino
-            "eval/combined_score": combined_score, # Report new combined score
+            "eval/sharpe_ratio": sharpe_value,
+            "eval/episode_return": return_value,
+            "eval/calmar_ratio": calmar_value,
+            "eval/sortino_ratio": sortino_value,
+            "eval/combined_score": combined_score,
             "timesteps": self.num_timesteps,
         }
-        callback_logger.debug(
-             f"Reporting (step {self.num_timesteps}): "
-             f"reward={reward_value:.4f}, var={variance_value:.4f}, "
-             f"shp={sharpe_value:.4f}, ret={return_value:.4f}, "
-             f"cal={calmar_value:.4f}, sor={sortino_value:.4f}, combined={combined_score:.4f}"
-         )
+
+        # --- Log as Markdown Table --- #
+        log_table = "| Metric              | Value     |\n"
+        log_table += "| :------------------ | :-------- |\n"
+        log_table += f"| Timesteps           | {self.num_timesteps:<9} |\n"
+        log_table += f"| Completed Eps       | {num_completed_eps:<9} |\n"
+        log_table += f"| Mean Reward         | {reward_value:<9.3f} |\n"
+        log_table += f"| Mean Return (%)     | {return_value*100:<9.2f} |\n"
+        log_table += f"| Mean Sharpe         | {sharpe_value:<9.3f} |\n"
+        log_table += f"| Mean Sortino        | {sortino_value:<9.3f} |\n"
+        log_table += f"| Mean Calmar         | {calmar_value:<9.3f} |\n"
+        log_table += f"| Expl. Variance    | {variance_value:<9.3f} |\n"
+        log_table += f"| Combined Score      | {combined_score:<9.3f} |\n"
+        callback_logger.info(f"Tune Report Callback (Rollout End):\n{log_table}")
+        # callback_logger.debug(
+        #      f"Reporting (step {self.num_timesteps}): "
+        #      # ... (old debug string)
+        #  )
 
         # Report to Ray Tune
-        # Use the modern check for Ray Tune session
         session_active = False
         if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
             session_active = ray.air.session.is_active()
