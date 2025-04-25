@@ -365,25 +365,44 @@ def run_tune_experiment(args):
     print(f"Using ASHA scheduler with {args.timesteps_per_trial} max timesteps")
     
     # --- Configure Reporter --- #
+    # Define the metrics we want to see in the table and their short names
+    metric_columns_config = {
+        "training_iteration": "iter",
+        "timesteps_total": "steps",
+        "episode_reward_mean": "ep_rew_mean", # From Monitor
+        "episode_len_mean": "ep_len_mean",   # From Monitor
+        "eval/mean_reward": "eval_reward",   # From Callback
+        "eval/combined_score": "score",       # From Callback
+        "eval/sharpe_ratio": "sharpe",      # From Callback
+        "eval/sortino_ratio": "sortino",     # From Callback
+        "eval/calmar_ratio": "calmar",      # From Callback
+        "eval/mean_return_pct": "return%",     # From Callback
+        "eval/explained_variance": "exp_var",   # From Callback
+        # Add other metrics from the callback if desired
+        # "eval/max_drawdown": "max_dd",
+        # "eval/total_trades": "trades",
+        "time_total_s": "time(s)"
+    }
+    
+    # Define the hyperparameters to display
+    # Get keys from the defined search space for consistency
+    parameter_columns_config = list(search_space.keys())
+    # Limit the number shown if it gets too wide
+    if len(parameter_columns_config) > 6:
+        parameter_columns_config = parameter_columns_config[:6] 
+        print(f"Warning: Limiting displayed hyperparams to first 6: {parameter_columns_config}")
+
     reporter = CLIReporter(
-        metric_columns={
-            "training_iteration": "iter",
-            "timesteps_total": "steps",
-            "eval/mean_reward": "reward",
-            "eval/explained_variance": "variance",
-            "eval/combined_score": "combined",
-            "eval/sharpe_ratio_episode": "sharpe",
-            "eval/sortino_ratio": "sortino",
-            "eval/calmar_ratio": "calmar",
-            "eval/max_drawdown": "max_dd",
-            "eval/mean_ep_length": "ep_len",
-            "eval/total_trades": "trades",
-            "time_total_s": "time(s)"
-        },
-        parameter_columns=list(search_space.keys()), # Show tuned hyperparameters
+        # Pass the configured metric columns
+        metric_columns=metric_columns_config,
+        # Pass the configured parameter columns
+        parameter_columns=parameter_columns_config,
+        # Sort by the primary metric we are optimizing
         sort_by_metric=True,
-        metric="eval/combined_score",
-        mode="max"
+        metric="eval/combined_score", # Metric used for sorting
+        mode="max", # Sort mode
+        # Optional: Customize max report frequency
+        # max_report_frequency=60
     )
     print("Configured CLIReporter for console output")
     # ------------------------ #
@@ -415,12 +434,23 @@ def run_tune_experiment(args):
     print(f"Trial ID: {best_trial.trial_id}")
     
     # Show both optimization metrics in the output
+    best_combined_score = best_trial.last_result.get('eval/combined_score', 'N/A')
     best_reward = best_trial.last_result.get('eval/mean_reward', 'N/A')
     best_explained_variance = best_trial.last_result.get('eval/explained_variance', 'N/A')
-    print(f"Best Mean Reward: {best_reward}")
+    best_sharpe = best_trial.last_result.get('eval/sharpe_ratio', 'N/A')
+    best_sortino = best_trial.last_result.get('eval/sortino_ratio', 'N/A')
+    best_calmar = best_trial.last_result.get('eval/calmar_ratio', 'N/A')
+    best_return_pct = best_trial.last_result.get('eval/mean_return_pct', 'N/A')
+
+    print(f"Best Combined Score: {best_combined_score}")
+    print(f"Best Mean Eval Reward: {best_reward}")
+    print(f"Best Sharpe Ratio: {best_sharpe}")
+    print(f"Best Sortino Ratio: {best_sortino}")
+    print(f"Best Calmar Ratio: {best_calmar}")
+    print(f"Best Mean Return (%): {best_return_pct}")
     print(f"Best Explained Variance: {best_explained_variance}")
     
-    print(f"Final Timesteps: {best_trial.last_result['timesteps']}")
+    print(f"Final Timesteps: {best_trial.last_result.get('timesteps_total', 'N/A')}")
     print("\nBest Hyperparameters:")
     for param_name in search_space.keys():
         print(f"  {param_name}: {best_trial.config[param_name]}")
