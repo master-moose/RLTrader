@@ -426,7 +426,8 @@ def run_tune_experiment(args):
         "eval/total_fees_paid": "fees",
         # "eval/max_drawdown": "max_dd",
         # "eval/total_trades": "trades",
-        "time_total_s": "time(s)"
+        "time_total_s": "time(s)",
+        "time/fps": "fps" # Add FPS here
     }
     
     # Define the hyperparameters to display

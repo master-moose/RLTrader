@@ -92,6 +92,8 @@ class TuneReportCallback(BaseCallback):
         self.last_explained_variance = 0.0
         # Buffer to store final metrics from completed episodes during rollout
         self.rollout_metrics_buffer = deque(maxlen=rollout_buffer_size)
+        # Store last known FPS
+        self.last_fps = 0.0 # Add this line
         # Removing unused last_... variables for ratios/return
         # self.last_sharpe_ratio = 0.0
         # self.last_episode_return = 0.0
@@ -384,6 +386,8 @@ class TuneReportCallback(BaseCallback):
                                 "eval/max_drawdown_pct": final_info.get('max_drawdown', 0.0) * 100,
                                 "eval/total_fees_paid": final_info.get('total_fees_paid', 0.0),
                                 # --- END ADD TRADING METRICS ---
+                                # --- ADD LAST KNOWN FPS ---
+                                "time/fps": self.last_fps, # Add this line
                             }
                             # Remove None values before reporting
                             metrics_to_report = {k: v for k, v in metrics_to_report.items() if v is not None}
@@ -430,9 +434,19 @@ class TuneReportCallback(BaseCallback):
             for key in keys_to_log:
                 if key in self.logger.name_to_value:
                     try:
-                        sb3_metrics[key] = float(self.logger.name_to_value[key])
+                        # --- Update last_fps ---
+                        if key == "time/fps":
+                             float_val = float(self.logger.name_to_value[key])
+                             sb3_metrics[key] = float_val
+                             self.last_fps = float_val # Update the attribute
+                        # --- End update ---
+                        else:
+                             sb3_metrics[key] = float(self.logger.name_to_value[key])
                     except (ValueError, TypeError):
                         sb3_metrics[key] = self.logger.name_to_value[key]
+                        # If FPS conversion fails, keep the old value
+                        # if key == "time/fps":
+                        #    pass # self.last_fps remains unchanged
 
             if sb3_metrics:
                 metrics_str = ", ".join([f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in sb3_metrics.items()])
