@@ -12,8 +12,9 @@ This project implements and trains Reinforcement Learning (RL) agents (DQN, PPO,
     -   Supports custom LSTM and TCN feature extractors.
     -   Integrates with Ray Tune for hyperparameter optimization.
 -   **Trading Environment:** Custom `gymnasium.Env` simulating crypto trading with configurable parameters (`rl_agent/environment/trading_env.py`).
+    -   **Supports bidirectional trading (Long and Short positions).**
     -   Handles transaction fees, portfolio management, and risk metrics.
-    -   Complex reward function with weighted components (profit, drawdown, Sharpe, fees, consistency, etc.).
+    -   Complex reward function with weighted components (profit, drawdown, Sharpe, fees, etc.).
 -   **Evaluation:** Scripts for evaluating model performance on historical and synthetic data (`evaluate_*.py`).
 -   **Progressive Learning:** Potential framework for progressive learning strategies (`progressive_learning.py`).
 
@@ -45,7 +46,7 @@ This project implements and trains Reinforcement Learning (RL) agents (DQN, PPO,
 │   │   └── data_loader.py   # Loads data for RL environment
 │   │   └── normalize_features.py # Script for feature normalization
 │   ├── environment/
-│   │   └── trading_env.py   # Custom Gym trading environment
+│   │   └── trading_env.py   # Custom Gym trading environment (Bidirectional)
 │   ├── models.py            # Custom SB3 policy networks/feature extractors (LSTM)
 │   ├── policies.py          # Custom SB3 policies (TCN)
 │   ├── train.py             # Main RL agent training and evaluation logic
@@ -235,23 +236,22 @@ python rl_agent/data/normalize_features.py \
 
 ## Trading Environment (`rl_agent/environment/trading_env.py`)
 
--   **State:** Based on `sequence_length` steps of historical `features` (e.g., OHLCV, indicators). Portfolio state (balance, shares held) is *not* part of the observation by default but used internally.
+-   **State Observation:** Based on `sequence_length` steps of historical `features` (e.g., OHLCV, indicators), plus the current position type (-1 for Short, 0 for Flat, 1 for Long) and the entry price normalized relative to the current price. Portfolio state (balance, absolute shares held) is used internally but not directly part of the agent's observation by default.
 -   **Actions:**
-    -   0: Sell (all shares)
-    -   1: Hold
-    -   2: Buy (using `max_position` fraction of balance)
--   **Reward Function:** A complex combination designed to promote profitable and stable trading:
-    -   `portfolio_change_weight`: Based on the change in total portfolio value.
+    -   0: Hold (Maintain current position: Long, Short, or Flat)
+    -   1: Go Long (Enter a long position if currently Flat)
+    -   2: Go Short (Enter a short position if currently Flat)
+    -   3: Close Position (Exit Long or Short position to become Flat)
+-   **Reward Function:** A complex combination designed to promote profitable and stable trading, considering both long and short scenarios:
+    -   `portfolio_change_weight`: Based on the percentage change in total portfolio value (handles unrealized PnL for shorts correctly).
     -   `drawdown_penalty_weight`: Penalizes decreases from the peak portfolio value.
     -   `sharpe_reward_weight`: Rewards higher risk-adjusted returns (calculated over `sharpe_window`).
-    -   `fee_penalty_weight`: Penalizes transaction costs (`transaction_fee`).
-    -   `benchmark_reward_weight`: Compares performance against holding the asset.
-    -   `consistency_penalty_weight`: Penalizes rapidly flipping between buy/sell actions (threshold: `consistency_threshold`).
-    -   `idle_penalty_weight`: Penalizes holding for too long without action (threshold: `idle_threshold`).
-    -   `profit_bonus_weight`: Adds a bonus for profitable trades.
-    -   `trade_penalty_weight`: Small penalty per trade executed.
-    -   `exploration_bonus_weight`: Adds a decaying bonus to encourage exploration early on.
--   **Risk Profile:** Primarily controlled by `max_position` (limits capital per trade) and the reward function weights (especially `drawdown_penalty_weight`, `sharpe_reward_weight`). Transaction fees also influence behavior.
+    -   `fee_penalty_weight`: Penalizes transaction costs (`transaction_fee`) incurred on entering or closing positions.
+    -   `benchmark_reward_weight`: Compares performance against holding the asset (less relevant for bidirectional).
+    -   `idle_penalty_weight`: Penalizes holding a *Flat* position for too long without action (threshold: `idle_threshold`).
+    -   `profit_bonus_weight`: Rewards profitable closing trades (both long and short).
+    -   `trade_penalty_weight`: Applies a small penalty for *entering* a new trade (long or short).
+-   **Episode Termination:** Ends if drawdown exceeds a threshold (e.g., 50%), maximum steps are reached, or the end of the data is encountered. Open positions are automatically closed at the end of an episode.
 
 ## Configuration
 

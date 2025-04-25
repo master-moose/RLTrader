@@ -1,60 +1,60 @@
 # RL Agent Risk Profile and Trading Strategy
 
-This document outlines the risk profile and inherent trading strategy characteristics of the RL agent as defined primarily within the `rl_agent/environment/trading_env.py` and configured via `train_config.json` or command-line arguments.
+This document outlines the risk profile and inherent trading strategy characteristics of the RL agent as defined primarily within the `rl_agent/environment/trading_env.py` and configured via `train_config.json` or command-line arguments. **This version reflects the environment supporting bidirectional trading (Long and Short positions).**
 
 ## Core Trading Strategy
 
-The agent employs a strategy learned through reinforcement learning (specifically algorithms like PPO, DQN, SAC, etc., using Stable Baselines3). Its goal is to maximize a cumulative reward signal over time.
+The agent employs a strategy learned through reinforcement learning (specifically algorithms like PPO, DQN, SAC, etc., using Stable Baselines3). Its goal is to maximize a cumulative reward signal over time by entering and exiting both long and short positions.
 
--   **Decision Basis:** Decisions (Buy, Sell, Hold) are based on observing a sequence (`sequence_length`) of market features (e.g., OHLCV, technical indicators). The agent learns patterns and correlations within these features to predict profitable actions.
+-   **Decision Basis:** Decisions (Hold, Go Long, Go Short, Close Position) are based on observing a sequence (`sequence_length`) of market features (e.g., OHLCV, technical indicators) *plus* the agent's current position state (Flat, Long, or Short) and normalized entry price.
 -   **Action Space:**
-    -   `Buy`: Enter a long position using a fixed fraction (`max_position`) of the current cash balance.
-    -   `Sell`: Exit the *entire* current long position.
-    -   `Hold`: Maintain the current position (either cash or holding shares).
--   **Observation:** The agent directly observes market features but *not* its current portfolio value, balance, or shares held. This information is used internally for reward calculation and portfolio updates but doesn't directly influence the policy network's input at each step.
+    -   `Hold`: Maintain the current position (Long, Short, or Flat).
+    -   `Go Long`: Enter a long position using a fraction (`max_position`) of the current *cash balance*, only if currently Flat.
+    -   `Go Short`: Enter a short position, typically sized based on a fraction (`max_position`) of the current *cash balance* (simulating margin implicitly), only if currently Flat.
+    -   `Close Position`: Exit the current Long or Short position to return to Flat.
+-   **Observation:** The agent observes market features, its position type (-1, 0, 1), and a normalized representation of its entry price relative to the current price. It does *not* directly observe its absolute balance or portfolio value in the standard configuration.
 
 ## Key Risk Management Mechanisms
 
-Risk is primarily managed through a combination of explicit parameters and the structure of the reward function:
+Risk is managed through explicit parameters, the environment structure, and the reward function:
 
 1.  **Position Sizing (`max_position`):**
-    -   This is a critical risk control. It limits the capital allocated to any single 'Buy' action to a fraction of the available balance (e.g., default might be 1.0, meaning full balance, or a smaller fraction like 0.5).
-    -   It prevents catastrophic loss from a single bad trade by limiting exposure.
+    -   Limits the capital (if going long) or the *value* of the assets borrowed (if going short) relative to the current balance when *entering* a position.
+    -   This helps prevent excessive leverage or exposure on any single trade entry.
 
 2.  **Transaction Costs (`transaction_fee`):**
-    -   A realistic transaction fee (e.g., 0.00075 or 0.075% for Binance Spot) is applied to both buy and sell actions.
-    -   This implicitly discourages overly frequent trading (scalping) which can erode profits and might indicate noisy/unreliable signals.
-    -   The `fee_penalty_weight` in the reward function explicitly penalizes these costs.
+    -   A realistic fee is applied when *entering* a long/short position and when *closing* a position.
+    -   Discourages hyperactive trading. The `fee_penalty_weight` in the reward explicitly penalizes these costs relative to portfolio value.
 
-3.  **Reward Function Shaping:** The reward function is designed to balance profit-seeking with risk aversion:
-    -   **`drawdown_penalty_weight`:** Directly penalizes the agent if its current portfolio value drops below the historical maximum portfolio value achieved during the episode. This encourages capital preservation and discourages significant drawdowns. A higher weight increases risk aversion.
-    -   **`sharpe_reward_weight`:** Rewards the agent based on the Sharpe ratio calculated over a rolling window (`sharpe_window`). This promotes achieving returns that are high relative to the volatility (risk) taken, encouraging risk-adjusted performance.
-    -   **`consistency_penalty_weight`:** Penalizes the agent for rapidly flipping between buy and sell actions within a short period (`consistency_threshold`). This discourages erratic behavior and encourages holding positions for a reasonable duration, potentially filtering out noise.
-    -   **`trade_penalty_weight`:** Applies a small, fixed penalty for *any* trade (buy or sell). This can further discourage excessive trading if `transaction_fee` alone isn't sufficient.
+3.  **Reward Function Shaping:** Balances profit-seeking with risk aversion:
+    -   **`drawdown_penalty_weight`:** Penalizes drops from the peak portfolio value (calculated considering both long and short PnL). Encourages capital preservation.
+    -   **`sharpe_reward_weight`:** Rewards higher risk-adjusted returns based on portfolio value volatility. Promotes smoother equity curves.
+    -   **`trade_penalty_weight`:** Applies a fixed penalty for *entering* a long or short trade. Can further discourage excessive entries.
+    -   **`idle_penalty_weight`:** Penalizes staying *Flat* (holding only cash) for too many consecutive steps (`idle_threshold`). Encourages market participation.
+
+4.  **Short Position Mechanics:**
+    -   **Implicit Margin:** The environment allows shorting based on `max_position` * balance, but doesn't explicitly model margin calls or liquidation based on balance depletion *while holding the short*. Risk is primarily managed by the PnL calculation affecting portfolio value and triggering the drawdown penalty/termination.
+    -   **Buy-to-Cover Check:** The agent *cannot* close a short position if its current balance is insufficient to buy back the shares at the current market price plus fees. This prevents the balance from going negative due to short losses exceeding available cash but can lead to the agent getting "stuck" in a losing short if not managed by other reward components or termination conditions.
+
+5.  **Episode Termination on Drawdown:** The episode automatically terminates if the portfolio drawdown exceeds a defined threshold (e.g., 50%), limiting potential losses within a single run.
 
 ## Risk-Seeking Elements (and Controls)
 
-While managing risk, the agent must also take positions to generate profit:
-
--   **Profit Focus (`portfolio_change_weight`, `profit_bonus_weight`):** These reward components directly encourage increasing portfolio value and realizing profits on trades. They are the primary drivers for entering positions.
--   **Benchmark Comparison (`benchmark_reward_weight`):** Encourages the agent to outperform a simple buy-and-hold strategy, potentially leading it to take trades even in sideways markets if it anticipates short-term gains.
--   **Exploration (`exploration_bonus_weight`, RL algorithm):** During training, exploration mechanisms (like epsilon-greedy for DQN or stochasticity in PPO/SAC policies, plus the explicit `exploration_bonus_weight`) encourage the agent to try different actions, including potentially suboptimal or risky ones, to discover better strategies. This exploration naturally decreases as training progresses.
+-   **Profit Focus (`portfolio_change_weight`, `profit_bonus_weight`):** These components reward increasing portfolio value and realizing profits on *closed* trades (both long and short).
+-   **Exploration:** RL algorithms naturally explore during training, which can involve taking risks.
 
 ## Configurability
 
-The overall risk profile is **highly configurable**. The default values in `train_config.json` define a baseline, but altering parameters via command-line arguments significantly changes the agent's behavior:
--   Increasing `max_position` increases potential profit/loss per trade.
--   Increasing `drawdown_penalty_weight` or `sharpe_reward_weight` makes the agent more conservative.
--   Increasing `portfolio_change_weight` makes the agent more aggressive in seeking portfolio growth.
--   Adjusting `consistency_threshold` and `idle_threshold` influences trading frequency.
+The risk profile remains highly configurable through `train_config.json` and command-line arguments, adjusting the weights of different reward components and the `max_position` size.
 
 ## Limitations & Assumptions
 
--   **Slippage:** The model only accounts for fixed `transaction_fee`. It does not model market impact or variable slippage based on trade size or market volatility.
--   **Liquidity:** Assumes trades can always be executed at the recorded 'close' price for the interval.
--   **Catastrophic Events:** The model learns from the provided data and may not be robust to "black swan" events or market conditions entirely dissimilar to its training data.
--   **No Shorting:** The current environment only permits long positions (Buy, Sell, Hold).
+-   **Slippage:** Still only models fixed `transaction_fee`.
+-   **Liquidity:** Assumes trades execute at the interval's 'close' price.
+-   **Margin/Liquidation:** Shorting mechanics are simplified; no explicit margin calls or forced liquidations beyond the insufficient balance check when closing.
+-   **Catastrophic Events:** Still vulnerable to events outside the training data distribution.
+-   **Single Asset:** Only trades one asset pair.
 
 ## Summary
 
-The agent's strategy is to identify profitable trading opportunities based on learned patterns in market features. Risk is managed through fixed position sizing, transaction cost awareness, and a reward function explicitly penalizing drawdowns, volatility (via Sharpe), and excessive/erratic trading, while still rewarding profit generation. The balance between risk aversion and profit-seeking is heavily influenced by the chosen configuration parameters. 
+The agent learns a bidirectional strategy to identify profitable long and short opportunities based on market features and its current position. Risk is managed via position sizing at entry, transaction costs, reward penalties for drawdowns and excessive entry frequency, reward bonuses for risk-adjusted returns (Sharpe), and episode termination on high drawdown. The ability to short introduces new risk dimensions (e.g., theoretically unlimited loss, though capped by episode structure and balance checks), managed implicitly through portfolio value calculations and reward shaping. The specific risk appetite is tunable via configuration. 
