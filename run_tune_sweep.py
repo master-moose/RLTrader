@@ -1,0 +1,18 @@
+metric_columns_config = {
+    # "training_iteration": {"name": "Iter"},
+    "episodes_total": {"name": "Eps"},
+    "timesteps_total": {"name": "TS"},
+    "custom_metrics/net_worth_mean": {"name": "NetWorth"},
+    "custom_metrics/sharpe_ratio_mean": {"name": "Sharpe"},
+    "custom_metrics/sortino_ratio_mean": {"name": "Sortino"},
+    "custom_metrics/max_drawdown_mean": {"name": "MaxDD"},
+    "custom_metrics/profit_factor_mean": {"name": "PF"},
+    "custom_metrics/win_rate_mean": {"name": "WinRate"},
+    "episode_reward_mean": {"name": "EpRewMean"},
+    "time/fps": {"name": "FPS"},
+    "train/actor_loss": {"name": "ActorLoss"},
+    "train/critic_loss": {"name": "CriticLoss"},
+    "train/explained_variance": {"name": "ExplVar"},
+    "time_this_iter_s": {"name": "IterTime"},
+    "time_total_s": {"name": "TotalTime"},
+} 
