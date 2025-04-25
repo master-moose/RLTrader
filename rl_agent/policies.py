@@ -7,13 +7,15 @@ from typing import Dict, Optional, Any
 import logging
 
 from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
-from stable_baselines3.sac.policies import SACPolicy # Added import
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, NatureCNN, MlpExtractor
+from stable_baselines3.sac.policies import SACPolicy  # Added import
+from stable_baselines3.common.torch_layers import (BaseFeaturesExtractor,
+                                                  NatureCNN, MlpExtractor)
 from stable_baselines3.common.type_aliases import Schedule
-from stable_baselines3.common.distributions import DiagGaussianDistribution, CategoricalDistribution # Add others if needed
+from stable_baselines3.common.distributions import (DiagGaussianDistribution,
+                                                  CategoricalDistribution)
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim
 from stable_baselines3.common.utils import get_device
-from stable_baselines3.common.spaces import get_action_dim # <-- Correct location
+# from stable_baselines3.common.spaces import get_action_dim # <-- Incorrect import
 
 # Get module logger
 logger = logging.getLogger("rl_agent.policies")
@@ -334,7 +336,7 @@ class TcnPolicy(ActorCriticPolicy):
     """
     def __init__(
         self,
-        observation_space: gym.spaces.Box, # Ensure Box space
+        observation_space: gym.spaces.Box,  # Ensure Box space
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
         *args,
@@ -347,31 +349,40 @@ class TcnPolicy(ActorCriticPolicy):
     ):
         # 1. Validate required TCN parameters
         if sequence_length is None:
-            raise ValueError("`sequence_length` must be provided to TcnPolicy policy_kwargs.")
+            raise ValueError(
+                "`sequence_length` must be provided to TcnPolicy policy_kwargs."
+            )
         if features_per_timestep is None:
-            raise ValueError("`features_per_timestep` must be provided via policy_kwargs.")
+            raise ValueError(
+                "`features_per_timestep` must be provided via policy_kwargs."
+            )
         # Check observation space type using gymnasium alias
         if not isinstance(observation_space, gym.spaces.Box):
-             raise ValueError(f"TcnPolicy requires a Box observation space, got {type(observation_space)}")
+            raise ValueError(
+                f"TcnPolicy requires a Box observation space, "
+                f"got {type(observation_space)}"
+            )
 
-        # --- Store TCN params needed by _build_mlp_extractor BEFORE super init ---
+        # --- Store TCN params needed BEFORE super init ---
         self.features_per_timestep = features_per_timestep
         self.sequence_length = sequence_length
         # We also need access to the tcn_params dict later, let's store it too
         # Use an empty dict if None is passed
         self.tcn_params = tcn_params if tcn_params is not None else {}
-        # -----------------------------------------------------------------------
+        # ------------------------------------------------------------------- #
 
         # 2. Prepare policy_kwargs for ActorCriticPolicy's __init__
         # - Set the features_extractor_class
         # - Set the features_extractor_kwargs needed by TcnExtractor
         # - Ensure standard kwargs (like net_arch, activation_fn) are handled
         # - Remove TCN specific args before calling parent
-        policy_kwargs = kwargs.copy() # Start with user-provided kwargs
+        policy_kwargs = kwargs.copy()  # Start with user-provided kwargs
 
         # Set default net_arch and activation_fn if not provided
-        policy_kwargs.setdefault("net_arch", [dict(pi=[64], vf=[64])]) # Default SB3 MLP arch
-        policy_kwargs.setdefault("activation_fn", nn.Tanh) # Default SB3 activation
+        # Default SB3 MLP arch
+        policy_kwargs.setdefault("net_arch", [dict(pi=[64], vf=[64])])
+        # Default SB3 activation
+        policy_kwargs.setdefault("activation_fn", nn.Tanh)
 
         policy_kwargs["features_extractor_class"] = TcnExtractor
         policy_kwargs["features_extractor_kwargs"] = {
@@ -380,12 +391,13 @@ class TcnPolicy(ActorCriticPolicy):
             "tcn_params": tcn_params if tcn_params is not None else {},
         }
 
-        # --- IMPORTANT: Remove keys not accepted by ActorCriticPolicy.__init__ ---
+        # --- IMPORTANT: Remove keys not accepted by ActorCriticPolicy.__init__
         policy_kwargs.pop("tcn_params", None)
         policy_kwargs.pop("sequence_length", None)
         policy_kwargs.pop("features_per_timestep", None)
-        policy_kwargs.pop("features_dim", None) # Explicitly remove features_dim if present
-        # ------------------------------------------------------------------------ #
+        # Explicitly remove features_dim if present
+        policy_kwargs.pop("features_dim", None)
+        # -------------------------------------------------------------------- #
 
         # 3. Call the parent __init__
         # It will internally create the TcnExtractor and calculate features_dim
@@ -394,14 +406,18 @@ class TcnPolicy(ActorCriticPolicy):
             action_space,
             lr_schedule,
             *args,
-            **policy_kwargs # Pass the cleaned kwargs
+            **policy_kwargs  # Pass the cleaned kwargs
         )
 
         # 4. Initialize log_std for continuous actions (if applicable)
         if isinstance(action_space, gym.spaces.Box):
-            action_dim = get_action_dim(self.action_space)
+            # Use action_space.shape directly
+            assert len(action_space.shape) == 1, "Continuous action space must be 1D"
+            action_dim = action_space.shape[0]
             # Initialize log_std as a learnable parameter
-            self.log_std = nn.Parameter(torch.zeros(action_dim), requires_grad=True)
+            self.log_std = nn.Parameter(
+                torch.zeros(action_dim), requires_grad=True
+            )
 
         # 5. Orthogonal initialization for policy/value heads (good practice)
         # The parent class's _build method already applies init_weights,
