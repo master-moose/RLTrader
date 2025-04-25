@@ -105,7 +105,7 @@ def parse_args():
     # --- Add Model Type Argument --- #
     parser.add_argument(
         "--model_type", type=str, default="recurrentppo",
-        choices=["dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo"],
+        choices=["dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo", "tcn_sac"],
         help="RL algorithm model type to use"
     )
     # ------------------------------ #
