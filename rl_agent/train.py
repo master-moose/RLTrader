@@ -274,35 +274,85 @@ class TuneReportCallback(BaseCallback):
                 'infos' in self.locals and 'dones' in self.locals):
             infos = self.locals['infos']
             dones = self.locals['dones']
+            callback_logger = logging.getLogger("rl_agent.train") # Logger for reports
             for i, done in enumerate(dones):
                 if done:
-                    # Store relevant final metrics when an env is done
-                    final_info = infos[i].get("final_info", infos[i]) # SB3 Monitor puts final info here
-                    metrics = {
+                    # Get final info dictionary
+                    final_info = infos[i].get("final_info", infos[i])
+
+                    # Extract single-episode metrics
+                    ep_metrics = {
+                        'reward': final_info.get('r', 0.0),
+                        'length': final_info.get('l', 0),
+                        'time': final_info.get('t', 0.0),
                         'sharpe': final_info.get('sharpe_ratio_episode', 0.0),
                         'return': final_info.get('episode_return', 0.0),
                         'calmar': final_info.get('calmar_ratio', 0.0),
                         'sortino': final_info.get('sortino_ratio', 0.0)
-                        # Add other final metrics if needed
                     }
-                    # Ensure values are floats and finite
-                    for k, v in metrics.items():
+
+                    # Ensure values are floats and finite, default to 0.0 otherwise
+                    for k, v in ep_metrics.items():
                         try:
                             val = float(v)
-                            metrics[k] = val if np.isfinite(val) else 0.0
+                            ep_metrics[k] = val if np.isfinite(val) else 0.0
                         except (TypeError, ValueError):
-                            metrics[k] = 0.0
+                            ep_metrics[k] = 0.0
 
-                    self.rollout_metrics_buffer.append(metrics)
-                    logging.getLogger("rl_agent").debug(f"  Stored final metrics from env {i}: {metrics}")
+                    # --- Calculate Combined Score for this episode --- #
+                    # Use last known explained variance as best proxy
+                    combined_score = self._normalize_and_combine_metrics(
+                        reward=ep_metrics['reward'],
+                        explained_variance=self.last_explained_variance,
+                        sharpe_ratio=ep_metrics['sharpe'],
+                        episode_return=ep_metrics['return'],
+                        calmar_ratio=ep_metrics['calmar'],
+                        sortino_ratio=ep_metrics['sortino']
+                    )
+
+                    # --- Report directly to Ray Tune --- #
+                    session_active = False
+                    if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
+                        session_active = ray.air.session.is_active()
+
+                    if session_active:
+                        try:
+                            metrics_to_report = {
+                                "episode_reward_mean": ep_metrics['reward'], # Report single ep reward
+                                "episode_len_mean": ep_metrics['length'],
+                                "timesteps_total": self.num_timesteps,
+                                # Use eval prefix for consistency with scheduler/search alg
+                                "eval/mean_reward": ep_metrics['reward'],
+                                "eval/explained_variance": self.last_explained_variance, # Last known variance
+                                "eval/combined_score": combined_score,
+                                "eval/sharpe_ratio": ep_metrics['sharpe'],
+                                "eval/sortino_ratio": ep_metrics['sortino'],
+                                "eval/calmar_ratio": ep_metrics['calmar'],
+                                "eval/mean_return_pct": ep_metrics['return'] * 100,
+                            }
+                            ray.air.session.report(metrics_to_report)
+                            callback_logger.debug(
+                                f"Reported episode end metrics at step "
+                                f"{self.num_timesteps}: Reward={ep_metrics['reward']:.2f}, "
+                                f"Score={combined_score:.3f}"
+                            )
+                        except Exception as e:
+                            callback_logger.error(
+                                f"Error reporting episode metrics at step "
+                                f"{self.num_timesteps}: {e}"
+                            )
+                    # --- End Reporting ---
+
+                    # REMOVED: Don't buffer metrics anymore
+                    # self.rollout_metrics_buffer.append(metrics)
+                    # logging.getLogger("rl_agent").debug(f"  Stored final metrics from env {i}: {metrics}")
 
         return True
 
     def _on_rollout_end(self) -> None:
         """
-        Report metrics at the end of each rollout.
-        Uses ep_rew_mean from ep_info_buffer and averages the final metrics
-        collected in rollout_metrics_buffer.
+        Log summary statistics at the end of each rollout.
+        Reporting to Ray Tune is now handled in _on_step when an episode ends.
         """
         callback_logger = logging.getLogger("rl_agent.train")
         # --- Get Mean Reward from Monitor Buffer --- #
@@ -317,107 +367,31 @@ class TuneReportCallback(BaseCallback):
                 # callback_logger.debug(
                 #     f"Mean reward ({len(ep_rewards)} eps): {reward_value:.4f}"
                 # )
-        # else:
-        #     callback_logger.debug(
-        #         f"No finished eps in rollout (step {self.num_timesteps}). R=0.0"
-        #     )
 
-        # --- Average Final Metrics from Buffer --- #
-        avg_metrics = {'sharpe': 0.0, 'return': 0.0, 'calmar': 0.0, 'sortino': 0.0}
-        buffer_len = len(self.rollout_metrics_buffer)
+        # REMOVED: Averaging logic for rollout_metrics_buffer
 
-        if buffer_len > 0:
-            # Average ALL metrics currently in the buffer
-            metrics_to_average = list(self.rollout_metrics_buffer) # Copy buffer content
-            callback_logger.debug(f"Averaging {buffer_len} metrics from buffer") # Optional Debug
+        # Use last known explained variance for logging consistency
+        variance_value = self.last_explained_variance
 
-            # Calculate means safely, handling potential empty lists after filtering NaNs if needed
-            # (Although _on_step should ideally filter non-finites before appending)
-            sharpes = [m['sharpe'] for m in metrics_to_average if np.isfinite(m['sharpe'])]
-            returns = [m['return'] for m in metrics_to_average if np.isfinite(m['return'])]
-            calmars = [m['calmar'] for m in metrics_to_average if np.isfinite(m['calmar'])]
-            sortinos = [m['sortino'] for m in metrics_to_average if np.isfinite(m['sortino'])]
+        # REMOVED: Combined score calculation is not needed here for reporting
 
-            avg_metrics['sharpe'] = np.mean(sharpes) if sharpes else 0.0
-            avg_metrics['return'] = np.mean(returns) if returns else 0.0
-            avg_metrics['calmar'] = np.mean(calmars) if calmars else 0.0
-            avg_metrics['sortino'] = np.mean(sortinos) if sortinos else 0.0
+        # --- Log as Markdown Table (Shows Monitor/Rollout View) --- #
+        log_table = "| Metric (Rollout View) | Value     |\n"
+        log_table += "| :---------------------- | :-------- |\n"
+        log_table += f"| Timesteps               | {self.num_timesteps:<9} |\n"
+        log_table += f"| Completed Eps (Monitor) | {num_completed_eps:<9} |\n"
+        log_table += f"| Mean Reward (Monitor)   | {reward_value:<9.3f} |\n"
+        # Financial metrics are no longer averaged here
+        log_table += f"| Mean Return (%)         | N/A       |\n" # Indicate N/A
+        log_table += f"| Mean Sharpe             | N/A       |\n"
+        log_table += f"| Mean Sortino            | N/A       |\n"
+        log_table += f"| Mean Calmar             | N/A       |\n"
+        log_table += f"| Expl. Variance (Last) | {variance_value:<9.3f} |\n"
+        # Combined score is reported per-episode now
+        log_table += f"| Combined Score          | N/A       |\n"
+        callback_logger.info(f"Rollout End Log:\n{log_table}")
 
-            # Clear the buffer *after* averaging all its contents
-            self.rollout_metrics_buffer.clear()
-            callback_logger.debug(f"Cleared metrics buffer after averaging.") # Optional Debug
-
-        sharpe_value = avg_metrics['sharpe']
-        return_value = avg_metrics['return'] * 100  # Report as percentage
-        calmar_value = avg_metrics['calmar']
-        sortino_value = avg_metrics['sortino']
-
-        # Get explained variance from SB3 logger
-        variance_value = 0.0
-        if hasattr(self.model, 'logger') and hasattr(self.model.logger, 'name_to_value'): # noqa
-            log_vals = self.model.logger.name_to_value # noqa
-            variance_value = log_vals.get("train/explained_variance", 0.0)
-            try:
-                variance_value = float(variance_value)
-            except (ValueError, TypeError):
-                variance_value = 0.0
-
-        # Use the standardized combined score calculation
-        combined_score = self._normalize_and_combine_metrics(
-            reward=reward_value, # Mean reward from Monitor
-            explained_variance=variance_value,
-            sharpe_ratio=sharpe_value,
-            episode_return=avg_metrics['return'], # Use non-percentage return
-            calmar_ratio=calmar_value,
-            sortino_ratio=sortino_value
-        )
-
-        # --- Log as Markdown Table --- #
-        log_table = "| Metric              | Value     |\n"
-        log_table += "| :------------------ | :-------- |\n"
-        log_table += f"| Timesteps           | {self.num_timesteps:<9} |\n"
-        log_table += f"| Completed Eps       | {num_completed_eps:<9} |\n"
-        log_table += f"| Mean Reward         | {reward_value:<9.3f} |\n"
-        log_table += f"| Mean Return (%)     | {return_value:<9.2f} |\n"
-        log_table += f"| Mean Sharpe         | {sharpe_value:<9.3f} |\n"
-        log_table += f"| Mean Sortino        | {sortino_value:<9.3f} |\n"
-        log_table += f"| Mean Calmar         | {calmar_value:<9.3f} |\n"
-        log_table += f"| Expl. Variance    | {variance_value:<9.3f} |\n"
-        log_table += f"| Combined Score      | {combined_score:<9.3f} |\n"
-        callback_logger.info(f"Tune Report Callback (Rollout End):\n{log_table}")
-        # callback_logger.debug(
-        #      f"Reporting (step {self.num_timesteps}): "
-        #      # ... (old debug string)
-        # )
-
-        # Report to Ray Tune
-        session_active = False
-        if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
-            session_active = ray.air.session.is_active()
-
-        if session_active:
-            try:
-                metrics_to_report = {
-                    "episode_reward_mean": reward_value,
-                    "time_total_s": time.time() - self.start_time,
-                    "timesteps_total": self.num_timesteps,
-                    "episodes_total": self.model.ep_info_buffer.maxlen, # Approx
-                    "eval/mean_reward": reward_value,
-                    "eval/explained_variance": variance_value,
-                    "eval/combined_score": combined_score,
-                    "eval/sharpe_ratio": sharpe_value,
-                    "eval/sortino_ratio": sortino_value,
-                    "eval/calmar_ratio": calmar_value,
-                    "eval/mean_return_pct": return_value,
-                    "eval/completed_eps_rollout": num_completed_eps,
-                }
-                ray.air.session.report(metrics_to_report)
-            except Exception as e:
-                callback_logger.error(
-                    f"Error reporting to Ray Tune at step {self.num_timesteps}: {e}"
-                )
-        else:
-            callback_logger.debug("Ray Tune session not enabled, skipping report.")
+        # REMOVED: Ray Tune reporting section
 
 # --- Ray Tune Trainable Function --- #
 
