@@ -488,7 +488,8 @@ class TuneReportCallback(BaseCallback):
                         ray.air.session.report(reportable_metrics)
                     elif hasattr(tune, "report"):
                         # Very old Ray versions use tune.report directly
-                        tune.report(**reportable_metrics)
+                        # Try passing as a single 'metrics' dict instead of kwargs
+                        tune.report(metrics=reportable_metrics)
                     
                     callback_logger.debug(f"Reported {len(reportable_metrics)} metrics to Ray Tune.")
                 else:
