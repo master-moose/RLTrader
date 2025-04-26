@@ -509,15 +509,16 @@ class TuneReportCallback(BaseCallback):
                 # <<< END DEBUG LOGGING >>>
 
                 if final_report_dict:
-                    # Modern Ray version uses session.report
-                    if hasattr(ray, "air") and hasattr(ray.air, "session"):
-                        ray.air.session.report(final_report_dict)
-                    elif hasattr(tune, "report"):
-                        # Very old Ray versions use tune.report directly
-                        # Pass the dictionary directly
-                        tune.report(final_report_dict)
-
-                    callback_logger.debug(f"Reported {len(final_report_dict)} metrics to Ray Tune.")
+                    # Force use of older tune.report API
+                    if hasattr(tune, "report"):
+                        tune.report(**final_report_dict) # Use **kwargs expansion
+                        callback_logger.debug(f"Reported {len(final_report_dict)} metrics via tune.report.")
+                    # Fallback to AIR if tune.report not found (unlikely but safe)
+                    elif hasattr(ray, "air") and hasattr(ray.air, "session"):
+                         ray.air.session.report(final_report_dict)
+                         callback_logger.debug(f"Reported {len(final_report_dict)} metrics via ray.air.session.report (fallback).")
+                    else:
+                        callback_logger.warning("Could not find tune.report or ray.air.session.report to report metrics.")
                 else:
                     callback_logger.warning("No finite metrics available to report to Ray Tune.")
 
@@ -926,11 +927,16 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
                 # Use the updated check_ray_session function
                 if check_ray_session():
-                    if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                    # Force use of older tune.report API
+                    if hasattr(tune, "report"):
+                        tune.report(**failure_metrics) # Use **kwargs expansion
+                        trial_logger.info("Reported failure metrics via tune.report")
+                    # Fallback to AIR if tune.report not found
+                    elif hasattr(ray, "air") and hasattr(ray.air, "session"):
                         ray.air.session.report(failure_metrics)
-                    elif hasattr(tune, "report"):
-                        tune.report(**failure_metrics)
-                    trial_logger.info("Reported failure metrics to Ray Tune")
+                        trial_logger.info("Reported failure metrics via ray.air.session.report (fallback)")
+                    else:
+                        trial_logger.warning("Could not find tune.report or ray.air.session.report to report failure metrics.")
             except Exception as report_err:
                 trial_logger.error(f"Failed to report failure: {report_err}")
         raise
@@ -1032,9 +1038,17 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
     if session_active:
         try: 
-            # Use ray.air.session.report for newer versions
-            ray.air.session.report(final_summary_metrics) 
-            trial_logger.info("Reported final metrics via Ray AIR session")
+            # Force use of older tune.report API
+            if hasattr(tune, "report"):
+                tune.report(**final_summary_metrics) # Use **kwargs expansion
+                trial_logger.info("Reported final metrics via tune.report")
+            # Fallback to AIR if tune.report not found
+            elif hasattr(ray, "air") and hasattr(ray.air, "session"):
+                ray.air.session.report(final_summary_metrics) 
+                trial_logger.info("Reported final metrics via Ray AIR session (fallback)")
+            else:
+                 trial_logger.warning("Could not find tune.report or ray.air.session.report to report final metrics.")
+
         except Exception as re: 
             trial_logger.warning(f"Failed final Ray AIR session report: {re}")
 
