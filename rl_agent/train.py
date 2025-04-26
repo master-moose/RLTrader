@@ -682,15 +682,17 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
  
     def make_single_env(rank):
         def _init():
-            if callable(env_id):
-                env = env_id()
-            else:
-                raise ValueError(f"Expected callable env_id, got {type(env_id)}")
-            
-            if seed is not None:
-                env.seed(seed + rank)
-                env.action_space.seed(seed + rank)
-            
+            # Fix: Use train_config and create_env instead of the non-existent env_id
+            env_config = train_config.copy() # Use the config from the outer scope
+            instance_seed = seed # Use the seed defined in train_rl_agent_tune scope
+            if instance_seed is not None:
+                 instance_seed += rank
+            env_config["seed"] = instance_seed
+            env = create_env(config=env_config, is_eval=False) # Assuming train env here
+            # Optionally add Monitor wrapper if needed for Ray Tune reporting, though Monitor might be added later
+            # monitor_log = os.path.join(log_dir, f'monitor_tune_train_{rank}.csv')
+            # os.makedirs(os.path.dirname(monitor_log), exist_ok=True)
+            # env = Monitor(env, filename=monitor_log)
             return env
         return _init
 
