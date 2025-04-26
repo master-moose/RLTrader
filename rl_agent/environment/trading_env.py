@@ -1020,33 +1020,32 @@ class TradingEnvironment(Env):
             )
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        historical_data = self.data.iloc[start_idx:end_idx+1]
+        historical_data = self.data.iloc[start_idx:end_idx+1].copy() # Use copy to avoid SettingWithCopyWarning
 
-        # --- RAW DATA NAN CHECK ---
-        # <<< MODIFIED: Apply forward fill first >>>
-        # Use the modern .ffill() method
-        historical_data_filled = historical_data.ffill()
-        # Fill any remaining NaNs (e.g., at the start) with 0
-        historical_data_filled = historical_data_filled.fillna(0)
+        # --- Explicit NaN/Inf Check and Clean on Slice --- #
+        check_df = historical_data[self.features]
+        if not np.all(np.isfinite(check_df.values)):
+            logger.warning(f"[NAN_CHECK] NaN/Inf found in raw historical_data slice (Step: {safe_step}, Indices: {start_idx}-{end_idx}) before processing.")
+            # Log columns with non-finite values
+            non_finite_cols = check_df.columns[~np.isfinite(check_df).all()].tolist()
+            if non_finite_cols:
+                logger.warning(f"[NAN_CHECK] Columns with non-finite values in slice: {non_finite_cols}")
+            # Apply cleaning directly to the copied slice
+            historical_data.fillna(0, inplace=True)
+            historical_data.replace([np.inf, -np.inf], 0, inplace=True)
+            # Verify cleaning (optional)
+            # if not np.all(np.isfinite(historical_data[self.features].values)):
+            #     logger.error(f"[NAN_CHECK] Cleaning failed! Non-finite values still present after fillna/replace.")
+        # --- End Check and Clean ---
 
-        raw_features_df = historical_data_filled[self.features]
-        if not np.all(np.isfinite(raw_features_df.values)):
-            logger.error(
-                f"[NAN_CHECK] NaN found in raw feature data *after* ffill/fillna(0) " # noqa E501
-                f"(Step: {safe_step}, Indices: {start_idx}-{end_idx}). "
-                f"This should not happen."
-            )
-            # Log columns with NaNs
-            nan_cols = raw_features_df.columns[
-                raw_features_df.isnull().any()
-            ].tolist()
-            if nan_cols:
-                logger.error(
-                    f"[NAN_CHECK] Columns with NaNs after fill: {nan_cols}"
-                )
-            # If this error occurs, something is fundamentally wrong.
-            # Return zeros as a last resort to prevent crash.
-            return np.zeros(self.observation_space.shape, dtype=np.float32)
+        # --- RAW DATA NAN CHECK --- (Removed redundant check)
+        # raw_features_df = historical_data[self.features]
+        # if not np.all(np.isfinite(raw_features_df.values)):
+        #     logger.error(f"[NAN_CHECK] NaN found in raw historical_data slice (Step: {safe_step}, Indices: {start_idx}-{end_idx}) before processing.")
+        #     # Log columns with NaNs
+        #     nan_cols = raw_features_df.columns[raw_features_df.isnull().any()].tolist()
+        #     if nan_cols:
+        #         logger.error(f"[NAN_CHECK] Columns with NaNs in raw slice: {nan_cols}")
         # -------------------------
 
         # Ensure we have exactly sequence_length rows for feature data
@@ -1076,9 +1075,9 @@ class TradingEnvironment(Env):
         for feature in self.features:
             # <<< MODIFIED: Use the pre-filled data >>>
             # Ensure feature exists (should always now)
-            if feature in historical_data_filled.columns:
+            if feature in historical_data.columns:
                 # Values should already be finite after ffill/fillna(0)
-                values = historical_data_filled[feature].values
+                values = historical_data[feature].values
                 feature_data.extend(values)
             else:
                 # This case should be less likely now
@@ -1137,14 +1136,11 @@ class TradingEnvironment(Env):
 
         # Check for non-finite values in observation BEFORE returning
         if not np.all(np.isfinite(observation)):
-            logger.warning(
-                f"Step {self.current_step}: Non-finite values detected in "
-                f"observation BEFORE clipping. Clipping to finite range."
-            )
-            # Replace NaNs/Infs with large finite numbers or zero
-            observation = np.nan_to_num(
-                observation, nan=0.0, posinf=1e9, neginf=-1e9
-            )
+            logger.error(f"Step {self.current_step}: Non-finite values detected in final observation! Clipping. Check data/feature calculation. Observation sample: {observation[:10]}...{observation[-10:]}") # noqa E501
+            # Replace NaNs with 0 and Infs with large finite numbers as a last resort
+            observation = np.nan_to_num(observation, nan=0.0,
+                                        posinf=1e9, # Use large finite numbers
+                                        neginf=-1e9)
 
         # --- DETAILED LOGGING FOR OBSERVATION --- #
         # logger.debug(f"Observation (Step {self.current_step}): {observation}")
