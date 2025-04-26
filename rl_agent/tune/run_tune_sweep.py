@@ -406,12 +406,18 @@ def run_tune_experiment(args):
     print("-" * 30)
 
     # Configure search algorithm
-    if args.search_algo == "hyperopt" or args.search_algo == "optuna": # Force HyperOpt for now
+    if args.search_algo == "optuna":
+        search_alg = OptunaSearch(
+            metric="combined_score", # Renamed metric
+            mode="max"
+        )
+        print("Using Optuna search algorithm optimizing for combined score")
+    elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
             metric="combined_score", # Renamed metric
             mode="max"
         )
-        print(f"Using HyperOpt search algorithm (forced from {args.search_algo}) optimizing for combined score")
+        print("Using HyperOpt search algorithm optimizing for combined score")
     else:  # "basic"
         search_alg = None
         print("Using basic random search algorithm")
