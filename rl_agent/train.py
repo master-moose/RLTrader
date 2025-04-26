@@ -38,7 +38,7 @@ from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv, VecEnv
                                              VecNormalize, sync_envs_normalization)
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.env_util import make_vec_env as sb3_make_vec_env
-from stable_baselines3.sac import SacMlpPolicy  # Added import for SacMlpPolicy
+from stable_baselines3.sac.policies import SacMlpPolicy  # Updated import path for SacMlpPolicy
 
 # --- Project Imports --- #
 # Note: TradingEnvironment is imported below; create_env is defined in this file
