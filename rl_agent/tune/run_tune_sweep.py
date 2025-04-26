@@ -408,13 +408,13 @@ def run_tune_experiment(args):
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
-            metric="eval/combined_score",
+            metric="combined_score",
             mode="max"
         )
         print("Using Optuna search algorithm optimizing for combined score")
     elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
-            metric="eval/combined_score",
+            metric="combined_score",
             mode="max"
         )
         print("Using HyperOpt search algorithm optimizing for combined score")
@@ -425,7 +425,7 @@ def run_tune_experiment(args):
     # Configure scheduler for early stopping
     scheduler = ASHAScheduler(
         time_attr="timesteps_total",    # Changed from timesteps
-        metric="eval/combined_score",  # Primary metric for stopping
+        metric="combined_score",  # Renamed metric for stopping
         mode="max",
         max_t=args.timesteps_per_trial,
         # Min 10% or 100k grace period
@@ -442,7 +442,7 @@ def run_tune_experiment(args):
         "episode_reward_mean": "ep_rew_mean",  # From Monitor
         "episode_len_mean": "ep_len_mean",    # From Monitor
         "eval/mean_reward": "eval_reward",    # From Callback
-        "eval/combined_score": "score",       # From Callback
+        "combined_score": "score",       # Renamed source metric
         "eval/explained_variance": "expl_var", # From Callback
         "eval/sharpe_ratio": "sharpe",
         "eval/sortino_ratio": "sortino",
@@ -466,7 +466,7 @@ def run_tune_experiment(args):
         metric_columns=metric_columns,
         parameter_columns=parameter_columns_config,
         sort_by_metric=True,
-        metric="eval/combined_score",  # Metric for sorting
+        metric="combined_score",  # Renamed metric for sorting
         mode="max",  # Sort mode
         # Infer best metric value after 2 trials report
         infer_limit=2,
@@ -498,14 +498,14 @@ def run_tune_experiment(args):
     print(f"Tuning completed! Analyzed {len(analysis.trials)} trials")
 
     # Get and print best result
-    best_trial = analysis.get_best_trial(metric="eval/combined_score", mode="max")
+    best_trial = analysis.get_best_trial(metric="combined_score", mode="max")
     if best_trial:
         print("\n==== Best Trial Results ====")
         print(f"Trial ID: {best_trial.trial_id}")
 
         # Show key metrics from the best trial's last result
         last_res = best_trial.last_result
-        best_combined_score = last_res.get('eval/combined_score', 'N/A')
+        best_combined_score = last_res.get('combined_score', 'N/A')
         best_reward = last_res.get('eval/mean_reward', 'N/A')
         best_exp_var = last_res.get('eval/explained_variance', 'N/A')
         best_sharpe = last_res.get('eval/sharpe_ratio', 'N/A')

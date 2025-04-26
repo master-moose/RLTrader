@@ -469,7 +469,7 @@ class TuneReportCallback(BaseCallback):
 
         # --- Add Final Metrics --- #
         # Always report a numeric score (either calculated or the last known good one)
-        metrics_to_report["eval/combined_score"] = float(combined_score) # Ensure float
+        metrics_to_report["combined_score"] = float(combined_score) # Ensure float, renamed key
 
         # Add other evaluation metrics if available (prefix with eval/)
         if sharpe is not None and np.isfinite(sharpe): metrics_to_report["eval/sharpe_ratio"] = float(sharpe)
@@ -487,20 +487,25 @@ class TuneReportCallback(BaseCallback):
                         final_report_dict[k] = float(v) # Convert numpy numbers
 
                 # Ensure the combined score is always reported if calculated
-                # It should already be in metrics_to_report with key 'eval/combined_score'
+                # It should already be in metrics_to_report with key 'combined_score'
                 # If it wasn't numeric/finite, it would have been filtered above.
                 # We can add an explicit check/addition just to be safe:
-                # if "eval/combined_score" in metrics_to_report and \
-                #    isinstance(metrics_to_report["eval/combined_score"], (int, float, np.number)) and \
-                #    np.isfinite(metrics_to_report["eval/combined_score"]):
-                #       final_report_dict["eval/combined_score"] = float(metrics_to_report["eval/combined_score"])
+                # if "combined_score" in metrics_to_report and \
+                #    isinstance(metrics_to_report["combined_score"], (int, float, np.number)) and \
+                #    np.isfinite(metrics_to_report["combined_score"]):
+                #       final_report_dict["combined_score"] = float(metrics_to_report["combined_score"])
 
                 # <<< ALWAYS ADD COMBINED SCORE >>>
                 # Ensure the key Optuna needs is always present, using the last known valid score or 0.0
-                final_report_dict["eval/combined_score"] = float(self.last_combined_score)
+                # Rename key here too if necessary (depends on filtering logic - keeping separate for now)
+                # Let's ensure the renamed key is in the filtered dict
+                if "combined_score" in metrics_to_report:
+                     final_report_dict["combined_score"] = float(metrics_to_report["combined_score"])
+                else: # Add if somehow missing
+                     final_report_dict["combined_score"] = float(self.last_combined_score)
 
                 # <<< ADD DEBUG LOGGING >>>
-                callback_logger.debug(f"Keys being reported to Ray Tune: {list(final_report_dict.keys())}")
+                callback_logger.debug(f"Keys being reported to Ray Tune: {list(final_report_dict.keys())}") # Ensure 'combined_score' appears
                 # <<< END DEBUG LOGGING >>>
 
                 if final_report_dict:
@@ -916,7 +921,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                 failure_metrics["eval/mean_reward"] = last_reward
                 if train_config.get("model_type", "ppo") != "sac":
                     failure_metrics["eval/explained_variance"] = last_variance
-                failure_metrics["eval/combined_score"] = combo_score
+                failure_metrics["combined_score"] = float(combo_score if combo_score is not None and np.isfinite(combo_score) else 0.0)
                 trial_logger.info(f"Reporting failure: {failure_metrics}")
 
                 # Use the updated check_ray_session function
@@ -1014,7 +1019,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             critic_loss=None,
             model_type=train_config.get("model_type", "ppo") # Get model type from config
         )
-        final_summary_metrics["eval/combined_score"] = float(final_combined)
+        final_summary_metrics["combined_score"] = float(final_combined if final_combined is not None and np.isfinite(final_combined) else 0.0)
 
     trial_logger.info("Final Summary Metrics:")
     for k, v in final_summary_metrics.items():
@@ -2105,7 +2110,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
     # --- Final Metrics --- #
     final_metrics = {"training_time": training_time, "total_timesteps": getattr(model, 'num_timesteps', 0),
                      "model_type": config["model_type"], "eval/mean_reward": 0.0,
-                     "eval/explained_variance": 0.0, "eval/combined_score": 0.5} # Default eval score
+                     "eval/explained_variance": 0.0, "combined_score": 0.0} # Default renamed score
     if hasattr(model, 'logger') and hasattr(model.logger, 'name_to_value'):
         log_vals = model.logger.name_to_value
         final_reward = log_vals.get("rollout/ep_rew_mean", 0.0)
@@ -2155,7 +2160,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
             max_drawdown=final_max_dd,
             win_rate=final_win_rate
         )
-        final_metrics["eval/combined_score"] = float(final_combined)
+        final_metrics["combined_score"] = float(final_combined if final_combined is not None and np.isfinite(final_combined) else 0.0)
 
     # Use the modern check for Ray Tune session
     session_active = False
