@@ -1378,6 +1378,10 @@ def create_env(
             env_kwargs[key] = config[key]
             # logger.debug(f"Passing reward param '{key}' = {config[key]} to env.")
 
+    # Explicitly remove fee parameters if they somehow ended up in env_kwargs
+    env_kwargs.pop('transaction_fee', None)
+    env_kwargs.pop('fee_penalty_weight', None)
+
     env = TradingEnvironment(**env_kwargs)
     return env
 
