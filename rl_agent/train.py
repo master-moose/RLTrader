@@ -422,6 +422,7 @@ class TuneReportCallback(BaseCallback):
 
         # --- Log standard SB3 metrics ---
         if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            callback_logger.debug(f"SB3 logger name_to_value at rollout end: {self.logger.name_to_value}") # DEBUG PRINT
             sb3_metrics = {}
             keys_to_log = [
                 "time/fps",
