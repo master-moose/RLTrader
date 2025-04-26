@@ -179,7 +179,7 @@ class TuneReportCallback(BaseCallback):
         self.best_mean_reward = -np.inf
         self.best_combined_score = -np.inf
         self.last_combined_score = 0.0  # Initialize here
-        self.log_freq = 10 # Log summary table every 10 rollouts
+        self.log_freq = 1 # Log summary table every 1 rollout
         
     def _on_training_start(self) -> None:
         """
