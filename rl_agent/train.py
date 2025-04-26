@@ -464,34 +464,38 @@ class TuneReportCallback(BaseCallback):
         # --- Report to Ray Tune --- #
         if check_ray_session():
             try:
-                # Filter non-finite values to avoid Ray Tune errors
-                reportable_metrics = {}
+                # Filter metrics_to_report to include only finite numeric values
+                # Keep original keys (including slashes)
+                final_report_dict = {}
                 for k, v in metrics_to_report.items():
-                    flat_key = k.replace('/', '_') # Replace slashes with underscores
                     if isinstance(v, (int, float)) and np.isfinite(v):
-                        reportable_metrics[flat_key] = v
+                        final_report_dict[k] = v
                     elif isinstance(v, np.number) and np.isfinite(v):
-                        reportable_metrics[flat_key] = float(v) # Convert numpy numbers
+                        final_report_dict[k] = float(v) # Convert numpy numbers
 
-                # Ensure the combined score is always reported if calculated (key already flat)
-                if combined_score is not None and np.isfinite(combined_score):
-                    reportable_metrics["eval_combined_score"] = float(combined_score)
+                # Ensure the combined score is always reported if calculated
+                # It should already be in metrics_to_report with key 'eval/combined_score'
+                # If it wasn't numeric/finite, it would have been filtered above.
+                # We can add an explicit check/addition just to be safe:
+                if "eval/combined_score" in metrics_to_report and \
+                   isinstance(metrics_to_report["eval/combined_score"], (int, float, np.number)) and \
+                   np.isfinite(metrics_to_report["eval/combined_score"]):
+                      final_report_dict["eval/combined_score"] = float(metrics_to_report["eval/combined_score"])
 
                 # <<< ADD DEBUG LOGGING >>>
-                callback_logger.debug(f"Keys being reported to Ray Tune: {list(reportable_metrics.keys())}")
+                callback_logger.debug(f"Keys being reported to Ray Tune: {list(final_report_dict.keys())}")
                 # <<< END DEBUG LOGGING >>>
 
-                if reportable_metrics:
-                    # Use our check_ray_session helper function
+                if final_report_dict:
                     # Modern Ray version uses session.report
                     if hasattr(ray, "air") and hasattr(ray.air, "session"):
-                        ray.air.session.report(reportable_metrics)
+                        ray.air.session.report(final_report_dict)
                     elif hasattr(tune, "report"):
                         # Very old Ray versions use tune.report directly
                         # Try passing as a single 'metrics' dict instead of kwargs
-                        tune.report(metrics=reportable_metrics)
-                    
-                    callback_logger.debug(f"Reported {len(reportable_metrics)} metrics to Ray Tune.")
+                        tune.report(metrics=final_report_dict)
+
+                    callback_logger.debug(f"Reported {len(final_report_dict)} metrics to Ray Tune.")
                 else:
                     callback_logger.warning("No finite metrics available to report to Ray Tune.")
 
