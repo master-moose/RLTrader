@@ -1238,6 +1238,12 @@ def parse_args():
                        help="Use State Dependent Exploration (SDE) for SAC")
     sac.add_argument("--sde_sample_freq", type=int, default=-1,
                        help="Sample frequency for SDE (if --use_sde is set)")
+    sac.add_argument("--batch_size", type=int, default=256,
+                       help="Minibatch size for SAC optimization")
+    sac.add_argument("--buffer_size", type=int, default=1000000,
+                       help="Replay buffer size for SAC")
+    sac.add_argument("--learning_starts", type=int, default=100,
+                       help="How many steps of interactions to collect before starting learning for SAC")
 
     # --- LSTM/Network Architecture --- #
     network = parser.add_argument_group('Network Architecture')
