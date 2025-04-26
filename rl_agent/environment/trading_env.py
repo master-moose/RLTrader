@@ -543,35 +543,27 @@ class TradingEnvironment(Env):
 
         elif action > buy_cover_threshold:
             # Action: Buy/Cover
-            interpreted_action_code = 1 # Intention: Go Long
+            interpreted_action_code = 1  # Intention: Go Long
             if self.position_type == 0:  # Can only go long if flat
                 invest_amount = self.balance * self.max_position
                 if (invest_amount > ZERO_THRESHOLD and
                         current_price > ZERO_THRESHOLD):
-                    # fee_multiplier = 1 + self.transaction_fee # REMOVED
-                    # Shares based on cost including fee
-                    # shares_num = invest_amount # REMOVED
-                    # shares_den = (current_price * fee_multiplier) # REMOVED
-                    # shares_to_buy = shares_num / shares_den # REMOVED
                     shares_to_buy = invest_amount / current_price  # Simplified
 
                     if shares_to_buy > ZERO_THRESHOLD:
                         cost = shares_to_buy * current_price
-                        # fee = cost * self.transaction_fee # REMOVED
-                        # self.balance -= (cost + fee) # REMOVED fee
                         self.balance -= cost
-                        self.balance = max(0, self.balance) # Ensure >= 0
+                        self.balance = max(0, self.balance)  # Ensure >= 0
                         self.shares_held = shares_to_buy
                         self.position_type = 1
                         self.entry_price = current_price
                         self.total_trades += 1
                         self.total_longs += 1
                         trade_successful = True
-                        # fee_paid = fee # REMOVED
                         trade_info = {
                             'step': self.current_step, 'type': 'long_entry',
                             'price': current_price, 'shares': self.shares_held,
-                            'cost': cost,  # 'fee': fee, # REMOVED
+                            'cost': cost,
                             'balance_after': self.balance
                         }
                         self.trades.append(trade_info)
@@ -579,7 +571,7 @@ class TradingEnvironment(Env):
                             f"Step {self.current_step}: [Act: {action:.2f} > "
                             f"{buy_cover_threshold}] -> Entered LONG "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
-                            f"(Cost: {cost:.2f}) -> "  # Removed Fee log
+                            f"(Cost: {cost:.2f}) -> "
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
@@ -597,7 +589,7 @@ class TradingEnvironment(Env):
                         f"({self.balance:.2f}) or zero price."
                     )
             else:  # Already in a position, treat as Hold
-                interpreted_action_code = 0 # Override intention: Hold
+                interpreted_action_code = 0  # Override intention: Hold
                 logger.debug(
                     f"Step {self.current_step}: [Act: {action:.2f}] Wanted "
                     f"Long, but already in "
@@ -607,7 +599,7 @@ class TradingEnvironment(Env):
 
         elif abs(action) < 0.1:  # Zone around zero: Try Close or Hold Flat
             if self.position_type != 0:  # If in position, try Close
-                interpreted_action_code = 3 # Intention: Close
+                interpreted_action_code = 3  # Intention: Close
                 # Unpack the returned value (only PnL now)
                 profit_loss = self._close_position(current_price)
                 if profit_loss is not None:  # Check if close was successful using PnL
@@ -621,13 +613,13 @@ class TradingEnvironment(Env):
                     )
                 else:  # Close failed (e.g., insufficient funds for short close)
                     self.failed_trades += 1
-                    interpreted_action_code = 0 # Treat failed close as Hold
+                    interpreted_action_code = 0  # Treat failed close as Hold
                     logger.debug(
                         f"Step {self.current_step}: [Act: {action:.2f}] "
                         f"Attempted Close, but failed. Holding position."
                     )
             else:  # Already flat, Hold Flat
-                interpreted_action_code = 0 # Intention: Hold Flat
+                interpreted_action_code = 0  # Intention: Hold Flat
                 self.total_holds += 1
                 logger.debug(
                     f"Step {self.current_step}: [Act: {action:.2f} in +/-0.1]"
@@ -635,7 +627,7 @@ class TradingEnvironment(Env):
                 )
 
         else:  # Dead zone between close and trade thresholds: Hold Position
-            interpreted_action_code = 0 # Intention: Hold
+            interpreted_action_code = 0  # Intention: Hold
             pos_desc = ('Long' if self.position_type == 1 else
                         'Short' if self.position_type == -1 else 'Flat')
             logger.debug(
@@ -643,9 +635,6 @@ class TradingEnvironment(Env):
                 f"-> Holding {pos_desc} Position."
             )
 
-        # Fee calculation is handled within the specific trade logic (buy/sell/close) # REMOVED
-
-        # return interpreted_action_code, fee_paid # REMOVED fee return
         return interpreted_action_code
 
     def _close_position(self, closing_price: float):
@@ -659,7 +648,6 @@ class TradingEnvironment(Env):
             Profit/Loss of the closed trade, or None if close fails.
         """
         profit_loss = None
-        # fee = 0.0 # REMOVED
 
         # --- Price Validation ---
         # Price passed should already be validated by the 'step' method
@@ -670,32 +658,22 @@ class TradingEnvironment(Env):
                  f"({closing_price:.2f}) passed to _close_position. "
                  f"Cannot close."
              )
-             # return None, 0.0 # REMOVED fee return
              return None
         # --- End Validation ---
 
         if self.position_type == 1:  # Closing Long
             trade_type = 'long_exit'
             sell_value = self.shares_held * closing_price
-            # fee = sell_value * self.transaction_fee # REMOVED
-            # self.balance += sell_value - fee # REMOVED fee deduction
             self.balance += sell_value
-            # PnL includes fee # REMOVED
-            # profit_loss = (closing_price - self.entry_price) * self.shares_held - fee
             profit_loss = (closing_price - self.entry_price) * self.shares_held
             logger.debug(
                 f"Closing Long: {self.shares_held:.6f} sold @ "
-                # f", Fee: {fee:.2f}" # REMOVED
             )
 
         elif self.position_type == -1:  # Closing a Short position (Buy)
             trade_type = 'short_exit'
             buy_cost = self.shares_held * closing_price
-            # fee_multiplier = 1 + self.transaction_fee # REMOVED
-            # Cost including fee to check if affordable
-            # total_cost = buy_cost * fee_multiplier # REMOVED fee multiplier
-            total_cost = buy_cost # Now cost is just buy_cost
-            # fee = buy_cost * self.transaction_fee # REMOVED
+            total_cost = buy_cost
 
             # Check if we have enough balance to buy back the short position
             # Allow for float errors
@@ -705,18 +683,12 @@ class TradingEnvironment(Env):
                     f"({self.balance:.2f}) to close short position requiring "
                     f"{total_cost:.2f}. Cannot close."
                 )
-                # Should this trigger termination?
-                # return None, 0.0 # REMOVED fee return
                 return None  # Indicate failure
 
-            # self.balance -= total_cost  # Deduct cost + fee # REMOVED fee
-            self.balance -= buy_cost # Deduct only buy cost
-            # PnL for short = (Entry Price - Closing Price) * Shares - Fee
-            # REMOVED fee
+            self.balance -= buy_cost
             profit_loss = (self.entry_price - closing_price) * self.shares_held
             logger.debug(
                 f"Closing Short: {self.shares_held:.6f} bought @ "
-                # f", Fee: {fee:.2f}" # REMOVED
             )
 
         # Record the trade
@@ -724,23 +696,22 @@ class TradingEnvironment(Env):
             'step': self.current_step, 'type': trade_type,
             'price': closing_price, 'shares': self.shares_held,
             'entry_price': self.entry_price,
-            'pnl': profit_loss,  # 'fee': fee, # REMOVED
+            'pnl': profit_loss,
             'balance_after': self.balance
         }
         self.trades.append(trade_info)
 
         # Update state
-        # self.total_fees_paid += fee # REMOVED
         self.shares_held = 0.0
         self.position_type = 0
         self.entry_price = None
 
-        # return profit_loss, fee # REMOVED fee return
         return profit_loss
 
     def _update_portfolio_value(self, current_price: float):
         """
-        Update the total portfolio value based on the current price and position.
+        Update the total portfolio value based on the current price and
+        position.
 
         Args:
             current_price: The validated current price.
@@ -1136,10 +1107,14 @@ class TradingEnvironment(Env):
 
         # Check for non-finite values in observation BEFORE returning
         if not np.all(np.isfinite(observation)):
-            logger.error(f"Step {self.current_step}: Non-finite values detected in final observation! Clipping. Check data/feature calculation. Observation sample: {observation[:10]}...{observation[-10:]}") # noqa E501
+            logger.error(
+                f"Step {self.current_step}: Non-finite values detected in "
+                f"final observation! Clipping. Check data/feature calculation. "
+                f"Observation sample: {observation[:10]}...{observation[-10:]}"
+            )
             # Replace NaNs with 0 and Infs with large finite numbers as a last resort
             observation = np.nan_to_num(observation, nan=0.0,
-                                        posinf=1e9, # Use large finite numbers
+                                        posinf=1e9,  # Use large finite numbers
                                         neginf=-1e9)
 
         # --- DETAILED LOGGING FOR OBSERVATION --- #
@@ -1205,7 +1180,12 @@ class TradingEnvironment(Env):
             if (np.isfinite(initial_val) and np.isfinite(current_val) and
                     abs(initial_val) > ZERO_THRESHOLD):
                 try:
-                    calculated_return = (current_val - initial_val) / initial_val
+                    calculated_return = (current_val - initial_val)
+                    if abs(initial_val) > ZERO_THRESHOLD:
+                        calculated_return /= initial_val
+                    else:
+                        calculated_return = 0.0 # Avoid division by zero
+
                     if np.isfinite(calculated_return):
                         episode_return = calculated_return
                     else:
@@ -1335,111 +1315,3 @@ class TradingEnvironment(Env):
                 )
 
         return info
-
-    def render(self):
-        """
-        Render the environment (human mode or rgb_array).
-        """
-        if self.render_mode == 'human':
-            position_str = 'Flat'
-            if self.position_type == 1:
-                position_str = 'Long'
-            elif self.position_type == -1:
-                position_str = 'Short'
-            print(
-                f"Step: {self.current_step}, "
-                f"Portfolio: {self.portfolio_value:.2f}, "
-                f"Balance: {self.balance:.2f}, "
-                f"Position: {position_str}, "
-                f"Shares: {self.shares_held:.4f}"
-            )
-            return None
-
-        elif self.render_mode == 'rgb_array':
-            fig, ax = plt.subplots(figsize=(10, 6))  # Adjusted size
-            start = max(0, self.current_step - self.window_size)
-            end = self.current_step + 1
-            plot_data = self.data.iloc[start:end]
-
-            # Plot price
-            ax.plot(plot_data.index, plot_data['close'], label='Close Price',
-                    color='grey', alpha=0.8)
-
-            # --- Mark Trades ---
-            long_entries = [t for t in self.trades
-                            if t['type'] == 'long_entry' and start <= t['step'] < end] # noqa E501
-            long_exits = [t for t in self.trades
-                          if t['type'] == 'long_exit' and start <= t['step'] < end] # noqa E501
-            short_entries = [t for t in self.trades
-                             if t['type'] == 'short_entry' and start <= t['step'] < end] # noqa E501
-            short_exits = [t for t in self.trades
-                           if t['type'] == 'short_exit' and start <= t['step'] < end] # noqa E501
-
-            if long_entries:
-                entry_steps = [t['step'] for t in long_entries]
-                entry_prices = [t['price'] for t in long_entries]
-                # Convert data index steps to plot indices
-                indices = plot_data.index.searchsorted(self.data.index[entry_steps]) # noqa E501
-                ax.scatter(plot_data.index[indices], entry_prices, marker='^',
-                           color='lime', s=100, label='Long Entry', zorder=5)
-            if long_exits:
-                exit_steps = [t['step'] for t in long_exits]
-                exit_prices = [t['price'] for t in long_exits]
-                indices = plot_data.index.searchsorted(self.data.index[exit_steps]) # noqa E501
-                ax.scatter(plot_data.index[indices], exit_prices, marker='^',
-                           color='darkgreen', s=100, label='Long Exit', zorder=5)
-
-            if short_entries:
-                entry_steps = [t['step'] for t in short_entries]
-                entry_prices = [t['price'] for t in short_entries]
-                indices = plot_data.index.searchsorted(self.data.index[entry_steps]) # noqa E501
-                ax.scatter(plot_data.index[indices], entry_prices, marker='v',
-                           color='red', s=100, label='Short Entry', zorder=5)
-            if short_exits:
-                exit_steps = [t['step'] for t in short_exits]
-                exit_prices = [t['price'] for t in short_exits]
-                indices = plot_data.index.searchsorted(self.data.index[exit_steps]) # noqa E501
-                ax.scatter(plot_data.index[indices], exit_prices, marker='v',
-                           color='darkred', s=100, label='Short Exit', zorder=5)
-            # --- End Mark Trades ---
-
-            # Add portfolio value overlay? Optional
-            ax2 = ax.twinx()
-            # Get portfolio values matching the plot range
-            portfolio_plot_values = self.portfolio_values[max(0, len(self.portfolio_values) - (end-start)):] # noqa E501
-            # Ensure portfolio values align with price plot length
-            if len(portfolio_plot_values) == len(plot_data.index):
-                ax2.plot(plot_data.index, portfolio_plot_values,
-                         label='Portfolio Value', color='cyan', alpha=0.5,
-                         linestyle='--')
-                ax2.set_ylabel("Portfolio Value", color='cyan')
-                ax2.tick_params(axis='y', labelcolor='cyan')
-
-            ax.set_title(f"Trading Environment - Step {self.current_step}")
-            ax.set_ylabel("Price")
-            # Combine legends
-            lines, labels = ax.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            ax2.legend(lines + lines2, labels + labels2, loc='upper left')
-            ax.grid(True, alpha=0.3)
-
-            # Draw figure and convert to RGB array
-            fig.canvas.draw()
-            rgb_array = np.array(fig.canvas.renderer.buffer_rgba())
-            plt.close(fig)
-
-            return rgb_array
-        else:
-            # If render_mode is None or unsupported
-            return None
-
-    def close(self):
-        """Clean up resources."""
-        plt.close('all')  # Close all matplotlib figures
-
-    def seed(self, seed=None):
-        """Set random seed for environment and action space."""
-        super().reset(seed=seed)  # Call parent seed method
-        # Seed the action space's random number generator if needed
-        # self.action_space.seed(seed) # Only if using Samplable space
-        return [seed] 
