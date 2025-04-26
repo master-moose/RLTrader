@@ -743,7 +743,7 @@ def get_callback_list(
         verbose=1)
     )
     
-    Trading Metrics Logging Callback (COMMENTED OUT FOR DEBUGGING)
+    # Trading Metrics Logging Callback (COMMENTED OUT FOR DEBUGGING)
     callbacks.append(TradingMetricsCallback(
         log_freq=max(1, metrics_log_freq), 
         verbose=1, 
