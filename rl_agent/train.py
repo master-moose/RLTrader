@@ -38,7 +38,6 @@ from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv, VecEnv
                                              VecNormalize, sync_envs_normalization)
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.env_util import make_vec_env as sb3_make_vec_env
-from stable_baselines3.sac.policies import SacMlpPolicy  # Reverted back to SacMlpPolicy
 
 # --- Project Imports --- #
 # Note: TradingEnvironment is imported below; create_env is defined in this file
@@ -1279,8 +1278,8 @@ def create_model(
             "buffer_size": config["buffer_size"],
             "batch_size": config["batch_size"],
             "learning_starts": config["learning_starts"],
-            "gradient_steps": config["gradient_steps"],
-            "target_update_interval": config["target_update_interval"],
+            "gradient_steps": config.get("gradient_steps", 1), # Use .get with default
+            "target_update_interval": config.get("target_update_interval", 1), # Use .get with default
             "tau": config["tau"],
             "ent_coef": sac_ent_coef
         })
