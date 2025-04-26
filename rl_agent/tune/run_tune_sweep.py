@@ -405,29 +405,22 @@ def run_tune_experiment(args):
     
     # --- Configure Reporter --- #
     # Define the metrics we want to see in the table and their short names
-    metric_columns_config = {
+    metric_columns = {
         "training_iteration": "iter",
         "timesteps_total": "steps",
         "episode_reward_mean": "ep_rew_mean", # From Monitor
         "episode_len_mean": "ep_len_mean",   # From Monitor
         "eval/mean_reward": "eval_reward",   # From Callback
         "eval/combined_score": "score",       # From Callback
-        "eval/sharpe_ratio": "sharpe",      # From Callback
-        "eval/sortino_ratio": "sortino",     # From Callback
-        "eval/calmar_ratio": "calmar",      # From Callback
-        "eval/mean_return_pct": "return%",     # From Callback
-        "eval/explained_variance": "exp_var",   # From Callback
-        # Add other metrics from the callback if desired
-        "eval/total_trades": "trades",
-        "eval/total_longs": "longs",
-        "eval/total_shorts": "shorts",
-        "eval/portfolio_value": "port_val",
-        "eval/max_drawdown_pct": "max_dd%",
-        "eval/total_fees_paid": "fees",
-        # "eval/max_drawdown": "max_dd",
+        "eval/explained_variance": "expl_var", # From Callback
+        "eval/sharpe_ratio": "sharpe",
+        "eval/sortino_ratio": "sortino",
+        "eval/calmar_ratio": "calmar",
+        "eval/mean_return_pct": "return_%", # In percent
+        "eval/max_drawdown_pct": "drawdown_%", # In percent
         # "eval/total_trades": "trades",
         "time_total_s": "time(s)",
-        "time/fps": "fps" # Add FPS here
+        "time/fps": "fps" # Make sure FPS is prominently displayed
     }
     
     # Define the hyperparameters to display
@@ -440,7 +433,7 @@ def run_tune_experiment(args):
 
     reporter = CLIReporter(
         # Pass the configured metric columns
-        metric_columns=metric_columns_config,
+        metric_columns=metric_columns,
         # Pass the configured parameter columns
         parameter_columns=parameter_columns_config,
         # Sort by the primary metric we are optimizing
