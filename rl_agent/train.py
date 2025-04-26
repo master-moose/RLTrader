@@ -264,10 +264,10 @@ class TuneReportCallback(BaseCallback):
         # Periodically report FPS and step metrics
         if self.step_count % 10 == 0 and has_ray_session:
             try:
-                fps = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
+                fps_val = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
                 report_dict = {
-                    "time/total_timesteps": self.num_timesteps, # Renamed key
-                    "time_fps": fps
+                    "timesteps_total": self.num_timesteps, # Use standard Ray Tune key
+                    "fps": fps_val # Use standard key
                 }
                 # Try different Ray versions for reporting
                 if hasattr(ray, "air") and hasattr(ray.air, "session"):
@@ -281,45 +281,20 @@ class TuneReportCallback(BaseCallback):
         for env_idx, info in enumerate(self.locals.get("infos", [])):
             # Episode completed
             if "episode" in info.keys():
-                # Log episode metrics
+                # Log episode metrics locally
                 episode_info = info["episode"]
-                self.episode_rewards.append(episode_info.r)
-                self.episode_lengths.append(episode_info.l)
-                self.episode_returns.append(episode_info.r)  # Same as rewards for now
+                # Use dictionary access instead of attribute access
+                self.episode_rewards.append(episode_info['r'])
+                self.episode_lengths.append(episode_info['l'])
+                self.episode_returns.append(episode_info['r'])  # Same as rewards for now
                 self.eval_env_ids.append(env_idx)
-                
-                # Info logging
+
+                # Info logging (local)
                 callback_logger.info(
-                    f"Episode {self.episode_count}: reward={episode_info.r:.2f}, "
-                    f"length={episode_info.l}, env_id={env_idx}"
+                    f"Episode {self.episode_count}: reward={episode_info['r']:.2f}, "
+                    f"length={episode_info['l']}, env_id={env_idx}"
                 )
-                
-                # Ray Tune reporting (if available)
-                if has_ray_session:
-                    try:
-                        # Create report dictionary with episode metrics
-                        report_dict = {
-                            f"{model_type}_train_episode_reward": episode_info.r,
-                            f"{model_type}_train_episode_length": episode_info.l,
-                            "time_episodes": self.episode_count,
-                            "time_total_timesteps": self.model.num_timesteps,
-                        }
-                        
-                        # Add custom metrics if available, flatten keys
-                        if "metrics" in info:
-                            for k, v in info["metrics"].items():
-                                if isinstance(v, (int, float)):
-                                    flat_key = f"metrics_{k.replace('/', '_')}" # Replace slashes in key
-                                    report_dict[flat_key] = v
-                        
-                        # Try different Ray versions for reporting
-                        if hasattr(ray, "air") and hasattr(ray.air, "session"):
-                            ray.air.session.report(report_dict)
-                        elif hasattr(tune, "report"):
-                            tune.report(**report_dict)
-                    except Exception as tune_err:
-                        callback_logger.error(f"Failed to report episode metrics: {tune_err}")
-                
+
                 # Increment episode counter
                 self.episode_count += 1
         
@@ -440,7 +415,7 @@ class TuneReportCallback(BaseCallback):
              # Only include explained variance for non-SAC models in score
             variance_for_score = exp_var if model_type != "sac" else None
             try:
-                combined_score = self._normalize_and_combine_metrics(
+                combined_score = normalize_and_combine_metrics(
                     reward=ep_mean_reward, # Use mean reward from rollout
                     explained_variance=variance_for_score,
                     sharpe_ratio=sharpe,
@@ -704,10 +679,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
 
     # Define the environment creation function for Ray Tune workers
-    def make_single_env(rank: int, base_seed_val: Optional[int]): # Added base_seed_val back
+    def make_single_env(rank):
         def _init():
             env_config = train_config.copy() # Use the trial's config
-            instance_seed = base_seed_val
+            instance_seed = seed
             if instance_seed is not None:
                  instance_seed += rank
             env_config["seed"] = instance_seed # Pass seed to create_env
@@ -729,7 +704,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     # Use the make_single_env factory to create training environments
     train_env = make_vec_env(
-        env_id=make_single_env(rank=0, base_seed_val=seed), # Pass factory with rank 0 and base trial seed
+        env_id=make_single_env(rank=0), # Pass factory with rank 0 and base trial seed
         n_envs=num_envs,
         seed=None, # Seed is handled within the factory
         vec_env_cls=vec_env_cls,
@@ -766,7 +741,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         eval_env_seed_val = seed + num_envs if seed is not None else None
         # Step 1: Create the base DummyVecEnv for evaluation
         raw_eval_env = make_vec_env(
-            env_id=make_single_env(rank=0, base_seed_val=eval_env_seed_val), # Pass factory with rank 0 and eval seed
+            env_id=make_single_env(rank=0), # Pass factory with rank 0 and eval seed
             n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
 
