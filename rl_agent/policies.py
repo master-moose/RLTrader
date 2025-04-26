@@ -512,7 +512,7 @@ class TcnSacPolicy(SACPolicy):
         policy_kwargs = kwargs.copy()
 
         # Set defaults for SAC if not provided (common SAC defaults)
-        policy_kwargs.setdefault("net_arch", [256, 256]) # Default SAC MLP arch for actor/critic
+        policy_kwargs.setdefault("net_arch", [64, 64]) # MODIFIED default
         policy_kwargs.setdefault("activation_fn", nn.ReLU) # Common activation for SAC
         policy_kwargs.setdefault("n_critics", 2) # Standard SAC setup
         policy_kwargs.setdefault("share_features_extractor", True) # Typically share extractor
@@ -542,11 +542,16 @@ class TcnSacPolicy(SACPolicy):
         # SACPolicy's _build method handles initialization
 
     # Override make_features_extractor if needed, but SACPolicy handles it
-    # def make_features_extractor(self) -> TcnExtractor:
-    #     """Creates the TCN feature extractor."""
-    #     # The features_extractor is already created by the parent class
-    #     # using features_extractor_class and features_extractor_kwargs
-    #     return self.features_extractor
+    def make_features_extractor(self) -> BaseFeaturesExtractor:
+        """
+        Creates the TCN feature extractor.
+        """
+        return TcnExtractor(
+            self.observation_space,
+            features_per_timestep=self.features_per_timestep,
+            sequence_length=self.sequence_length,
+            tcn_params=self.tcn_params
+        )
 
     # init_weights might be useful if customizing initialization beyond SB3 defaults
     # @staticmethod
