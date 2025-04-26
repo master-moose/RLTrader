@@ -293,8 +293,19 @@ class TuneReportCallback(BaseCallback):
                         except (ValueError, TypeError, KeyError):
                             pass
 
-        # --- Log standard SB3 metrics periodically ---
-        # REMOVED: Logging moved back to _on_rollout_end for better timing
+        # --- Capture and Store latest FPS at each step ---
+        # Check if logger and name_to_value exist before accessing
+        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            log_vals = self.logger.name_to_value
+            if "time/fps" in log_vals:
+                try:
+                    # Ensure it's a finite float
+                    current_fps = float(log_vals["time/fps"])
+                    if np.isfinite(current_fps):
+                        self.last_fps = current_fps
+                except (ValueError, TypeError):
+                    # If conversion fails, keep the old value
+                    pass
 
         # --- Store FINAL metrics from DONE environments --- #
         if (hasattr(self, 'locals') and self.locals and
@@ -333,14 +344,10 @@ class TuneReportCallback(BaseCallback):
                     # if model_type == "sac" and self.logger is not None and hasattr(self.logger, 'name_to_value'):
                     #     actor_loss_val = self.logger.name_to_value.get("train/actor_loss")
                     #     critic_loss_val = self.logger.name_to_value.get("train/critic_loss")
-                    #     try:
-                    #         actor_loss = float(actor_loss_val) if actor_loss_val is not None and np.isfinite(float(actor_loss_val)) else float('inf')
-                    #     except (ValueError, TypeError):
-                    #         actor_loss = float('inf')
-                    #     try:
-                    #         critic_loss = float(critic_loss_val) if critic_loss_val is not None and np.isfinite(float(critic_loss_val)) else float('inf')
-                    #     except (ValueError, TypeError):
-                    #         critic_loss = float('inf')
+                    #     try: last_reward = float(last_reward)
+                    #     except (ValueError, TypeError): last_reward = 0.0
+                    #     try: last_variance = float(last_variance)
+                    #     except (ValueError, TypeError): last_variance = 0.0
 
                     # --- Calculate Combined Score for this episode --- #
                     # Use last known explained variance as best proxy
