@@ -236,7 +236,9 @@ class TradingEnvironment(Env):
                 f"({first_valid_price}). Searching for first valid price..."
             )
             valid_prices = self.data['close'].iloc[self.current_step:].dropna()
-            first_valid_price = valid_prices.iloc[0] if not valid_prices.empty else 0.0
+            first_valid_price = (
+                valid_prices.iloc[0] if not valid_prices.empty else 0.0
+            )
             if not np.isfinite(first_valid_price):
                 logger.error(
                     "Could not find any valid starting price in data!"
@@ -518,10 +520,18 @@ class TradingEnvironment(Env):
                         )
                     else:
                         self.failed_trades += 1
-                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but calculated shares {shares_to_short:.8f} <= threshold.")
+                        logger.debug(
+                            f"Step {self.current_step}: [Act: {action:.2f}] "
+                            f"Attempted Short, but calculated shares "
+                            f"{shares_to_short:.8f} <= threshold."
+                        )
                 else:
                     self.failed_trades += 1
-                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but insufficient target value ({short_value_target:.2f}) or zero price.")
+                    logger.debug(
+                        f"Step {self.current_step}: [Act: {action:.2f}] "
+                        f"Attempted Short, but insufficient target value "
+                        f"({short_value_target:.2f}) or zero price."
+                    )
             else:  # Already in a position, treat as Hold
                 interpreted_action_code = 0 # Override intention: Hold
                 logger.debug(
@@ -574,10 +584,18 @@ class TradingEnvironment(Env):
                         )
                     else:
                         self.failed_trades += 1
-                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but insufficient balance ({self.balance:.2f}) or zero price.")
+                        logger.debug(
+                            f"Step {self.current_step}: [Act: {action:.2f}] "
+                            f"Attempted Long, but calculated shares "
+                            f"{shares_to_buy:.8f} <= threshold."
+                        )
                 else:
                     self.failed_trades += 1
-                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but insufficient balance ({self.balance:.2f}) or zero price.")
+                    logger.debug(
+                        f"Step {self.current_step}: [Act: {action:.2f}] "
+                        f"Attempted Long, but insufficient balance "
+                        f"({self.balance:.2f}) or zero price."
+                    )
             else:  # Already in a position, treat as Hold
                 interpreted_action_code = 0 # Override intention: Hold
                 logger.debug(
@@ -604,7 +622,10 @@ class TradingEnvironment(Env):
                 else:  # Close failed (e.g., insufficient funds for short close)
                     self.failed_trades += 1
                     interpreted_action_code = 0 # Treat failed close as Hold
-                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Close, but failed. Holding position.")
+                    logger.debug(
+                        f"Step {self.current_step}: [Act: {action:.2f}] "
+                        f"Attempted Close, but failed. Holding position."
+                    )
             else:  # Already flat, Hold Flat
                 interpreted_action_code = 0 # Intention: Hold Flat
                 self.total_holds += 1
@@ -617,7 +638,10 @@ class TradingEnvironment(Env):
             interpreted_action_code = 0 # Intention: Hold
             pos_desc = ('Long' if self.position_type == 1 else
                         'Short' if self.position_type == -1 else 'Flat')
-            logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in dead zone] -> Holding {pos_desc} Position.")
+            logger.debug(
+                f"Step {self.current_step}: [Act: {action:.2f} in dead zone] "
+                f"-> Holding {pos_desc} Position."
+            )
 
         # Fee calculation is handled within the specific trade logic (buy/sell/close) # REMOVED
 
@@ -726,8 +750,8 @@ class TradingEnvironment(Env):
         # Add a check here as a failsafe
         if not np.isfinite(current_price):
             logger.error(
-                f"Step {self.current_step}: Invalid price ({current_price:.2f})"
-                f" received in _update_portfolio_value. "
+                f"Step {self.current_step}: Invalid price ({current_price:.2f}) "
+                f"received in _update_portfolio_value. "
                 f"Using last valid: {self.last_valid_price}"
             )
             current_price = self.last_valid_price  # Use last valid as fallback
@@ -797,8 +821,8 @@ class TradingEnvironment(Env):
         # Add check anyway as failsafe for benchmark calc
         if not np.isfinite(current_price):
             logger.warning(
-                f"Step {self.current_step}: Invalid price ({current_price:.2f})"
-                f" in _calculate_reward. Benchmark reward might be inaccurate."
+                f"Step {self.current_step}: Invalid price ({current_price:.2f}) "
+                f"in _calculate_reward. Benchmark reward might be inaccurate."
             )
             # Proceed, components using price will likely be 0
 
@@ -1000,7 +1024,8 @@ class TradingEnvironment(Env):
 
         # --- RAW DATA NAN CHECK ---
         # <<< MODIFIED: Apply forward fill first >>>
-        historical_data_filled = historical_data.fillna(method='ffill')
+        # Use the modern .ffill() method
+        historical_data_filled = historical_data.ffill()
         # Fill any remaining NaNs (e.g., at the start) with 0
         historical_data_filled = historical_data_filled.fillna(0)
 
@@ -1086,8 +1111,8 @@ class TradingEnvironment(Env):
                     logger.warning(
                         f"Step {self.current_step}: normalized_entry_price "
                         f"became non-finite ({normalized_entry_price}). "
-                        f"Current: {current_price_obs}, Entry: {self.entry_price}. "
-                        f"Setting to 0."
+                        f"Current: {current_price_obs}, "
+                        f"Entry: {self.entry_price}. Setting to 0."
                     )
                     normalized_entry_price = 0.0
                  # --- End Check ---
@@ -1141,8 +1166,8 @@ class TradingEnvironment(Env):
         # current_price is passed in, already validated
         if not np.isfinite(current_price):
             logger.warning(
-                f"Step {self.current_step}: Invalid price ({current_price:.2f})"
-                f" received in _get_info. "
+                f"Step {self.current_step}: Invalid price ({current_price:.2f}) "
+                f"received in _get_info. "
                 f"Using last valid: {self.last_valid_price}"
             )
             current_price = self.last_valid_price  # Use last valid as fallback
