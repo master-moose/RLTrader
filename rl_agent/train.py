@@ -431,6 +431,11 @@ class TuneReportCallback(BaseCallback):
         # Note: DQN doesn't typically log separate actor/critic losses in the same way
 
         combined_score = None
+        # Log prerequisite metrics for combined score calculation
+        callback_logger.debug(
+            f"Metrics for combined score: sharpe={sharpe}, calmar={calmar}, "
+            f"sortino={sortino}, ep_return={ep_return}, exp_var={exp_var}"
+        )
         if all(v is not None for v in [sharpe, calmar, sortino, ep_return]):
              # Only include explained variance for non-SAC models in score
             variance_for_score = exp_var if model_type != "sac" else None
@@ -458,7 +463,10 @@ class TuneReportCallback(BaseCallback):
             }.items() if v is None]
             # Only log if any base metrics were actually found (avoid spamming if env metrics failed)
             if any(v is not None for v in [sharpe, calmar, sortino, ep_return, exp_var]):
-                 callback_logger.debug(f"Skipping combined score (missing: {missing_keys})")
+                 callback_logger.debug(f"Skipping combined score calculation (missing: {missing_keys})")
+            else:
+                # If all base metrics are None, likely an env issue, don't spam log
+                callback_logger.debug("Skipping combined score calculation (all prerequisite metrics missing)")
             self.last_combined_score = 0.0 # Reset if cannot calculate
 
         # --- Report to Ray Tune --- #
