@@ -837,7 +837,7 @@ def parse_args():
     # --- General Parameters --- #
     general = parser.add_argument_group('General Parameters')
     general.add_argument(
-        "--model_type", type=str, default="recurrentppo", # Changed default
+        "--model_type", type=str, default="tcn_ppo", # Changed default back for testing
         choices=[
             "dqn", "ppo", "a2c", "sac", "lstm_dqn", "qrdqn", "recurrentppo", "tcn_ppo", "tcn_sac"
         ],
