@@ -704,34 +704,23 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
 
     # Define the environment creation function for Ray Tune workers
-    def make_single_env(rank: int, base_seed_val: Optional[int]):
+    def make_single_env(rank):
         def _init():
-            env_config = train_config.copy() # Use the trial's config
-            instance_seed = base_seed_val
-            if instance_seed is not None:
-                 instance_seed += rank
-            env_config["seed"] = instance_seed # Pass seed to create_env
-
-            # Create the environment using the project's create_env function
-            env = create_env(config=env_config, is_eval=False)
-
-            # Wrap with Monitor to capture episode stats
-            # Use the trial's log_dir for monitor files
-            monitor_log = os.path.join(log_dir, f'monitor_train_rank{rank}.csv')
-            os.makedirs(os.path.dirname(monitor_log), exist_ok=True)
-            env = Monitor(env, filename=monitor_log)
-
-            # Explicit seeding after Monitor wrap is removed as create_env handles seeding
-            # if instance_seed is not None:
-            #     env.seed(instance_seed)
-            #     env.action_space.seed(instance_seed)
-
+            if callable(env_id):
+                env = env_id()
+            else:
+                raise ValueError(f"Expected callable env_id, got {type(env_id)}")
+            
+            if seed is not None:
+                env.seed(seed + rank)
+                env.action_space.seed(seed + rank)
+            
             return env
         return _init
 
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
-        env_id=make_single_env(rank=0, base_seed_val=seed), # Pass factory with rank 0 and base seed
+        env_id=make_single_env(rank=0), # Pass factory with rank 0 and base seed
         n_envs=num_envs,
         seed=None, # Seed is handled within the factory
         vec_env_cls=vec_env_cls,
@@ -768,7 +757,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         eval_env_seed_val = seed + num_envs if seed is not None else None
         # Step 1: Create the base DummyVecEnv for evaluation
         raw_eval_env = make_vec_env(
-            env_id=make_single_env(rank=0), # Pass base_seed
+            env_id=make_single_env(rank=0, base_seed_val=eval_env_seed_val), # Pass factory with rank 0 and eval seed
             n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
 
@@ -1777,7 +1766,8 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
     # Create a single environment instance directly for evaluation
     try:
         single_eval_env = create_env(config=eval_env_config, is_eval=True)
-        # Wrap with Monitor for logging episode returns/lengths
+        # Wrap with Monitor to capture episode stats
+        # Use the trial's log_dir for monitor files
         monitor_log_path = os.path.join(os.path.dirname(model_path), f'monitor_eval.csv')
         ensure_dir_exists(os.path.dirname(monitor_log_path))
         single_eval_env = Monitor(single_eval_env, filename=monitor_log_path)
