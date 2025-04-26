@@ -599,6 +599,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     Args:
         config: Dictionary of hyperparameters from Ray Tune
     """
+    # --- Enable Anomaly Detection --- #
+    torch.autograd.set_detect_anomaly(True)
+    # -------------------------------- #
+
     if not RAY_AVAILABLE:
         raise ImportError("Ray Tune not found. Install via pip.")
 
@@ -853,16 +857,20 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         trial_logger.info(f"Training finished in {training_time:.2f}s")
     except Exception as e:
         trial_logger.error(f"Error during model.learn: {e}", exc_info=True)
-        # Report failure to Ray Tune
-        if RAY_AVAILABLE:
+        # Attempt to report failure metrics
+        if check_ray_session():
             try:
                 failure_metrics = {
-                    "training_failure": True,
-                    "timesteps": getattr(model, 'num_timesteps', 0)
+                    "trial_status": "ERROR",
+                    "error_message": str(e)[:200], # Limit error length
+                    "timesteps_total": getattr(model, 'num_timesteps', 0),
+                    # Try to get last known values
+                    "eval/mean_reward": 0.0, 
+                    "eval/explained_variance": 0.0,
+                    "combined_score": 0.0 # Default score on failure
                 }
-                # Try to get last metrics
                 last_reward = 0.0
-                last_variance = 0.0
+                last_variance = None
                 last_actor_loss = None
                 last_critic_loss = None
                 if hasattr(model, 'logger') and hasattr(model.logger, 'name_to_value'):
@@ -872,48 +880,49 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                     # Try to get losses based on model type
                     model_type = train_config.get("model_type", "ppo")
                     if model_type == "sac":
-                        last_actor_loss = log_vals.get("train/actor_loss")
+                        last_actor_loss = log_vals.get("train/actor_loss", log_vals.get("train/policy_loss"))
                         last_critic_loss = log_vals.get("train/critic_loss")
-                    elif model_type == "ppo":
+                    elif model_type in ["ppo", "a2c", "tcn_ppo", "recurrentppo"]:
                         last_actor_loss = log_vals.get("train/policy_loss")
                         last_critic_loss = log_vals.get("train/value_loss")
                     
                     try: last_reward = float(last_reward)
                     except (ValueError, TypeError): last_reward = 0.0
-                    try: last_variance = float(last_variance)
-                    except (ValueError, TypeError): last_variance = 0.0
+                    try: last_variance = float(last_variance) if last_variance is not None else None
+                    except (ValueError, TypeError): last_variance = None
                     try: 
                         if last_actor_loss is not None:
                             last_actor_loss = float(last_actor_loss)
-                    except (ValueError, TypeError): 
-                        last_actor_loss = None
+                    except (ValueError, TypeError): last_actor_loss = None
                     try: 
                         if last_critic_loss is not None:
-                            last_critic_loss = float(last_critic_loss)
-                    except (ValueError, TypeError): 
-                        last_critic_loss = None
+                             last_critic_loss = float(last_critic_loss)
+                    except (ValueError, TypeError): last_critic_loss = None
 
-                temp_cb = TuneReportCallback()
-                combo_score = temp_cb._normalize_and_combine_metrics(
-                    reward=last_reward, 
+                failure_metrics["eval/mean_reward"] = last_reward
+                
+                # --- FIX: Call the global function, not the callback method ---
+                combo_score = normalize_and_combine_metrics(
+                    reward=last_reward,
                     explained_variance=last_variance, 
-                    sharpe_ratio=0.0, 
-                    episode_return=0.0, 
-                    calmar_ratio=0.0, 
-                    sortino_ratio=0.0,
+                    sharpe_ratio=None, # Not available here
+                    episode_return=None, # Not available here
+                    calmar_ratio=None, # Not available here
+                    sortino_ratio=None, # Not available here
                     actor_loss=last_actor_loss,
                     critic_loss=last_critic_loss,
                     model_type=train_config.get("model_type", "ppo")
                 )
-                failure_metrics["eval/mean_reward"] = last_reward
+                # -------------------------------------------------------------
+                
                 if train_config.get("model_type", "ppo") != "sac":
                     failure_metrics["eval/explained_variance"] = last_variance
                 failure_metrics["combined_score"] = float(combo_score if combo_score is not None and np.isfinite(combo_score) else 0.0)
                 trial_logger.info(f"Reporting failure: {failure_metrics}")
 
                 # Use the updated check_ray_session function
-                if check_ray_session():
-                    # Use modern ray.air.session.report API
+                has_ray_session = check_ray_session()
+                if has_ray_session:
                     if hasattr(ray, "air") and hasattr(ray.air, "session"):
                         ray.air.session.report(failure_metrics)
                         trial_logger.info("Reported failure metrics via ray.air.session.report")
@@ -926,6 +935,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             except Exception as report_err:
                 trial_logger.error(f"Failed to report failure: {report_err}")
         raise
+
     finally:
         # --- Environment Closure ---
         trial_logger.info("Closing environments...")
