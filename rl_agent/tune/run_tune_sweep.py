@@ -241,17 +241,6 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
         }
         search_space.update(sac_params)
 
-    # --- TCN-Specific Parameters (If model uses TCN) ---
-    if 'tcn' in model_type:
-        print(f"Defining TCN-specific search space for {model_type}")
-        tcn_params = {
-            "tcn_num_layers": tune.choice([3, 4, 5]),
-            "tcn_num_filters": tune.choice([32, 64, 96]),
-            "tcn_kernel_size": tune.choice([2, 3]),
-            "tcn_dropout": tune.uniform(0.05, 0.3),
-        }
-        search_space.update(tcn_params)
-
     # Remove parameters not relevant for the specific model type
     if 'ppo' not in model_type:
         for k in ["n_steps", "vf_coef", "clip_range", "gae_lambda", "n_epochs", "max_grad_norm"]:
