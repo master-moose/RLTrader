@@ -222,7 +222,7 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
     # --- Common Parameters ---
     search_space = {
         # Learning rates
-        "learning_rate": tune.loguniform(1e-5, 1e-3),  # Wider range
+        "learning_rate": tune.loguniform(1e-5, 2e-4),  # Narrowed range for stability
         # Discount factors
         "gamma": tune.choice([0.95, 0.99, 0.995]),
         # Reward Component Weights (Focus on stability and profit)

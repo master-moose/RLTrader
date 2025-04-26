@@ -721,18 +721,21 @@ class TradingEnvironment(Env):
         #     f"PortVal={self.portfolio_value:.4f}"
         # )
         # --- Check for non-finite values immediately after calculation --- #
-        if not np.isfinite(self.portfolio_value):
+        if not np.isfinite(self.portfolio_value) or not np.isfinite(self.balance):
             logger.error(
                 f"_update_portfolio_value: NON-FINITE PORTFOLIO VALUE "
-                f"DETECTED! (Step {self.current_step})"
-                f" PosType={self.position_type}, Price={current_price:.4f}, "
-                f"Shares={self.shares_held:.8f}, Bal={self.balance:.4f}, "
-                f"Entry={self.entry_price}"
+                f"OR BALANCE DETECTED! (Step {self.current_step})\n"
+                f" PosType={self.position_type}, Price={current_price}, "
+                f"Shares={self.shares_held}, Bal={self.balance}, "
+                f"Entry={self.entry_price}\n"
                 f" -> AssetVal={self.asset_value}, "
                 f"PortVal={self.portfolio_value}"
             )
-            # Attempt to recover or terminate?
-            # self.portfolio_value = self.initial_balance # Emergency reset?
+            # Attempt to recover by setting to a large negative value to penalize heavily
+            # or potentially use last known good value if tracked.
+            # Using initial balance might be too forgiving. Let's use 0 for now.
+            self.portfolio_value = 0.0 # Emergency reset? Or use self.initial_balance?
+            self.balance = 0.0 # Reset balance too if it became non-finite
 
     def _calculate_reward(self, interpreted_action_code, prev_portfolio_value,
                           fee_paid_this_step, prev_position_type):
@@ -764,8 +767,14 @@ class TradingEnvironment(Env):
 
         # 1. Portfolio Value Change Reward (Percentage Change)
         portfolio_change_pct = 0.0
-        if abs(prev_portfolio_value) > ZERO_THRESHOLD:
+        # Safeguard against division by zero or near-zero portfolio value
+        if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(self.portfolio_value): # noqa E501
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value  # noqa E501
+        elif not np.isfinite(prev_portfolio_value) or not np.isfinite(self.portfolio_value): # noqa E501
+            logger.warning(f"Step {self.current_step}: Non-finite portfolio value detected in reward calc (prev={prev_portfolio_value}, curr={self.portfolio_value}). Setting change to -1.\") # noqa E501
+            portfolio_change_pct = -1.0 # Penalize heavily if values are non-finite
+        # else: portfolio remains 0 if prev_portfolio_value is near zero
+
         reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight  # noqa E501
 
         # 2. Drawdown Penalty
@@ -788,8 +797,14 @@ class TradingEnvironment(Env):
         # 4. Fee Penalty
         # Penalize based on portion of portfolio value spent on fees this step
         fee_penalty_normalized = 0.0
-        if abs(prev_portfolio_value) > ZERO_THRESHOLD:
+        # Safeguard against division by zero or near-zero portfolio value
+        if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(fee_paid_this_step): # noqa E501
+            # Ensure fee_paid_this_step is also finite
             fee_penalty_normalized = fee_paid_this_step / prev_portfolio_value
+        elif not np.isfinite(prev_portfolio_value) or not np.isfinite(fee_paid_this_step): # noqa E501
+            logger.warning(f"Step {self.current_step}: Non-finite prev portfolio value or fee detected in fee penalty calc (prev={prev_portfolio_value}, fee={fee_paid_this_step}). Setting penalty to -1.\") # noqa E501
+            fee_penalty_normalized = 1.0 # Max penalty if values non-finite
+
         reward_components['fee_penalty'] = -abs(fee_penalty_normalized) * self.fee_penalty_weight  # noqa E501
 
         # 5. Benchmark Comparison Reward (Optional - Based on Buy & Hold)
@@ -987,25 +1002,15 @@ class TradingEnvironment(Env):
                                            normalized_entry_price]
         observation = np.array(observation_list, dtype=np.float32)
 
-        # --- Validate Observation Shape ---
-        expected_shape = self.observation_space.shape
-        if observation.shape != expected_shape:
-            logger.error(
-                f"Observation shape mismatch! Expected {expected_shape}, "
-                f"got {observation.shape}. Step: {safe_step}. "
-                f"FeatDataLen: {len(feature_data)}"
-            )
-            # Returning zeros is safer to avoid downstream errors.
-            observation = np.zeros(expected_shape, dtype=np.float32)
-        elif not np.all(np.isfinite(observation)):
-            logger.error(
-                f"Non-finite values found in observation at step {safe_step}! "
-                f"Observation: {observation}"
-            )
-            # Replace NaNs/Infs with 0
-            observation = np.nan_to_num(observation, nan=0.0, posinf=0.0,
-                                        neginf=0.0)
+        # Check for non-finite values in observation BEFORE returning
+        if not np.all(np.isfinite(observation)):
+            logger.warning(f"Step {self.current_step}: Non-finite values detected in observation BEFORE clipping. Clipping to finite range.") # noqa E501
+            # Replace NaNs with 0 and Infs with large finite numbers
+            observation = np.nan_to_num(observation, nan=0.0, posinf=1e9, neginf=-1e9)
 
+        # --- DETAILED LOGGING FOR OBSERVATION --- #
+        # logger.debug(f"Observation (Step {self.current_step}): {observation}")
+        # --- End Detailed Logging --- #
         return observation
 
     def _get_info(self):
