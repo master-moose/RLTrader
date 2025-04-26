@@ -327,20 +327,20 @@ class TuneReportCallback(BaseCallback):
                             ep_metrics[k] = 0.0
 
                     # --- Fetch latest SAC losses (if applicable) ---
-                    actor_loss = float('inf') # Default to infinite loss if not found
-                    critic_loss = float('inf')
-                    model_type = self.model.config.get("model_type", "ppo") # Get model type
-                    if model_type == "sac" and self.logger is not None and hasattr(self.logger, 'name_to_value'):
-                        actor_loss_val = self.logger.name_to_value.get("train/actor_loss")
-                        critic_loss_val = self.logger.name_to_value.get("train/critic_loss")
-                        try:
-                            actor_loss = float(actor_loss_val) if actor_loss_val is not None and np.isfinite(float(actor_loss_val)) else float('inf')
-                        except (ValueError, TypeError):
-                            actor_loss = float('inf')
-                        try:
-                            critic_loss = float(critic_loss_val) if critic_loss_val is not None and np.isfinite(float(critic_loss_val)) else float('inf')
-                        except (ValueError, TypeError):
-                            critic_loss = float('inf')
+                    # actor_loss = float('inf') # Default to infinite loss if not found
+                    # critic_loss = float('inf')
+                    # model_type = self.model.config.get("model_type", "ppo") # Get model type
+                    # if model_type == "sac" and self.logger is not None and hasattr(self.logger, 'name_to_value'):
+                    #     actor_loss_val = self.logger.name_to_value.get("train/actor_loss")
+                    #     critic_loss_val = self.logger.name_to_value.get("train/critic_loss")
+                    #     try:
+                    #         actor_loss = float(actor_loss_val) if actor_loss_val is not None and np.isfinite(float(actor_loss_val)) else float('inf')
+                    #     except (ValueError, TypeError):
+                    #         actor_loss = float('inf')
+                    #     try:
+                    #         critic_loss = float(critic_loss_val) if critic_loss_val is not None and np.isfinite(float(critic_loss_val)) else float('inf')
+                    #     except (ValueError, TypeError):
+                    #         critic_loss = float('inf')
 
                     # --- Calculate Combined Score for this episode --- #
                     # Use last known explained variance as best proxy
@@ -351,8 +351,10 @@ class TuneReportCallback(BaseCallback):
                         episode_return=ep_metrics['return'],
                         calmar_ratio=ep_metrics['calmar'],
                         sortino_ratio=ep_metrics['sortino'],
-                        actor_loss=actor_loss,   # Pass fetched actor loss
-                        critic_loss=critic_loss, # Pass fetched critic loss
+                        # actor_loss=actor_loss,   # Pass fetched actor loss
+                        # critic_loss=critic_loss, # Pass fetched critic loss
+                        actor_loss=float('inf'), # Pass dummy values as they are not fetched here
+                        critic_loss=float('inf'), # Pass dummy values as they are not fetched here
                         model_type=model_type    # Pass model type
                     )
 
@@ -376,8 +378,8 @@ class TuneReportCallback(BaseCallback):
                                 "eval/calmar_ratio": ep_metrics['calmar'],
                                 "eval/mean_return_pct": ep_metrics['return'] * 100,
                                 # Add losses if SAC
-                                "eval/actor_loss": actor_loss if model_type == "sac" else None,
-                                "eval/critic_loss": critic_loss if model_type == "sac" else None,
+                                # "eval/actor_loss": actor_loss if model_type == "sac" else None,
+                                # "eval/critic_loss": critic_loss if model_type == "sac" else None,
                                 # --- ADD TRADING METRICS ---
                                 "eval/total_trades": final_info.get('total_trades', 0),
                                 "eval/total_longs": final_info.get('total_longs', 0),
@@ -423,8 +425,8 @@ class TuneReportCallback(BaseCallback):
             sb3_metrics = {}
             keys_to_log = [
                 "time/fps",
-                "train/actor_loss",
-                "train/critic_loss",
+                # "train/actor_loss",  # Comment out SAC-specific loss
+                # "train/critic_loss", # Comment out SAC-specific loss
                 "train/ent_loss",
                 "rollout/ep_rew_mean",
                 "rollout/ep_len_mean",
