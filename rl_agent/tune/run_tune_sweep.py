@@ -256,9 +256,9 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
         print(f"Defining SAC-specific search space for {model_type}")
         sac_params = {
             # Replay buffer size
-            "buffer_size": tune.choice([int(5e4), int(1e5), int(5e5)]),  # Smaller
+            "buffer_size": tune.choice([int(1e4), int(5e4)]), # Reduced
             # Batch size for SAC updates
-            "batch_size": tune.choice([256, 512, 1024]),  # Typical SAC batches
+            "batch_size": tune.choice([128, 256]), # Reduced
             # SAC target smoothing coefficient
             "tau": tune.loguniform(0.001, 0.02),
             # Timesteps before learning starts
