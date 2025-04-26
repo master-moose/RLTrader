@@ -407,43 +407,72 @@ class TuneReportCallback(BaseCallback):
         # Note: DQN doesn't typically log separate actor/critic losses in the same way
 
         combined_score = None
-        # Log prerequisite metrics for combined score calculation
-        callback_logger.debug(
-            f"Metrics for combined score: sharpe={sharpe}, calmar={calmar}, "
-            f"sortino={sortino}, ep_return={ep_return}, exp_var={exp_var}"
-        )
-        if all(v is not None for v in [sharpe, calmar, sortino, ep_return]):
-             # Only include explained variance for non-SAC models in score
-            variance_for_score = exp_var if model_type != "sac" else None
-            try:
+        try:
+            # Check if all necessary numeric metrics are present and finite
+            required_metrics = [ep_mean_reward] # Base reward is always required
+            if sharpe is not None: required_metrics.append(sharpe)
+            if calmar is not None: required_metrics.append(calmar)
+            if sortino is not None: required_metrics.append(sortino)
+            if ep_return is not None: required_metrics.append(ep_return)
+            if exp_var is not None: required_metrics.append(exp_var)
+            # Add optional metrics if present
+            max_dd = metrics_to_report.get("trading/max_drawdown_pct") # Need percentage
+            win_rate = metrics_to_report.get("trading/win_rate")
+            if max_dd is not None: required_metrics.append(max_dd)
+            if win_rate is not None: required_metrics.append(win_rate)
+
+            # Only calculate if *all* present required metrics are finite numbers
+            prerequisites_met = all(m is not None and np.isfinite(m) for m in required_metrics)
+
+            if prerequisites_met:
+                callback_logger.debug(
+                    f"Metrics for combined score: reward={ep_mean_reward:.3f}, "
+                    f"sharpe={sharpe}, calmar={calmar}, sortino={sortino}, "
+                    f"return={ep_return}, exp_var={exp_var}, "
+                    f"actor_loss={actor_loss}, critic_loss={critic_loss}, "
+                    f"max_dd={max_dd}, win_rate={win_rate}"
+                )
+                # Normalize drawdown percentage (0-100) to 0-1 scale for the function
+                norm_max_dd = max_dd / 100.0 if max_dd is not None else None
+
                 combined_score = normalize_and_combine_metrics(
-                    reward=ep_mean_reward, # Use mean reward from rollout
-                    explained_variance=variance_for_score,
+                    reward=ep_mean_reward,
+                    explained_variance=exp_var,
                     sharpe_ratio=sharpe,
-                    episode_return=ep_return,
+                    episode_return=ep_return, # Assumes this is fractional return
                     calmar_ratio=calmar,
                     sortino_ratio=sortino,
-                    actor_loss=actor_loss, # Pass fetched losses
-                    critic_loss=critic_loss, # Pass fetched losses
-                    model_type=model_type # Pass inferred model type
+                    actor_loss=actor_loss,
+                    critic_loss=critic_loss,
+                    model_type=model_type,
+                    max_drawdown=norm_max_dd,
+                    win_rate=win_rate
                 )
-                self.last_combined_score = combined_score # Store for logging table
-                metrics_to_report["eval/combined_score"] = combined_score
-                callback_logger.debug(f"Combined score calculated: {combined_score:.4f}")
-            except Exception as score_err:
-                 callback_logger.error(f"Error calculating combined score: {score_err}", exc_info=True)
-                 self.last_combined_score = 0.0 # Reset on error
-        else:
-            missing_keys = [k for k, v in {
-                "sharpe": sharpe, "calmar": calmar, "sortino": sortino, "return": ep_return
-            }.items() if v is None]
-            # Only log if any base metrics were actually found (avoid spamming if env metrics failed)
-            if any(v is not None for v in [sharpe, calmar, sortino, ep_return, exp_var]):
-                 callback_logger.debug(f"Skipping combined score calculation (missing: {missing_keys})")
+                # Update the last known good score
+                if combined_score is not None and np.isfinite(combined_score):
+                    self.last_combined_score = combined_score
+                    callback_logger.debug(f"Calculated combined score: {combined_score:.4f}")
+                else:
+                    # Calculation resulted in None or NaN/inf, use last known score
+                    callback_logger.warning(f"Combined score calculation resulted in invalid value. Using last score: {self.last_combined_score:.4f}")
+                    combined_score = self.last_combined_score
+
             else:
-                # If all base metrics are None, likely an env issue, don't spam log
-                callback_logger.debug("Skipping combined score calculation (all prerequisite metrics missing)")
-            self.last_combined_score = 0.0 # Reset if cannot calculate
+                 callback_logger.debug("Skipping combined score calculation (prerequisite metrics missing or non-finite)")
+                 # Use the last known valid score if calculation skipped
+                 combined_score = self.last_combined_score
+
+        except Exception as score_calc_err:
+             callback_logger.error(f"Error during combined score calculation: {score_calc_err}", exc_info=True)
+             # Fallback to last known score on error
+             combined_score = self.last_combined_score
+
+        # --- Add Final Metrics --- #
+        # Always report a numeric score (either calculated or the last known good one)
+        metrics_to_report["eval/combined_score"] = float(combined_score) # Ensure float
+
+        # Add other evaluation metrics if available (prefix with eval/)
+        if sharpe is not None and np.isfinite(sharpe): metrics_to_report["eval/sharpe_ratio"] = float(sharpe)
 
         # --- Report to Ray Tune --- #
         if check_ray_session():
