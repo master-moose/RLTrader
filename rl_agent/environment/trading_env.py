@@ -11,6 +11,13 @@ import pandas as pd
 from typing import List, Optional
 import matplotlib.pyplot as plt
 import logging
+# <<< Added CuPy import >>>
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    CUPY_AVAILABLE = False
+# <<< End Added CuPy import >>>
 from rl_agent.utils import calculate_trading_metrics
 
 # Get module logger
@@ -140,6 +147,50 @@ class TradingEnvironment(Env):
                     f"Feature '{feature}' not found in data columns: "
                     f"{data.columns.tolist()}"
                 )
+
+        # <<< Added: Pre-clean Data >>>
+        logger.info("Pre-cleaning data (fillna(0), replace inf)...")
+        # Ensure 'close' is cleaned if not already a feature
+        cols_to_clean = self.features + ['close'] if 'close' not in self.features else self.features
+        # Make sure we only clean columns that actually exist
+        cols_to_clean = [col for col in cols_to_clean if col in self.data.columns]
+        initial_nans = self.data[cols_to_clean].isnull().sum().sum()
+        initial_infs = np.isinf(self.data[cols_to_clean].values).sum()
+
+        if initial_nans > 0:
+             logger.warning(f"Found {initial_nans} NaN values in feature/close columns before cleaning.")
+             self.data[cols_to_clean] = self.data[cols_to_clean].fillna(0)
+        if initial_infs > 0:
+             logger.warning(f"Found {initial_infs} Inf values in feature/close columns before cleaning.")
+             self.data[cols_to_clean] = self.data[cols_to_clean].replace([np.inf, -np.inf], 0)
+
+        # Verify cleaning (optional check)
+        final_nans = self.data[cols_to_clean].isnull().sum().sum()
+        final_infs = np.isinf(self.data[cols_to_clean].values).sum()
+        if final_nans > 0 or final_infs > 0:
+            logger.error(f"Data cleaning failed! NaNs: {final_nans}, Infs: {final_infs}")
+        else:
+            logger.info("Data pre-cleaning complete.")
+        # <<< End Added: Pre-clean Data >>>
+
+
+        # <<< Added: Convert features to NumPy/CuPy array >>>
+        logger.info("Converting features to NumPy array...")
+        self.feature_array = self.data[self.features].values.astype(np.float32)
+        logger.info(f"NumPy feature array created with shape: {self.feature_array.shape}")
+
+        self.feature_array_gpu = None
+        if CUPY_AVAILABLE:
+            try:
+                logger.info("CuPy available. Transferring feature array to GPU...")
+                self.feature_array_gpu = cp.asarray(self.feature_array)
+                logger.info("Feature array transferred to GPU.")
+            except Exception as e:
+                logger.error(f"Failed to transfer feature array to CuPy: {e}. Falling back to NumPy.", exc_info=True)
+                CUPY_AVAILABLE = False # Disable CuPy if transfer fails
+        else:
+            logger.info("CuPy not available or disabled. Using NumPy for feature operations.")
+        # <<< End Added: Convert features to NumPy/CuPy array >>>
 
         # --- Define action and observation spaces ---
         # Action space: Continuous value between -1 (max short/close)
@@ -961,9 +1012,10 @@ class TradingEnvironment(Env):
         """
         Get the current observation, including historical features,
         position type, and normalized entry price.
+        Uses pre-computed NumPy/CuPy array for features.
 
         Returns:
-            Numpy array containing the observation
+            Numpy array containing the observation (on CPU)
         """
         # Check if current_step is valid
         if self.current_step < 0 or self.current_step >= len(self.data):
@@ -971,156 +1023,103 @@ class TradingEnvironment(Env):
                 f"Invalid current_step ({self.current_step}) in "
                 f"_get_observation. Data length: {len(self.data)}"
             )
-            # If called at the very end, use the last valid step?
-            safe_step = min(self.current_step, len(self.data) - 1)
             # Fallback: return zeros matching shape
-            # return np.zeros(self.observation_space.shape, dtype=np.float32)
-        else:
-            safe_step = self.current_step
-
-        # Get historical feature data (sequence_length prior steps incl current)
-        end_idx = safe_step
-        start_idx = max(0, end_idx - self.sequence_length + 1)
-
-        # Ensure we have enough data points relative to sequence length
-        actual_len = end_idx - start_idx + 1
-        if actual_len < 1:  # Should not happen if safe_step is valid
-            logger.error(
-                f"Observation calculation error: start_idx {start_idx} > "
-                f"end_idx {end_idx}"
-            )
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        historical_data = self.data.iloc[start_idx:end_idx+1].copy() # Use copy to avoid SettingWithCopyWarning
+        safe_step = self.current_step
 
-        # --- Explicit NaN/Inf Check and Clean on Slice --- #
-        check_df = historical_data[self.features]
-        if not np.all(np.isfinite(check_df.values)):
-            logger.warning(f"[NAN_CHECK] NaN/Inf found in raw historical_data slice (Step: {safe_step}, Indices: {start_idx}-{end_idx}) before processing.")
-            # Log columns with non-finite values
-            non_finite_cols = check_df.columns[~np.isfinite(check_df).all()].tolist()
-            if non_finite_cols:
-                logger.warning(f"[NAN_CHECK] Columns with non-finite values in slice: {non_finite_cols}")
-            # Apply cleaning directly to the copied slice
-            historical_data.fillna(0, inplace=True)
-            historical_data.replace([np.inf, -np.inf], 0, inplace=True)
-            # Verify cleaning (optional)
-            # if not np.all(np.isfinite(historical_data[self.features].values)):
-            #     logger.error(f"[NAN_CHECK] Cleaning failed! Non-finite values still present after fillna/replace.")
-        # --- End Check and Clean ---
+        # Get historical feature data indices
+        end_idx = safe_step
+        start_idx = max(0, end_idx - self.sequence_length + 1)
+        actual_len = end_idx - start_idx + 1
 
-        # --- RAW DATA NAN CHECK --- (Removed redundant check)
-        # raw_features_df = historical_data[self.features]
-        # if not np.all(np.isfinite(raw_features_df.values)):
-        #     logger.error(f"[NAN_CHECK] NaN found in raw historical_data slice (Step: {safe_step}, Indices: {start_idx}-{end_idx}) before processing.")
-        #     # Log columns with NaNs
-        #     nan_cols = raw_features_df.columns[raw_features_df.isnull().any()].tolist()
-        #     if nan_cols:
-        #         logger.error(f"[NAN_CHECK] Columns with NaNs in raw slice: {nan_cols}")
-        # -------------------------
+        # --- Optimized Feature Extraction using NumPy or CuPy ---
+        xp = np # Default to numpy
+        feature_source = self.feature_array
 
-        # Ensure we have exactly sequence_length rows for feature data
-        if len(historical_data) < self.sequence_length:
-            # Pad with the first available row if needed
-            num_padding = self.sequence_length - len(historical_data)
-            if not historical_data.empty:
-                padding_df = pd.DataFrame(
-                    [historical_data.iloc[0]] * num_padding,
-                    index=range(num_padding)
-                )
-                historical_data = pd.concat([
-                    padding_df, historical_data.reset_index(drop=True)
-                ], ignore_index=True)
-            else:  # If historical_data is somehow empty
-                logger.warning(
-                    f"Historical data empty in _get_observation at step "
-                    f"{safe_step}. Padding with zeros."
-                )
-                # Create a zero DataFrame matching feature columns
-                zero_data = {feat: [0.0] * self.sequence_length
-                             for feat in self.features}
-                historical_data = pd.DataFrame(zero_data)
+        if CUPY_AVAILABLE and self.feature_array_gpu is not None:
+            xp = cp
+            feature_source = self.feature_array_gpu
+            # logger.debug("Using CuPy for observation features") # Optional debug
+        # else: logger.debug("Using NumPy for observation features") # Optional debug
 
-        # Extract features and flatten
-        feature_data = []
-        for feature in self.features:
-            # <<< MODIFIED: Use the pre-filled data >>>
-            # Ensure feature exists (should always now)
-            if feature in historical_data.columns:
-                # Values should already be finite after ffill/fillna(0)
-                values = historical_data[feature].values
-                feature_data.extend(values)
+        try:
+            # Slice the feature array (NumPy or CuPy)
+            historical_features_sliced = feature_source[start_idx:end_idx+1]
+
+            # Handle padding if needed (at the start of the data)
+            if actual_len < self.sequence_length:
+                num_padding = self.sequence_length - actual_len
+                # Get the first row of the slice for padding
+                padding_row = historical_features_sliced[0:1]
+                # Repeat the first row `num_padding` times
+                padding = xp.repeat(padding_row, num_padding, axis=0)
+                # Concatenate padding and the slice
+                historical_features_padded = xp.concatenate((padding, historical_features_sliced), axis=0)
             else:
-                # This case should be less likely now
-                logger.warning(
-                    f"Feature '{feature}' still not found after processing "
-                    f"for observation. Appending zeros."
-                )
-                feature_data.extend([0.0] * self.sequence_length)
+                historical_features_padded = historical_features_sliced
 
-        # --- Add Position Information ---
-        # 1. Position Type (-1, 0, 1)
+            # Flatten the features (using NumPy/CuPy flatten)
+            feature_vector = historical_features_padded.flatten()
+
+        except IndexError as e:
+             logger.error(f"Error slicing feature array at step {safe_step} (Indices {start_idx}:{end_idx+1}): {e}")
+             # Fallback to zeros if slicing fails
+             feature_vector = xp.zeros(len(self.features) * self.sequence_length, dtype=np.float32)
+        except Exception as e:
+             logger.error(f"Unexpected error during feature extraction (step {safe_step}): {e}", exc_info=True)
+             feature_vector = xp.zeros(len(self.features) * self.sequence_length, dtype=np.float32)
+        # --- End Optimized Feature Extraction ---
+
+        # --- Position Information (calculated on CPU for simplicity) ---
         position_type_feature = float(self.position_type)
-
-        # 2. Normalized Entry Price
-        # (current_price / entry_price) - 1 if in position, else 0
-        # Use the already validated last_valid_price
         normalized_entry_price = 0.0
-        current_price_obs = self.last_valid_price  # Use validated price
-        # <<< ADDED: Check entry price validity >>>
+        current_price_obs = self.last_valid_price # Use validated price from step
+
         entry_price_valid = (self.entry_price is not None and
                              np.isfinite(self.entry_price) and
                              abs(self.entry_price) > ZERO_THRESHOLD)
 
         if self.position_type != 0 and entry_price_valid:
-            # Current price is already validated (self.last_valid_price)
-            if np.isfinite(current_price_obs) and abs(current_price_obs) > ZERO_THRESHOLD: # noqa E501
-                normalized_entry_price = (current_price_obs / self.entry_price) - 1.0 # noqa E501
-                # --- Check for non-finite result ---
+            if np.isfinite(current_price_obs) and abs(current_price_obs) > ZERO_THRESHOLD:
+                normalized_entry_price = (current_price_obs / self.entry_price) - 1.0
                 if not np.isfinite(normalized_entry_price):
                     logger.warning(
-                        f"Step {self.current_step}: normalized_entry_price "
-                        f"became non-finite ({normalized_entry_price}). "
-                        f"Current: {current_price_obs}, "
-                        f"Entry: {self.entry_price}. Setting to 0."
+                        f"Step {self.current_step}: normalized_entry_price became non-finite. Setting to 0."
                     )
                     normalized_entry_price = 0.0
-                 # --- End Check ---
-            else:
-                 # This should not happen if last_valid_price is truly valid
-                logger.warning(
-                    f"Step {self.current_step}: Skipping norm_entry_price calc"
-                    f" due to non-finite/zero validated current price "
-                    f"({current_price_obs})"
-                )
-        elif self.position_type != 0 and not entry_price_valid:
-            logger.warning(
-                f"Step {self.current_step}: Skipping norm_entry_price calc "
-                f"due to invalid entry price ({self.entry_price})"
-            )
+            # else: logger.warning(...) # Optional logging if current price is invalid
+        # elif self.position_type != 0: logger.warning(...) # Optional logging if entry price invalid
+
+        position_info = np.array([position_type_feature, normalized_entry_price], dtype=np.float32)
         # --- End Position Information ---
 
-        # Combine features and position info
-        observation_list = feature_data + [position_type_feature,
-                                           normalized_entry_price]
-        observation = np.array(observation_list, dtype=np.float32)
+        # --- Combine features and position info --- 
+        # If features are on GPU, move position_info to GPU for concatenation
+        if xp == cp:
+            try:
+                position_info_gpu = cp.asarray(position_info)
+                observation_gpu = cp.concatenate((feature_vector, position_info_gpu))
+                # IMPORTANT: Convert back to NumPy CPU array for Stable Baselines
+                observation = cp.asnumpy(observation_gpu)
+            except Exception as e:
+                 logger.error(f"Error during CuPy concatenation/conversion (step {safe_step}): {e}. Falling back.", exc_info=True)
+                 # Fallback: Move feature_vector to CPU and concatenate there
+                 feature_vector_cpu = cp.asnumpy(feature_vector)
+                 observation = np.concatenate((feature_vector_cpu, position_info))                 
+        else:
+            # If using NumPy, directly concatenate
+            observation = np.concatenate((feature_vector, position_info))
+        # --- End Combination ---
 
-        # Check for non-finite values in observation BEFORE returning
+        # Final check for non-finite values (should be less likely now)
         if not np.all(np.isfinite(observation)):
             logger.error(
-                f"Step {self.current_step}: Non-finite values detected in "
-                f"final observation! Clipping. Check data/feature calculation. "
-                f"Observation sample: {observation[:10]}...{observation[-10:]}"
+                f"Step {self.current_step}: Non-finite values detected in final observation AFTER processing! Clipping."
             )
-            # Replace NaNs with 0 and Infs with large finite numbers as a last resort
-            observation = np.nan_to_num(observation, nan=0.0,
-                                        posinf=1e9,  # Use large finite numbers
-                                        neginf=-1e9)
+            observation = np.nan_to_num(observation, nan=0.0, posinf=1e9, neginf=-1e9)
 
-        # --- DETAILED LOGGING FOR OBSERVATION --- #
-        # logger.debug(f"Observation (Step {self.current_step}): {observation}")
-        # --- End Detailed Logging --- #
-        return observation
+        return observation.astype(np.float32) # Ensure correct dtype
 
     def _get_info(self, current_price: float):
         """
