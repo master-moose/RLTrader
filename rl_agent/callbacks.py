@@ -743,12 +743,12 @@ def get_callback_list(
         verbose=1)
     )
     
-    # Trading Metrics Logging Callback (COMMENTED OUT FOR DEBUGGING)
-    # callbacks.append(TradingMetricsCallback(
-    #     log_freq=max(1, metrics_log_freq), 
-    #     verbose=1, 
-    #     log_dir=os.path.join(log_dir, "trading_metrics"))
-    # )
+    Trading Metrics Logging Callback (COMMENTED OUT FOR DEBUGGING)
+    callbacks.append(TradingMetricsCallback(
+        log_freq=max(1, metrics_log_freq), 
+        verbose=1, 
+        log_dir=os.path.join(log_dir, "trading_metrics"))
+    )
     
     # --- Evaluation Callback ---
     if eval_env is not None:

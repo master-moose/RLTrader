@@ -947,31 +947,31 @@ class TradingEnvironment(Env):
         # --- Reward Component 8: Profit/Closing Bonus (Only when Closing) ---
         profit_bonus = 0.0
         # Check if action was close, prev pos wasn't flat, current pos is flat
-        if (interpreted_action_code == 3 and prev_position_type != 0 and
-                self.position_type == 0):
-            # PnL was calculated in _close_position
-            # Find the PnL from the last trade entry in self.trades
-            last_trade = self.trades[-1] if self.trades else None
-            if last_trade and last_trade['type'] in ['long_exit', 'short_exit']:
-                trade_pnl = last_trade.get('pnl', 0.0)
-                # Normalize PnL by entry value?
-                entry_value = 0
-                if last_trade['type'] == 'long_exit':
-                    entry_value = last_trade.get('shares', 0) * last_trade.get('entry_price', 0)  # noqa E501
-                elif last_trade['type'] == 'short_exit':
-                    # Value at entry for short based on entry price
-                    entry_value = last_trade.get('shares', 0) * last_trade.get('entry_price', 0)  # noqa E501
+        # if (interpreted_action_code == 3 and prev_position_type != 0 and
+        #         self.position_type == 0):
+        #     # PnL was calculated in _close_position
+        #     # Find the PnL from the last trade entry in self.trades
+        #     last_trade = self.trades[-1] if self.trades else None
+        #     if last_trade and last_trade[\'type\'] in [\'long_exit\', \'short_exit\']:
+        #         trade_pnl = last_trade.get(\'pnl\', 0.0)
+        #         # Normalize PnL by entry value?
+        #         entry_value = 0
+        #         if last_trade[\'type\'] == \'long_exit\':
+        #             entry_value = last_trade.get(\'shares\', 0) * last_trade.get(\'entry_price\', 0)  # noqa E501
+        #         elif last_trade[\'type\'] == \'short_exit\':
+        #             # Value at entry for short based on entry price
+        #             entry_value = last_trade.get(\'shares\', 0) * last_trade.get(\'entry_price\', 0)  # noqa E501
+        #
+        #         if entry_value > ZERO_THRESHOLD:
+        #             pnl_pct = trade_pnl / entry_value
+        #             if pnl_pct > 0:  # Only reward profitable closes
+        #                 # Scale bonus by profit percentage
+        #                 profit_bonus = pnl_pct * 2  # Adjust multiplier
+        #             # else: Add penalty for losing closes? Optional.
+        #             #     profit_bonus = pnl_pct * some_penalty_multiplier
 
-                if entry_value > ZERO_THRESHOLD:
-                    pnl_pct = trade_pnl / entry_value
-                    if pnl_pct > 0:  # Only reward profitable closes
-                        # Scale bonus by profit percentage
-                        profit_bonus = pnl_pct * 2  # Adjust multiplier
-                    # else: Add penalty for losing closes? Optional.
-                    #     profit_bonus = pnl_pct * some_penalty_multiplier
-
-        reward_components['profit_bonus'] = (
-            profit_bonus * self.profit_bonus_weight
+        reward_components['profit_bonus'] = (\
+            profit_bonus * self.profit_bonus_weight\
         )
 
         # --- Reward Component 9: Exploration Bonus (Optional) ---

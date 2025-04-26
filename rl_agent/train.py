@@ -343,11 +343,11 @@ class TuneReportCallback(BaseCallback):
                     # Use modern ray.air.session.report API
                     if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
                          ray.air.session.report(report_dict)
-                            callback_logger.debug(f"Reported {len(report_dict)} metrics via ray.air.session.report (minimal).")
+                         callback_logger.debug(f"Reported {len(report_dict)} metrics via ray.air.session.report (minimal).")
                     # Fallback to tune.report (passing dict, not kwargs)
                     elif RAY_AVAILABLE and hasattr(tune, "report"):
                          tune.report(report_dict)
-                            callback_logger.debug(f"Reported {len(report_dict)} metrics via tune.report (fallback, minimal).")
+                         callback_logger.debug(f"Reported {len(report_dict)} metrics via tune.report (fallback, minimal).")
                     else:
                         callback_logger.warning("Could not find ray.air.session.report or tune.report to report minimal metrics.")
 
