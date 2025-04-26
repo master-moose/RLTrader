@@ -174,6 +174,11 @@ class TuneReportCallback(BaseCallback):
         self.step_count = 0
         self.start_time = time.time()
         self.num_timesteps = 0
+        self.last_fps_log_time = 0
+        self.rollout_count = 0
+        self.best_mean_reward = -np.inf
+        self.best_combined_score = -np.inf
+        self.log_freq = 10 # Log summary table every 10 rollouts
         
     def _on_training_start(self) -> None:
         """
