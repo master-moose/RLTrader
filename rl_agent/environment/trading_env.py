@@ -177,19 +177,30 @@ class TradingEnvironment(Env):
         # <<< Added: Convert features to NumPy/CuPy array >>>
         logger.info("Converting features to NumPy array...")
         self.feature_array = self.data[self.features].values.astype(np.float32)
-        logger.info(f"NumPy feature array created with shape: {self.feature_array.shape}")
+        logger.info(
+            f"NumPy feature array created with shape: {self.feature_array.shape}"
+        )
 
         self.feature_array_gpu = None
+        # Use the module-level CUPY_AVAILABLE check
         if CUPY_AVAILABLE:
             try:
-                logger.info("CuPy available. Transferring feature array to GPU...")
+                logger.info(
+                    "CuPy available. Transferring feature array to GPU..."
+                )
                 self.feature_array_gpu = cp.asarray(self.feature_array)
                 logger.info("Feature array transferred to GPU.")
             except Exception as e:
-                logger.error(f"Failed to transfer feature array to CuPy: {e}. Falling back to NumPy.", exc_info=True)
-                CUPY_AVAILABLE = False # Disable CuPy if transfer fails
+                logger.error(
+                    f"Failed to transfer feature array to CuPy: {e}. "
+                    f"Falling back to NumPy.",
+                    exc_info=True
+                )
         else:
-            logger.info("CuPy not available or disabled. Using NumPy for feature operations.")
+            logger.info(
+                "CuPy not available or disabled. "
+                "Using NumPy for feature operations."
+            )
         # <<< End Added: Convert features to NumPy/CuPy array >>>
 
         # --- Define action and observation spaces ---
