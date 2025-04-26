@@ -754,12 +754,14 @@ class TradingEnvironment(Env):
              # Proceed with calculations, components using price will likely be 0
 
         # --- Reward Component 1: Portfolio Value Change ---
-        # Use log return for stability, clip extreme values
         portfolio_change_pct = 0.0
         if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(self.portfolio_value):
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
         elif not np.isfinite(prev_portfolio_value) or not np.isfinite(self.portfolio_value):
-            logger.warning(f"Step {self.current_step}: Non-finite portfolio value detected in reward calc (prev={prev_portfolio_value}, curr={self.portfolio_value}). Setting change to -1.") # noqa E501        reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight
+            logger.warning(f"Step {self.current_step}: Non-finite portfolio value detected in reward calc (prev={prev_portfolio_value}, curr={self.portfolio_value}). Setting change to -1.") # noqa E501
+            portfolio_change_pct = -1.0 # Penalize heavily if values are non-finite
+        # Assign the component AFTER calculating the percentage
+        reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight
 
         # --- Reward Component 2: Drawdown Penalty ---
         current_drawdown = 0.0
@@ -782,7 +784,9 @@ class TradingEnvironment(Env):
         if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(fee_paid_this_step):
             fee_penalty_normalized = fee_paid_this_step / prev_portfolio_value
         elif not np.isfinite(prev_portfolio_value) or not np.isfinite(fee_paid_this_step):
-            logger.warning(f"Step {self.current_step}: Non-finite prev portfolio value or fee detected in fee penalty calc (prev={prev_portfolio_value}, fee={fee_paid_this_step}). Setting penalty to -1.") # noqa E501            fee_penalty_normalized = 1.0 # Max penalty if values non-finite
+            logger.warning(f"Step {self.current_step}: Non-finite prev portfolio value or fee detected in fee penalty calc (prev={prev_portfolio_value}, fee={fee_paid_this_step}). Setting penalty to -1.") # noqa E501
+            fee_penalty_normalized = 1.0 # Max penalty if values non-finite
+        # Assign the component AFTER calculating the normalized value
         reward_components['fee_penalty'] = -abs(fee_penalty_normalized) * self.fee_penalty_weight
 
         # --- Reward Component 5: Benchmark Comparison ---
@@ -802,6 +806,7 @@ class TradingEnvironment(Env):
         # Check validity of prices for benchmark calculation
         if np.isfinite(prev_price) and prev_price > ZERO_THRESHOLD and np.isfinite(current_price):
             benchmark_return = (current_price / prev_price) - 1.0
+            # Access portfolio_change component AFTER it has been assigned
             agent_step_return = reward_components['portfolio_change'] # From portfolio_change component
             benchmark_reward = benchmark_return * self.benchmark_reward_weight
 
