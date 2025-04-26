@@ -10,70 +10,51 @@ the LSTM-DQN reinforcement learning agent on financial time series data.
 
 # --- Standard Library Imports --- #
 import argparse
+import copy
 import json
 import logging
 import os
 import sys
 import time
-import copy  # Added import
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple, Callable
-from collections import deque # Add deque import
 
 # --- Third-Party Imports --- #
-import gymnasium as gym
+import gym
 import numpy as np
 import pandas as pd
+import ray
 import torch
-
-# --- Stable Baselines3 Imports --- #
-from stable_baselines3 import A2C, DQN, PPO, SAC
-from stable_baselines3.common.base_class import BaseAlgorithm as BaseRLModel
-from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.policies import ActorCriticPolicy  # For PPO/A2C
-from stable_baselines3.common.vec_env import (
-    DummyVecEnv, SubprocVecEnv, VecNormalize
-)
-from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy
-from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy
+from ray import tune
+from stable_baselines3 import A2C, DQN, PPO, SAC  # Removed QRDQN from here
+from stable_baselines3.common.base_class import BaseAlgorithm  # Changed BaseRLModel to BaseAlgorithm
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy # Import DQN's MlpPolicy
+from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy  # Import SAC's MlpPolicy
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, SubprocVecEnv
+from stable_baselines3_contrib import RecurrentPPO, QRDQN  # Added QRDQN here
+from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.utils import get_device
+from stable_baselines3.common.vec_env.base_vec_env import VecEnv
+from stable_baselines3.common.vec_env.util import make_vec_env
 
-# --- SB3 Contrib Imports --- #
-from sb3_contrib import QRDQN, RecurrentPPO
-
-# --- Ray Imports (with availability check) --- #
-RAY_AVAILABLE = False
-try:
-    import ray
-    from ray import tune
-    # Unused imports removed: ASHAScheduler, OptunaSearch, HyperOptSearch
-    # from ray.tune import CLIReporter # Keep CLIReporter # Unused
-    RAY_AVAILABLE = True
-except ImportError:
-    # Detailed error handling in run_tune_sweep.py
-    pass
-
-# --- Local Module Imports --- #
-# Add parent directory to path *before* attempting local imports
-# Ensure this runs only once or is handled carefully if script is imported
+# --- Local Imports --- #
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _parent_dir not in sys.path:
-    sys.path.append(_parent_dir)
+sys.path.append(_parent_dir)
 
 from rl_agent.callbacks import get_callback_list
 from rl_agent.data.data_loader import DataLoader
 from rl_agent.environment import TradingEnvironment
 from rl_agent.models import LSTMFeatureExtractor
+from rl_agent.policies import TcnPolicy, TcnSacPolicy
 from rl_agent.utils import (
     calculate_trading_metrics, check_resources,
     create_evaluation_plots, ensure_dir_exists,
     load_config, save_config, set_seeds, setup_logger,
     setup_sb3_logger
 )
-from rl_agent.policies import TcnPolicy
-from .policies import TcnSacPolicy
-
 
 # --- Global Settings --- #
 
@@ -102,12 +83,11 @@ class TuneReportCallback(BaseCallback):
         # Buffer to store final metrics from completed episodes during rollout
         self.rollout_metrics_buffer = deque(maxlen=rollout_buffer_size)
         # Store last known FPS
-        self.last_fps = 0.0 # Add this line
-        # Removing unused last_... variables for ratios/return
-        # self.last_sharpe_ratio = 0.0
-        # self.last_episode_return = 0.0
-        # self.last_calmar_ratio = 0.0
-        # self.last_sortino_ratio = 0.0
+        self.last_fps = 0.0
+        self.rollout_count = 0
+        self.log_freq = 10
+        self.start_time = time.time()
+        self.last_fps_log_time = 0
 
     def _on_init(self) -> None:
         """Ensure the logger is available."""
@@ -122,153 +102,135 @@ class TuneReportCallback(BaseCallback):
 
     def _normalize_and_combine_metrics(
         self, reward, explained_variance, sharpe_ratio, episode_return,
-        calmar_ratio, sortino_ratio, actor_loss, critic_loss, # Add losses
+        calmar_ratio, sortino_ratio, actor_loss, critic_loss,
         model_type: str = "ppo"
     ):
         """
         Create a normalized combined score weighting various performance metrics,
-        including bonuses for meeting specific ratio thresholds and penalties for high losses (for SAC).
-
-        Args:
-            reward: The mean reward value.
-            explained_variance: Explained variance (-1 to 1).
-            sharpe_ratio: Sharpe ratio for the episode.
-            episode_return: Episode return as a fraction.
-            calmar_ratio: Calmar ratio for the episode.
-            sortino_ratio: Sortino ratio for the episode.
-            actor_loss: Actor loss (typically > 0).
-            critic_loss: Critic loss (typically > 0).
-            model_type: The type of model being trained (e.g., 'ppo', 'sac').
-
-        Returns:
-            A combined normalized score between 0 and 1 (higher is better).
+        including bonuses for meeting specific ratio thresholds and penalties for
+        high losses (for SAC).
         """
-        # --- Target Thresholds and Bonuses ---
-        TARGET_SHARPE = 1.0
-        TARGET_SORTINO = 1.5  # Can adjust this target
-        TARGET_CALMAR = 0.5   # Can adjust this target
-        METRIC_BONUS = 0.15   # Bonus added for each threshold met
-        LOSS_SCALE_FACTOR = 0.1 # Scale factor for loss normalization
+        # Constants for metric targets and weights
+        TARGET_SHARPE = 1.0  # Can adjust this target
+        TARGET_SORTINO = 1.0  # Can adjust this target
+        TARGET_CALMAR = 0.5  # Can adjust this target
+        METRIC_BONUS = 0.15  # Bonus added for each threshold met
+        LOSS_SCALE_FACTOR = 0.1  # Scale factor for loss normalization
 
         # --- Handle missing or invalid inputs --- #
         if reward is None or not isinstance(reward, (int, float, np.number)):
             reward = 0.0
-        if (explained_variance is None
-                or not isinstance(explained_variance, (int, float, np.number))):
+        if (explained_variance is None or 
+                not isinstance(explained_variance, (int, float, np.number))):
             explained_variance = 0.0
-        if (sharpe_ratio is None
-                or not isinstance(sharpe_ratio, (int, float, np.number))
-                or not np.isfinite(sharpe_ratio)):
-            sharpe_ratio = 0.0 # Neutral Sharpe if invalid/infinite
-        if (episode_return is None
-                or not isinstance(episode_return, (int, float, np.number))
-                or not np.isfinite(episode_return)):
-            episode_return = 0.0 # Neutral return if invalid/infinite
-        if (calmar_ratio is None
-                or not isinstance(calmar_ratio, (int, float, np.number))
-                or not np.isfinite(calmar_ratio)):
-            calmar_ratio = 0.0 # Neutral Calmar if invalid/infinite
-        if (sortino_ratio is None
-                or not isinstance(sortino_ratio, (int, float, np.number))
-                or not np.isfinite(sortino_ratio)):
-            sortino_ratio = 0.0 # Neutral Sortino if invalid/infinite
+        if (sharpe_ratio is None or 
+                not isinstance(sharpe_ratio, (int, float, np.number)) or 
+                not np.isfinite(sharpe_ratio)):
+            sharpe_ratio = 0.0  # Neutral Sharpe if invalid/infinite
+        if (episode_return is None or 
+                not isinstance(episode_return, (int, float, np.number)) or 
+                not np.isfinite(episode_return)):
+            episode_return = 0.0  # Neutral return if invalid/infinite
+        if (calmar_ratio is None or 
+                not isinstance(calmar_ratio, (int, float, np.number)) or 
+                not np.isfinite(calmar_ratio)):
+            calmar_ratio = 0.0  # Neutral Calmar if invalid/infinite
+        if (sortino_ratio is None or 
+                not isinstance(sortino_ratio, (int, float, np.number)) or 
+                not np.isfinite(sortino_ratio)):
+            sortino_ratio = 0.0  # Neutral Sortino if invalid/infinite
         # Handle losses (default to infinity if missing, so normalized value is 0)
-        if (actor_loss is None
-                or not isinstance(actor_loss, (int, float, np.number))
-                or not np.isfinite(actor_loss)):
+        if (actor_loss is None or 
+                not isinstance(actor_loss, (int, float, np.number)) or 
+                not np.isfinite(actor_loss)):
             actor_loss = float('inf')
-        if (critic_loss is None
-                or not isinstance(critic_loss, (int, float, np.number))
-                or not np.isfinite(critic_loss)):
+        if (critic_loss is None or 
+                not isinstance(critic_loss, (int, float, np.number)) or 
+                not np.isfinite(critic_loss)):
             critic_loss = float('inf')
 
         # --- Normalization (aiming for values roughly in [-1, 1] or [0, 1]) --- #
         normalized_reward = np.tanh(reward / 1000.0)
         normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-        normalized_sharpe = np.tanh(sharpe_ratio / 5.0) # Divisor 5 assumes typical range -5 to 5
+        # Divisor 5 assumes typical range -5 to 5
+        normalized_sharpe = np.tanh(sharpe_ratio / 5.0)
         normalized_return = np.tanh(episode_return / 2.0)  # Scale by 2
-        normalized_calmar = np.tanh(calmar_ratio / 2.0) # Divisor 2 assumes typical range -2 to 2
-        normalized_sortino = np.tanh(sortino_ratio / 3.0) # Divisor 3 assumes typical range -3 to 3
+        # Divisor 2 assumes typical range -2 to 2
+        normalized_calmar = np.tanh(calmar_ratio / 2.0)
+        # Divisor 3 assumes typical range -3 to 3
+        normalized_sortino = np.tanh(sortino_ratio / 3.0)
         # Normalize losses using exp(-loss*scale), higher value (closer to 1) is better
         normalized_actor_loss = np.exp(-actor_loss * LOSS_SCALE_FACTOR)
         normalized_critic_loss = np.exp(-critic_loss * LOSS_SCALE_FACTOR)
 
-        # --- Weighted Combination (Base Score) --- #
         # Weights for metrics
         w_reward = 0.25
-        w_variance = 0.10 if model_type != "sac" else 0.0 # Zero weight for SAC variance
+        # Zero weight for SAC variance
+        w_variance = 0.10 if model_type != "sac" else 0.0
         w_sharpe = 0.15
-        w_sortino = 0.20 # Reduced weight slightly
-        w_calmar = 0.20 # Reduced weight slightly
-        w_return = 0.0 # Keep return weight 0
-        w_actor_loss = 0.05 if model_type == "sac" else 0.0 # Only for SAC
-        w_critic_loss = 0.05 if model_type == "sac" else 0.0 # Only for SAC
+        w_sortino = 0.20  # Reduced weight slightly
+        w_calmar = 0.20  # Reduced weight slightly
+        w_return = 0.0  # Keep return weight 0
+        w_actor_loss = 0.05 if model_type == "sac" else 0.0  # Only for SAC
+        w_critic_loss = 0.05 if model_type == "sac" else 0.0  # Only for SAC
 
         # Calculate weighted sum
         combined_score_raw = (
-            w_reward * normalized_reward
-            + w_variance * normalized_variance
-            + w_sharpe * normalized_sharpe
-            + w_return * normalized_return
-            + w_calmar * normalized_calmar    # Added Calmar
-            + w_sortino * normalized_sortino  # Added Sortino
-            + w_actor_loss * normalized_actor_loss   # Added Actor Loss (SAC only)
-            + w_critic_loss * normalized_critic_loss # Added Critic Loss (SAC only)
+            w_reward * normalized_reward +
+            w_variance * normalized_variance +
+            w_sharpe * normalized_sharpe +
+            w_return * normalized_return +
+            w_calmar * normalized_calmar +  # Added Calmar
+            w_sortino * normalized_sortino +  # Added Sortino
+            w_actor_loss * normalized_actor_loss +  # Added Actor Loss (SAC only)
+            w_critic_loss * normalized_critic_loss  # Added Critic Loss (SAC only)
         )
 
-        # --- Add Threshold Bonuses ---\
-        # (Existing bonus logic...)
+        # --- Add Threshold Bonuses --- #
         bonus_score = 0.0
         if sharpe_ratio > TARGET_SHARPE:
             bonus_score += METRIC_BONUS
             logging.getLogger("rl_agent").debug(
-                f"  Sharpe bonus added ({sharpe_ratio:.2f} > {TARGET_SHARPE})"
+                f"Sharpe bonus added ({sharpe_ratio:.2f} > {TARGET_SHARPE})"
             )
         if sortino_ratio > TARGET_SORTINO:
             bonus_score += METRIC_BONUS
             logging.getLogger("rl_agent").debug(
-                f"  Sortino bonus added ({sortino_ratio:.2f} > {TARGET_SORTINO})"
+                f"Sortino bonus added ({sortino_ratio:.2f} > {TARGET_SORTINO})"
             )
         if calmar_ratio > TARGET_CALMAR:
             bonus_score += METRIC_BONUS
             logging.getLogger("rl_agent").debug(
-                f"  Calmar bonus added ({calmar_ratio:.2f} > {TARGET_CALMAR})"
+                f"Calmar bonus added ({calmar_ratio:.2f} > {TARGET_CALMAR})"
             )
 
         combined_score_with_bonuses = combined_score_raw + bonus_score
 
-        # --- Shift to [0, 1] range --- #
-        # Define weights based on model type for min/max calculation
+        # Calculate min/max possible scores based on weights
         current_weights = [w_reward, w_sharpe, w_sortino, w_calmar]
         if model_type != "sac":
             current_weights.append(w_variance)
-        else: # For SAC, add loss weights
+        else:  # For SAC, add loss weights
             current_weights.extend([w_actor_loss, w_critic_loss])
 
         # Max score includes positive weights and bonuses
         max_possible_score = sum(w for w in current_weights if w > 0) + 3 * METRIC_BONUS
         # Min score includes negative contributions (normalized metrics can be -1)
-        min_possible_score = -sum(abs(w) for w in current_weights if w > 0 and w not in [w_actor_loss, w_critic_loss]) # Losses are >=0 normalized
+        min_possible_score = -sum(abs(w) for w in current_weights if w > 0 and 
+                                w not in [w_actor_loss, w_critic_loss])  # Losses are >=0 normalized
 
         score_range = max_possible_score - min_possible_score
 
-        # Scale to [0, 1] based on the estimated range
+        # Normalize to [0, 1] range
         if score_range > 0:
             combined_score_normalized = (
                 (combined_score_with_bonuses - min_possible_score) / score_range
             )
         else:
-            combined_score_normalized = 0.5 # Fallback
+            combined_score_normalized = 0.5  # Fallback
 
         # Ensure final score is strictly within [0, 1]
         combined_score_final = np.clip(combined_score_normalized, 0.0, 1.0)
-        logging.getLogger("rl_agent").debug(
-            f"  Combined Score ({model_type}): raw={combined_score_raw:.3f}, "
-            f"bonus={bonus_score:.3f}, "
-            f"total={combined_score_with_bonuses:.3f}, "
-            f"scaled={combined_score_final:.3f}"
-        )
-
         return combined_score_final
 
     def _on_step(self) -> bool:
@@ -276,10 +238,16 @@ class TuneReportCallback(BaseCallback):
         This method will be called by the model after each call to `env.step()`.
         This implementation reports metrics to Ray Tune when episodes complete.
         Now also reports FPS metrics periodically, regardless of episode completion.
-        
-        Returns:
-            bool: If the callback returns False, training is aborted early.
         """
+        # Determine model type from policy class name
+        policy_name = self.model.policy.__class__.__name__.lower()
+        if "sac" in policy_name:
+            model_type = "sac"
+        elif "ppo" in policy_name:
+            model_type = "ppo"
+        else:
+            model_type = "unknown"
+        
         self.step_count += 1
         self.num_timesteps = self.model.num_timesteps
         callback_logger = logging.getLogger("rl_agent.train")
@@ -353,7 +321,7 @@ class TuneReportCallback(BaseCallback):
                         env_metrics = self.model.env.get_episode_metrics()
             except (AttributeError, IndexError) as e:
                 callback_logger.warning(f"Failed to get env metrics: {e}")
-
+            
             # Get financial metrics from env_metrics
             financial_metrics = {}
             for key, value in env_metrics.items():
@@ -371,18 +339,17 @@ class TuneReportCallback(BaseCallback):
                 "length": ep_length,
                 "fps": self.last_fps,  # Always include FPS
             }
-
+            
             # Add explained variance if available
             exp_var = sb3_metrics.get("train/explained_variance")
             if exp_var is not None and np.isfinite(exp_var):
                 metrics_to_report["explained_variance"] = exp_var
                 self.last_explained_variance = exp_var
-
+            
             # Add model losses if available (based on model type)
-            model_type = self.model.config.get("model_type", "ppo")
             actor_loss = None
             critic_loss = None
-
+            
             if model_type == "sac":
                 actor_loss = sb3_metrics.get("train/actor_loss")
                 critic_loss = sb3_metrics.get("train/critic_loss")
@@ -401,10 +368,10 @@ class TuneReportCallback(BaseCallback):
                     metrics_to_report["value_loss"] = value_loss
                 if entropy is not None:
                     metrics_to_report["entropy"] = entropy
-
+            
             # Add financial metrics
             metrics_to_report.update(financial_metrics)
-
+            
             # Calculate combined score if we have the required metrics
             sharpe = financial_metrics.get("trading/sharpe_ratio")
             calmar = financial_metrics.get("trading/calmar_ratio")
@@ -427,7 +394,7 @@ class TuneReportCallback(BaseCallback):
                 )
                 metrics_to_report["combined_score"] = combined_score
                 self.last_combined_score = combined_score
-
+                
                 # Update best score if this is better
                 if combined_score > self.best_combined_score:
                     self.best_combined_score = combined_score
@@ -440,161 +407,253 @@ class TuneReportCallback(BaseCallback):
                 callback_logger.debug(
                     f"Skipping combined score calculation (missing: {missing_keys})"
                 )
-
+            
             # Log the parsed metrics
             if metrics_to_report:
                 log_level = logging.INFO if episode_num % 10 == 0 else logging.DEBUG
                 metrics_str = ", ".join(
                     [f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
-                     for k, v in metrics_to_report.items()])
+                                      for k, v in metrics_to_report.items()])
                 callback_logger.log(log_level,
                                     f"Episode {episode_num} completed: {metrics_str}")
-
+            
             # Report to Ray Tune
             if tune.is_session_enabled():
                 tune.report(**metrics_to_report)
-
+            
             # Increment episode counter
             self.episode_count += 1
-
+        
         # You would return False to stop training
         return True
 
     def _on_rollout_end(self) -> None:
         """
-        Report metrics at the end of each rollout.
-        This is called after the rollout worker has collected new samples
-        but before updating the policy using the samples.
+        Called at the end of each rollout. Calculates and logs metrics,
+        updates best metrics, and reports to Ray Tune if enabled.
         """
-        # Access the standard SB3 metrics first
-        sb3_metrics = {}
-        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
-            sb3_metrics = self.logger.name_to_value
+        callback_logger = logging.getLogger("rl_agent.callback")
+        if self.num_timesteps == 0: return  # Skip initial call
 
-        episode_rewards = np.array(self.model.ep_info_buffer)
-        if len(episode_rewards) > 0:
-            ep_rewards = episode_rewards[:, 0]  # Rewards are first column
-            ep_lengths = episode_rewards[:, 1]  # Lengths are second column
-            ep_mean_reward = np.mean(ep_rewards)
-            ep_mean_length = np.mean(ep_lengths)
-            mean_return = 0.0
-            if "trading/episode_return" in sb3_metrics:
-                try:
-                    mean_return = float(sb3_metrics["trading/episode_return"])
-                except (ValueError, TypeError):
-                    mean_return = 0.0
-        else:
-            # If no complete episodes yet
-            ep_mean_reward = 0.0
-            ep_mean_length = 0
-            mean_return = 0.0
+        # --- Calculate FPS --- #
+        now = time.time()
+        fps = int(self.num_timesteps / (now - self.start_time)) if (now - self.start_time) > 0 else 0
+        # Log FPS periodically
+        if self.num_timesteps - self.last_fps_log_time >= 10000: # Log every 10k timesteps
+            callback_logger.debug(f"Rollout end: Timesteps={self.num_timesteps}, FPS={fps}")
+            self.last_fps_log_time = self.num_timesteps
 
-        # Fetch losses from SB3 metrics (if available)
-        model_type = self.model.config.get("model_type", "ppo")
-        actor_loss = None
-        critic_loss = None
-
-        if model_type == "sac":
-            if "train/actor_loss" in sb3_metrics:
-                try:
-                    actor_loss = float(sb3_metrics["train/actor_loss"])
-                except (ValueError, TypeError):
-                    actor_loss = None
-            if "train/critic_loss" in sb3_metrics:
-                try:
-                    critic_loss = float(sb3_metrics["train/critic_loss"])
-                except (ValueError, TypeError):
-                    critic_loss = None
-        elif model_type == "ppo":
-            if "train/policy_loss" in sb3_metrics:
-                try:
-                    actor_loss = float(sb3_metrics["train/policy_loss"])
-                except (ValueError, TypeError):
-                    actor_loss = None
-            if "train/value_loss" in sb3_metrics:
-                try:
-                    critic_loss = float(sb3_metrics["train/value_loss"])
-                except (ValueError, TypeError):
-                    critic_loss = None
-
-        # Update and store best metrics for summary table
-        if len(episode_rewards) > 0 and ep_mean_reward > self.best_mean_reward:
-            self.best_mean_reward = ep_mean_reward
-            self.best_mean_return = mean_return
-            self.best_explained_variance = self.last_explained_variance
-
-        # For TensorBoard/detailed logs, use all metrics
-        logger = logging.getLogger("rl_agent.train")
+        # --- Get Episode Metrics --- #
+        # Use the internal buffer which resets automatically
+        episode_rewards = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
+        episode_lengths = [ep_info["l"] for ep_info in self.model.ep_info_buffer]
         completed_episodes = len(episode_rewards)
 
-        # Get FPS from SB3 metrics or use last known value
-        current_fps = self.last_fps  # Default to the last known FPS
-        if "time/fps" in sb3_metrics:
-            try:
-                fps_val = float(sb3_metrics["time/fps"])
-                if np.isfinite(fps_val):
-                    current_fps = fps_val
-                    self.last_fps = fps_val  # Update the last known FPS
-            except (ValueError, TypeError):
-                pass  # Keep using the last known FPS
+        ep_mean_reward = np.mean(episode_rewards) if len(episode_rewards) > 0 else 0.0
+        # ep_mean_length = np.mean(episode_lengths) if len(episode_lengths) > 0 else 0 # Unused
 
-        # --- Progress Summary Table --- #
-        items_to_log = [
-            # Always include progress metrics in table
-            ("Timesteps", self.num_timesteps),
-            ("Completed Episodes", completed_episodes),
-            ("FPS", f"{current_fps:.1f}"),  # Add FPS to prominent location in table
-            ("Mean Reward", f"{ep_mean_reward:.2f}"),
-        ]
+        # --- Fetch SB3 Logger Metrics --- #
+        sb3_metrics = {}
+        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
+            for key, value in self.logger.name_to_value.items():
+                try: sb3_metrics[key] = float(value) # Ensure float
+                except (ValueError, TypeError): pass
 
-        # Add financial/trading metrics if they exist
-        keys_to_log = ["trading/sharpe_ratio", "trading/sortino_ratio",
-                       "trading/calmar_ratio", "trading/total_trades",
-                       "trading/portfolio_value", "trading/max_drawdown"]
+        # --- Fetch Environment Specific Metrics (if available) --- #
+        # This part might need adjustment based on how VecEnv/Monitor reports metrics
+        env_metrics = {}
+        if hasattr(self.model, "env"):
+             # Check for common VecEnv structures
+             vec_env = None
+             if hasattr(self.model.env, "venv"): # e.g., VecMonitor
+                 vec_env = self.model.env.venv
+             elif hasattr(self.model.env, "envs"): # Direct VecEnv
+                 vec_env = self.model.env
 
-        # Add model-specific losses to log
+             if vec_env and hasattr(vec_env, "envs") and len(vec_env.envs) > 0:
+                 # Try getting metrics from the first underlying env
+                 first_env = vec_env.envs[0]
+                 if hasattr(first_env, "get_episode_metrics"):
+                     try:
+                         env_metrics = first_env.get_episode_metrics()
+                         callback_logger.debug(f"Got env metrics: {env_metrics.keys()}")
+                     except Exception as e:
+                         callback_logger.warning(f"Could not get env metrics: {e}")
+                 elif hasattr(first_env, "unwrapped") and hasattr(first_env.unwrapped, "get_episode_metrics"):
+                      try:
+                         env_metrics = first_env.unwrapped.get_episode_metrics()
+                         callback_logger.debug(f"Got unwrapped env metrics: {env_metrics.keys()}")
+                      except Exception as e:
+                         callback_logger.warning(f"Could not get unwrapped env metrics: {e}")
+
+        # Merge metrics (SB3 takes precedence)
+        metrics_to_report = {**env_metrics, **sb3_metrics} # Start with env, overwrite with SB3
+
+        # Add core rollout metrics
+        metrics_to_report["rollout/ep_rew_mean"] = ep_mean_reward
+        metrics_to_report["rollout/ep_len_mean"] = np.mean(episode_lengths) if len(episode_lengths) > 0 else 0
+        metrics_to_report["rollout/fps"] = fps
+        metrics_to_report["time/total_timesteps"] = self.num_timesteps
+
+        # --- Calculate Combined Score --- #
+        # Extract individual metrics needed for the combined score
+        sharpe = metrics_to_report.get("trading/sharpe_ratio")
+        calmar = metrics_to_report.get("trading/calmar_ratio")
+        sortino = metrics_to_report.get("trading/sortino_ratio")
+        ep_return = metrics_to_report.get("trading/portfolio_return")
+        # Use SB3 logger's explained variance if available
+        exp_var = sb3_metrics.get("train/explained_variance")
+
+        # Get model type from policy class name (Robust way)
+        model_type = "unknown"
+        if hasattr(self.model, 'policy'):
+            model_type = self.model.policy.__class__.__name__.lower()
+            if "tcn" in model_type and "sac" in model_type: model_type = "sac" # Simplify TcnSacPolicy to sac
+            elif "tcn" in model_type and "ppo" in model_type: model_type = "ppo" # Simplify TcnPolicy to ppo
+            elif "sac" in model_type: model_type = "sac"
+            elif "ppo" in model_type: model_type = "ppo"
+            elif "dqn" in model_type: model_type = "dqn"
+            elif "a2c" in model_type: model_type = "a2c"
+            # Add more mappings if needed
+
+        # Fetch losses based on inferred model type (for combined score)
+        actor_loss, critic_loss = None, None
         if model_type == "sac":
-            keys_to_log.extend(["train/actor_loss", "train/critic_loss"])
-        elif model_type == "ppo":
-            keys_to_log.extend(["train/policy_loss", "train/value_loss", "train/entropy_loss"])
+            # SAC might log policy_loss (actor) and critic_loss
+            actor_loss = sb3_metrics.get("train/actor_loss", sb3_metrics.get("train/policy_loss"))
+            critic_loss = sb3_metrics.get("train/critic_loss")
+        elif model_type == "ppo" or model_type == "a2c":
+            # PPO/A2C log policy_loss and value_loss
+            actor_loss = sb3_metrics.get("train/policy_loss")
+            critic_loss = sb3_metrics.get("train/value_loss")
+        # Note: DQN doesn't typically log separate actor/critic losses in the same way
 
-        # Add selected metrics to the table if they exist
-        for key in keys_to_log:
-            if key in sb3_metrics:
-                try:
-                    value = float(sb3_metrics[key])
-                    if np.isfinite(value):
-                        # Format financial ratios with higher precision
-                        if "ratio" in key:
-                            items_to_log.append((key.replace("trading/", ""), f"{value:.3f}"))
-                        # Format portfolio value as currency
-                        elif "portfolio" in key:
-                            items_to_log.append((key.replace("trading/", ""), f"${value:.2f}"))
-                        # Format drawdown as percentage
+        combined_score = None
+        if all(v is not None for v in [sharpe, calmar, sortino, ep_return]):
+             # Only include explained variance for non-SAC models in score
+            variance_for_score = exp_var if model_type != "sac" else None
+            try:
+                combined_score = self._normalize_and_combine_metrics(
+                    reward=ep_mean_reward, # Use mean reward from rollout
+                    explained_variance=variance_for_score,
+                    sharpe_ratio=sharpe,
+                    episode_return=ep_return,
+                    calmar_ratio=calmar,
+                    sortino_ratio=sortino,
+                    actor_loss=actor_loss, # Pass fetched losses
+                    critic_loss=critic_loss, # Pass fetched losses
+                    model_type=model_type # Pass inferred model type
+                )
+                self.last_combined_score = combined_score # Store for logging table
+                metrics_to_report["rollout/combined_score"] = combined_score
+                callback_logger.debug(f"Combined score calculated: {combined_score:.4f}")
+            except Exception as score_err:
+                 callback_logger.error(f"Error calculating combined score: {score_err}", exc_info=True)
+                 self.last_combined_score = 0.0 # Reset on error
+        else:
+            missing_keys = [k for k, v in {
+                "sharpe": sharpe, "calmar": calmar, "sortino": sortino, "return": ep_return
+            }.items() if v is None]
+            # Only log if any base metrics were actually found (avoid spamming if env metrics failed)
+            if any(v is not None for v in [sharpe, calmar, sortino, ep_return, exp_var]):
+                 callback_logger.debug(f"Skipping combined score (missing: {missing_keys})")
+            self.last_combined_score = 0.0 # Reset if cannot calculate
+
+        # --- Report to Ray Tune --- #
+        if RAY_AVAILABLE and tune.is_session_enabled():
+            try:
+                # Filter out non-serializable types if any (like np.inf)
+                reportable_metrics = {}
+                for k, v in metrics_to_report.items():
+                    if isinstance(v, (int, float, bool)) and np.isfinite(v):
+                        reportable_metrics[k] = v
+                    elif isinstance(v, np.number) and np.isfinite(v):
+                         reportable_metrics[k] = float(v) # Convert numpy numbers
+
+                # Ensure the combined score is always reported if calculated
+                if combined_score is not None and np.isfinite(combined_score):
+                     reportable_metrics["rollout/combined_score"] = float(combined_score)
+
+                if reportable_metrics:
+                    # Use modern session.report API
+                    ray.air.session.report(reportable_metrics)
+                    callback_logger.debug(f"Reported {len(reportable_metrics)} metrics to Ray Tune.")
+                else:
+                    callback_logger.warning("No finite metrics available to report to Ray Tune.")
+
+            except Exception as tune_err:
+                callback_logger.error(f"Failed to report metrics to Ray Tune: {tune_err}", exc_info=True)
+
+        # --- Update and Log Summary Table --- #
+        # Update best metrics
+        if completed_episodes > 0:
+            if ep_mean_reward > self.best_mean_reward:
+                self.best_mean_reward = ep_mean_reward
+            if combined_score is not None and combined_score > self.best_combined_score:
+                self.best_combined_score = combined_score
+
+        # Log summary table less frequently (e.g., every N rollouts or T timesteps)
+        # Using self.n_calls (which increments per step) isn't ideal here.
+        # Let's use a simple counter based on rollout ends.
+        self.rollout_count += 1
+        if self.rollout_count % self.log_freq == 0:
+            # Base items for the table
+            items_to_log = [
+                ("Rollout", self.rollout_count),
+                ("Timesteps", self.num_timesteps),
+                ("Completed Episodes", completed_episodes), # Total completed in buffer this rollout
+                ("FPS", f"{fps:.1f}"),
+                ("Mean Reward (Rollout)", f"{ep_mean_reward:.3f}"),
+                ("Best Mean Reward", f"{self.best_mean_reward:.3f}"),
+            ]
+
+            # Keys to potentially include from SB3/Env logs
+            keys_to_log = [
+                "trading/sharpe_ratio", "trading/calmar_ratio", "trading/sortino_ratio",
+                "trading/max_drawdown", "trading/portfolio_return",
+                "train/explained_variance", "time/time_elapsed",
+            ]
+            if model_type == "sac":
+                keys_to_log.extend(["train/actor_loss", "train/critic_loss", "train/ent_coef"])
+            elif model_type == "ppo":
+                keys_to_log.extend(["train/policy_loss", "train/value_loss", "train/entropy_loss"])
+        
+            # Add selected metrics to the table if they exist in the current report
+            for key in keys_to_log:
+                if key in metrics_to_report and metrics_to_report[key] is not None:
+                    value = metrics_to_report[key]
+                    try:
+                        # Format based on key substring
+                        short_key = key.split('/')[-1].replace("_", " ").title()
+                        if "ratio" in key or "score" in key or "variance" in key:
+                            items_to_log.append((short_key, f"{value:.3f}"))
+                        elif "portfolio" in key or "balance" in key:
+                            items_to_log.append((short_key, f"${value:.2f}"))
                         elif "drawdown" in key:
-                            items_to_log.append((key.replace("trading/", ""), f"{value*100:.2f}%"))
-                        # Format losses with more precision
-                        elif "loss" in key:
-                            items_to_log.append((key.replace("train/", ""), f"{value:.4f}"))
-                        # Format others normally
-                        else:
-                            items_to_log.append((key.replace("trading/", ""), f"{value:.2f}"))
-                except (ValueError, TypeError):
-                    pass
-        
-        # Add combined metric score if we have at least one episode
-        if len(episode_rewards) > 0:
-            items_to_log.append(("Combined Score", f"{self.last_combined_score:.3f}"))
-        
-        # Format and log the table
-        if len(items_to_log) > 0:
-            header = f"\n{'=' * 10} Training Progress Summary {'=' * 10}"
-            logger.info(header)
-            # Calculate column width for alignment
-            max_key_len = max(len(item[0]) for item in items_to_log)
-            for key, value in items_to_log:
-                logger.info(f"{key.ljust(max_key_len + 2)}: {value}")
-            logger.info('=' * len(header))
+                            items_to_log.append((short_key, f"{value*100:.2f}%"))
+                        elif "loss" in key or "ent_coef" in key:
+                            items_to_log.append((short_key, f"{value:.4f}"))
+                        elif "time_elapsed" in key:
+                            items_to_log.append((short_key, f"{value:.1f}s"))
+                        else: # Default formatting
+                            items_to_log.append((short_key, f"{value:.2f}"))
+                    except (ValueError, TypeError):
+                        pass # Skip if formatting fails
+
+            # Add combined score if calculated
+            if combined_score is not None:
+                items_to_log.append(("Combined Score", f"{combined_score:.4f}"))
+                items_to_log.append(("Best Combined Score", f"{self.best_combined_score:.4f}"))
+
+            # Format and log the table
+            if len(items_to_log) > 0:
+                # Calculate max key width for alignment
+                max_key_width = max(len(str(k)) for k, v in items_to_log)
+                log_str = f"\n--- Rollout Summary (Timesteps: {self.num_timesteps}) ---\n"
+                for key, val in items_to_log:
+                    log_str += f"| {str(key):<{max_key_width}} | {str(val):<12} |\n"
+                log_str += "------------------------------------------"
+                callback_logger.info(log_str)
 
 # --- Ray Tune Trainable Function --- #
 
@@ -997,7 +1056,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             sortino_ratio=0.0,
             actor_loss=None,
             critic_loss=None,
-            model_type=train_config.get("model_type", "ppo")
+            model_type=train_config.get("model_type", "ppo") # Get model type from config
         )
         final_summary_metrics["eval/combined_score"] = float(final_combined)
 
@@ -1354,7 +1413,7 @@ def create_env(
 def create_model(
     env: gym.Env,
     config: Dict[str, Any],
-) -> BaseRLModel:
+) -> BaseAlgorithm: # Changed type hint
     """
     Create a reinforcement learning model based on configuration.
 
@@ -1460,7 +1519,7 @@ def create_model(
             except ValueError: sac_ent_coef = 'auto'; logger.warning(f"Invalid SAC ent_coef. Defaulting auto.")
 
         model_kwargs.update({
-            "policy": SacMlpPolicy,
+            "policy": SacMlpPolicy, # Use the imported policy
             "learning_rate": lr_schedule, # Use schedule
             "buffer_size": config["buffer_size"],
             "batch_size": config["batch_size"],
@@ -1666,7 +1725,7 @@ def create_model(
 # --- Evaluation --- #
 
 def evaluate_model(
-    model: BaseRLModel,
+    model: BaseAlgorithm, # Changed type hint
     env: gym.Env, # VecEnv expected
     config: Dict[str, Any], # Unused but kept for consistency
     n_episodes: int = 1,
@@ -1887,7 +1946,7 @@ def evaluate(config: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]
 
 # --- Training --- #
 
-def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
+def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
     """
     Train a reinforcement learning agent based on config.
     """

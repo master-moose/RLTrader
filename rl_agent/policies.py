@@ -1,20 +1,14 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm # Import weight_norm
-import numpy as np
 import gymnasium as gym
 from typing import Dict, Optional, Any
 import logging
 
-from stable_baselines3.common.policies import ActorCriticPolicy, BasePolicy
+from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.sac.policies import SACPolicy  # Added import
-from stable_baselines3.common.torch_layers import (BaseFeaturesExtractor,
-                                                  NatureCNN, MlpExtractor)
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.type_aliases import Schedule
-from stable_baselines3.common.distributions import (DiagGaussianDistribution,
-                                                  CategoricalDistribution)
-from stable_baselines3.common.preprocessing import get_flattened_obs_dim
-from stable_baselines3.common.utils import get_device
 # from stable_baselines3.common.spaces import get_action_dim # <-- Incorrect import
 
 # Get module logger
