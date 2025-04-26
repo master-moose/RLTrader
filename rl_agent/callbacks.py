@@ -95,14 +95,15 @@ class ResourceMonitorCallback(BaseCallback):
             
             # Log to tensorboard if available
             if hasattr(self, 'logger') and self.logger:
-                self.logger.record('resources/memory_mb', 
+                # Use underscores instead of slashes for Ray Tune compatibility
+                self.logger.record('resources_memory_mb', 
                                    resource_info["memory_used"] * 1024)
-                self.logger.record('resources/cpu_percent', cpu_used)
+                self.logger.record('resources_cpu_percent', cpu_used)
                 if "gpu_memory_used" in resource_info:
-                    self.logger.record('resources/gpu_memory_gb', 
+                    self.logger.record('resources_gpu_memory_gb', 
                                        resource_info["gpu_memory_used"] / 1024)
                 if "gpu_utilization" in resource_info:
-                    self.logger.record('resources/gpu_utilization', 
+                    self.logger.record('resources_gpu_utilization', 
                                        resource_info["gpu_utilization"])
             
             # Calculate change since last check

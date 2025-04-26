@@ -266,8 +266,8 @@ class TuneReportCallback(BaseCallback):
             try:
                 fps = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
                 report_dict = {
-                    "time/steps": self.num_timesteps,
-                    "time/fps": fps
+                    "time_steps": self.num_timesteps,
+                    "time_fps": fps
                 }
                 # Try different Ray versions for reporting
                 if hasattr(ray, "air") and hasattr(ray.air, "session"):
@@ -299,17 +299,18 @@ class TuneReportCallback(BaseCallback):
                     try:
                         # Create report dictionary with episode metrics
                         report_dict = {
-                            f"{model_type}/train/episode_reward": episode_info.r,
-                            f"{model_type}/train/episode_length": episode_info.l,
-                            "time/episodes": self.episode_count,
-                            "time/total_timesteps": self.model.num_timesteps,
+                            f"{model_type}_train_episode_reward": episode_info.r,
+                            f"{model_type}_train_episode_length": episode_info.l,
+                            "time_episodes": self.episode_count,
+                            "time_total_timesteps": self.model.num_timesteps,
                         }
                         
-                        # Add custom metrics if available
+                        # Add custom metrics if available, flatten keys
                         if "metrics" in info:
                             for k, v in info["metrics"].items():
                                 if isinstance(v, (int, float)):
-                                    report_dict[f"metrics/{k}"] = v
+                                    flat_key = f"metrics_{k.replace('/', '_')}" # Replace slashes in key
+                                    report_dict[flat_key] = v
                         
                         # Try different Ray versions for reporting
                         if hasattr(ray, "air") and hasattr(ray.air, "session"):
@@ -466,14 +467,15 @@ class TuneReportCallback(BaseCallback):
                 # Filter non-finite values to avoid Ray Tune errors
                 reportable_metrics = {}
                 for k, v in metrics_to_report.items():
+                    flat_key = k.replace('/', '_') # Replace slashes with underscores
                     if isinstance(v, (int, float)) and np.isfinite(v):
-                        reportable_metrics[k] = v
+                        reportable_metrics[flat_key] = v
                     elif isinstance(v, np.number) and np.isfinite(v):
-                        reportable_metrics[k] = float(v) # Convert numpy numbers
+                        reportable_metrics[flat_key] = float(v) # Convert numpy numbers
 
-                # Ensure the combined score is always reported if calculated
+                # Ensure the combined score is always reported if calculated (key already flat)
                 if combined_score is not None and np.isfinite(combined_score):
-                    reportable_metrics["rollout/combined_score"] = float(combined_score)
+                    reportable_metrics["rollout_combined_score"] = float(combined_score)
 
                 if reportable_metrics:
                     # Use our check_ray_session helper function
