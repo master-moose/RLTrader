@@ -453,7 +453,8 @@ class TuneReportCallback(BaseCallback):
             if sb3_metrics:
                 metrics_str = ", ".join([f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in sb3_metrics.items()])
                 # Use DEBUG level for potentially verbose SB3 internal logs
-                callback_logger.debug(f"[SB3 Metrics @ Rollout End] {metrics_str}")
+                # Changed logging level to INFO to make SB3 metrics visible
+                callback_logger.info(f"[SB3 Metrics @ Rollout End] {metrics_str}")
                 
         # --- Update last known variance (if available from SB3 logs) ---
         if "train/explained_variance" in sb3_metrics:
