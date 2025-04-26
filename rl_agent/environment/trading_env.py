@@ -37,7 +37,6 @@ class TradingEnvironment(Env):
         features: List[str] = None,
         sequence_length: int = 60,
         initial_balance: float = 10000.0,
-        transaction_fee: float = 0.00075,
         reward_scaling: float = 1.0,
         window_size: int = 20,
         max_position: float = 1.0,  # Max position size as fraction of *balance*
@@ -53,7 +52,6 @@ class TradingEnvironment(Env):
         portfolio_change_weight: float = 1.0,
         drawdown_penalty_weight: float = 0.5,
         sharpe_reward_weight: float = 0.5,
-        fee_penalty_weight: float = 2.0,
         benchmark_reward_weight: float = 0.5,
         # consistency_penalty_weight: float = 0.2, # Removed for now
         idle_penalty_weight: float = 0.1,
@@ -72,7 +70,6 @@ class TradingEnvironment(Env):
             features: List of column names to use as features
             sequence_length: Length of price history sequences
             initial_balance: Initial cash balance
-            transaction_fee: Fee per transaction as a fraction
             reward_scaling: Scaling factor for the reward
             window_size: Size of the trading time window for rendering
             max_position: Maximum position size as a fraction of balance
@@ -91,7 +88,6 @@ class TradingEnvironment(Env):
             portfolio_change_weight: Weight for portfolio value change reward
             drawdown_penalty_weight: Weight for drawdown penalty
             sharpe_reward_weight: Weight for Sharpe ratio reward
-            fee_penalty_weight: Weight for transaction fee penalty
             benchmark_reward_weight: Weight for benchmark comparison reward
             # consistency_penalty_weight: Weight for trade consistency penalty
             idle_penalty_weight: Weight for idle position penalty (when flat)
@@ -109,7 +105,6 @@ class TradingEnvironment(Env):
         self.data = data.copy()
         self.features = features or ["close", "volume", "open", "high", "low"]
         self.initial_balance = initial_balance
-        self.transaction_fee = transaction_fee
         self.reward_scaling = reward_scaling
         self.window_size = window_size
         self.max_position = max_position
@@ -127,7 +122,6 @@ class TradingEnvironment(Env):
         self.portfolio_change_weight = portfolio_change_weight
         self.drawdown_penalty_weight = drawdown_penalty_weight
         self.sharpe_reward_weight = sharpe_reward_weight
-        self.fee_penalty_weight = fee_penalty_weight
         self.benchmark_reward_weight = benchmark_reward_weight
         # self.consistency_penalty_weight = consistency_penalty_weight
         self.idle_penalty_weight = idle_penalty_weight
@@ -262,14 +256,12 @@ class TradingEnvironment(Env):
         # self.consecutive_sells = 0 # Removed
         self.last_action = 0.0 # Initialize last action as float for continuous
         self.exploration_bonus_value = self.exploration_start
-        self.total_fees_paid = 0.0
         self.failed_trades = 0  # General counter for failed actions
         # Add cumulative reward component trackers
         self.cumulative_rewards = {
             'portfolio_change': 0.0,
             'drawdown_penalty': 0.0,
             'sharpe_reward': 0.0,
-            'fee_penalty': 0.0,
             'benchmark_reward': 0.0,
             # 'consistency_penalty': 0.0, # Removed
             'idle_penalty': 0.0,
@@ -318,11 +310,10 @@ class TradingEnvironment(Env):
         # --- End Price Validation ---
 
         # Take action using the validated price
-        interpreted_action_code, fee_paid_this_step = self._take_action(
+        interpreted_action_code = self._take_action(
             action[0], validated_price
         )
         self.last_action = interpreted_action_code
-        self.total_fees_paid += fee_paid_this_step
 
         # Update portfolio value using the validated price
         self._update_portfolio_value(validated_price)
@@ -331,7 +322,6 @@ class TradingEnvironment(Env):
         reward = self._calculate_reward(
             interpreted_action_code,
             prev_portfolio_value,
-            fee_paid_this_step,
             prev_position_type,
             validated_price # Pass validated price
         )
@@ -450,9 +440,7 @@ class TradingEnvironment(Env):
             current_price: The validated current price for calculations.
 
         Returns:
-            Tuple: (interpreted_action_code, fee_paid)
-                   interpreted_action_code: 0=Hold, 1=Buy/Cover, -1=Sell/Short
-                   fee_paid: Total transaction fee for this step
+            Integer action code: 0=Hold, 1=Buy/Cover, -1=Sell/Short, 3=Close
         """
         # --- Action Interpretation Thresholds ---
         # Define thresholds to map continuous action to discrete decisions
@@ -462,14 +450,15 @@ class TradingEnvironment(Env):
         # --- End Thresholds ---
 
         interpreted_action_code = 0  # Default: Hold
-        fee_paid = 0.0
+        # fee_paid = 0.0 # REMOVED
         trade_successful = True # Flag to track if intended action succeeded
 
         # Price is passed in and assumed validated by step method
         if not np.isfinite(current_price) or current_price <= ZERO_THRESHOLD:
              logger.error(f"Step {self.current_step}: Invalid price ({current_price:.2f}) received in _take_action. Cannot execute trade.") # noqa E501
              self.failed_trades += 1
-             return 0, 0.0 # Return Hold, no fee
+             # return 0, 0.0 # REMOVED fee return
+             return 0 # Return Hold
 
         # --- Decision Logic ---
         if action < sell_short_threshold:
@@ -482,25 +471,27 @@ class TradingEnvironment(Env):
                     shares_to_short = short_value_target / current_price
                     if shares_to_short > ZERO_THRESHOLD:
                         proceeds = shares_to_short * current_price
-                        fee = proceeds * self.transaction_fee
-                        self.balance += (proceeds - fee) # Add net proceeds
+                        # fee = proceeds * self.transaction_fee # REMOVED
+                        # self.balance += (proceeds - fee) # REMOVED fee
+                        self.balance += proceeds # Add net proceeds
                         self.shares_held = shares_to_short
                         self.position_type = -1
                         self.entry_price = current_price
                         self.total_trades += 1
                         self.total_shorts += 1
                         trade_successful = True
-                        fee_paid = fee
+                        # fee_paid = fee # REMOVED
                         trade_info = {
                             'step': self.current_step, 'type': 'short_entry',
                             'price': current_price, 'shares': self.shares_held,
-                            'proceeds': proceeds, 'fee': fee, 'balance_after': self.balance # noqa E501
+                            'proceeds': proceeds, # 'fee': fee, # REMOVED
+                            'balance_after': self.balance
                         }
                         self.trades.append(trade_info)
                         logger.debug(
-                            f"Step {self.current_step}: [Act: {action:.2f} < -{sell_short_threshold}] -> Entered SHORT "
+                            f"Step {self.current_step}: [Act: {action:.2f} < {sell_short_threshold}] -> Entered SHORT "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
-                            f"(Proceeds: {proceeds:.2f}, Fee: {fee:.2f}) -> "
+                            f"(Proceeds: {proceeds:.2f}) -> " # Removed Fee log
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
@@ -520,15 +511,18 @@ class TradingEnvironment(Env):
                 invest_amount = self.balance * self.max_position
                 if (invest_amount > ZERO_THRESHOLD and
                         current_price > ZERO_THRESHOLD):
-                    fee_multiplier = 1 + self.transaction_fee
+                    # fee_multiplier = 1 + self.transaction_fee # REMOVED
                     # Shares based on cost including fee
-                    shares_num = invest_amount
-                    shares_den = (current_price * fee_multiplier)
-                    shares_to_buy = shares_num / shares_den
+                    # shares_num = invest_amount # REMOVED
+                    # shares_den = (current_price * fee_multiplier) # REMOVED
+                    # shares_to_buy = shares_num / shares_den # REMOVED
+                    shares_to_buy = invest_amount / current_price # Simplified
+
                     if shares_to_buy > ZERO_THRESHOLD:
                         cost = shares_to_buy * current_price
-                        fee = cost * self.transaction_fee
-                        self.balance -= (cost + fee)
+                        # fee = cost * self.transaction_fee # REMOVED
+                        # self.balance -= (cost + fee) # REMOVED fee
+                        self.balance -= cost
                         self.balance = max(0, self.balance) # Ensure >= 0
                         self.shares_held = shares_to_buy
                         self.position_type = 1
@@ -536,17 +530,18 @@ class TradingEnvironment(Env):
                         self.total_trades += 1
                         self.total_longs += 1
                         trade_successful = True
-                        fee_paid = fee
+                        # fee_paid = fee # REMOVED
                         trade_info = {
                             'step': self.current_step, 'type': 'long_entry',
                             'price': current_price, 'shares': self.shares_held,
-                            'cost': cost, 'fee': fee, 'balance_after': self.balance
+                            'cost': cost, # 'fee': fee, # REMOVED
+                            'balance_after': self.balance
                         }
                         self.trades.append(trade_info)
                         logger.debug(
                             f"Step {self.current_step}: [Act: {action:.2f} > {buy_cover_threshold}] -> Entered LONG "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
-                            f"(Cost: {cost:.2f}, Fee: {fee:.2f}) -> "
+                            f"(Cost: {cost:.2f}) -> " # Removed Fee log
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
@@ -562,8 +557,8 @@ class TradingEnvironment(Env):
         elif abs(action) < 0.1:  # Zone around zero: Try Close or Hold Flat
             if self.position_type != 0:  # If in position, try Close
                 interpreted_action_code = 3 # Intention: Close
-                # Unpack the returned tuple
-                profit_loss, fee_on_close = self._close_position(current_price)
+                # Unpack the returned value (only PnL now)
+                profit_loss = self._close_position(current_price)
                 if profit_loss is not None:  # Check if close was successful using PnL
                     trade_successful = True
                     self.total_closes += 1
@@ -587,9 +582,10 @@ class TradingEnvironment(Env):
                         'Short' if self.position_type == -1 else 'Flat')
             logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in dead zone] -> Holding {pos_desc} Position.") # noqa E501
 
-        # Fee calculation is handled within the specific trade logic (buy/sell/close)
+        # Fee calculation is handled within the specific trade logic (buy/sell/close) # REMOVED
 
-        return interpreted_action_code, fee_paid
+        # return interpreted_action_code, fee_paid # REMOVED fee return
+        return interpreted_action_code
 
     def _close_position(self, closing_price: float):
         """
@@ -599,38 +595,42 @@ class TradingEnvironment(Env):
             closing_price: The validated price at which to close.
 
         Returns:
-            Tuple: (profit_loss, fee) or (None, 0) if close fails.
+            Profit/Loss of the closed trade, or None if close fails.
         """
         profit_loss = None
-        fee = 0.0
+        # fee = 0.0 # REMOVED
 
         # --- Price Validation ---
         # Price passed should already be validated by the 'step' method
         # But we add a check here as a failsafe
         if not np.isfinite(closing_price) or closing_price <= ZERO_THRESHOLD:
              logger.error(f"Step {self.current_step}: Invalid closing price ({closing_price:.2f}) passed to _close_position. Cannot close.") # noqa E501
-             return None, 0.0
+             # return None, 0.0 # REMOVED fee return
+             return None
         # --- End Validation ---
 
         if self.position_type == 1:  # Closing Long
             trade_type = 'long_exit'
             sell_value = self.shares_held * closing_price
-            fee = sell_value * self.transaction_fee
-            self.balance += sell_value - fee
-            profit_loss = (closing_price - self.entry_price) * self.shares_held - fee
+            # fee = sell_value * self.transaction_fee # REMOVED
+            # self.balance += sell_value - fee # REMOVED fee deduction
+            self.balance += sell_value
+            # profit_loss = (closing_price - self.entry_price) * self.shares_held - fee # REMOVED fee deduction
+            profit_loss = (closing_price - self.entry_price) * self.shares_held
             logger.debug(
                 f"Closing Long: {self.shares_held:.6f} sold @ "
-                f"{closing_price:.2f}, Entry: {self.entry_price:.2f}, "
-                f"Fee: {fee:.2f}"
+                f"{closing_price:.2f}, Entry: {self.entry_price:.2f}"
+                # f", Fee: {fee:.2f}" # REMOVED
             )
 
         elif self.position_type == -1:  # Closing a Short position (Buy)
             trade_type = 'short_exit'
             buy_cost = self.shares_held * closing_price
-            fee_multiplier = 1 + self.transaction_fee
+            # fee_multiplier = 1 + self.transaction_fee # REMOVED
             # Cost including fee to check if affordable
-            total_cost = buy_cost * fee_multiplier
-            fee = buy_cost * self.transaction_fee
+            # total_cost = buy_cost * fee_multiplier # REMOVED fee multiplier
+            total_cost = buy_cost # Now cost is just buy_cost
+            # fee = buy_cost * self.transaction_fee # REMOVED
 
             # Check if we have enough balance to buy back the short position
             # Allow for float errors
@@ -641,33 +641,36 @@ class TradingEnvironment(Env):
                     f"{total_cost:.2f}. Cannot close."
                 )
                 # Should this trigger termination?
-                return None, 0.0  # Indicate failure
+                # return None, 0.0 # REMOVED fee return
+                return None  # Indicate failure
 
-            self.balance -= total_cost  # Deduct cost + fee
-            # PnL for short = (Entry Price - Closing Price) * Shares - Fee
-            profit_loss = (self.entry_price - closing_price) * self.shares_held - fee
+            # self.balance -= total_cost  # Deduct cost + fee # REMOVED fee
+            self.balance -= buy_cost # Deduct only buy cost
+            # PnL for short = (Entry Price - Closing Price) * Shares - Fee # REMOVED fee
+            profit_loss = (self.entry_price - closing_price) * self.shares_held
             logger.debug(
                 f"Closing Short: {self.shares_held:.6f} bought @ "
-                f"{closing_price:.2f}, Entry: {self.entry_price:.2f}, "
-                f"Fee: {fee:.2f}"
+                f"{closing_price:.2f}, Entry: {self.entry_price:.2f}"
+                # f", Fee: {fee:.2f}" # REMOVED
             )
 
         # Record the trade
         trade_info = {
             'step': self.current_step, 'type': trade_type,
             'price': closing_price, 'shares': self.shares_held,
-            'entry_price': self.entry_price, 'pnl': profit_loss, 'fee': fee,
+            'entry_price': self.entry_price, 'pnl': profit_loss, # 'fee': fee, # REMOVED
             'balance_after': self.balance
         }
         self.trades.append(trade_info)
 
         # Update state
-        self.total_fees_paid += fee
+        # self.total_fees_paid += fee # REMOVED
         self.shares_held = 0.0
         self.position_type = 0
         self.entry_price = None
 
-        return profit_loss, fee
+        # return profit_loss, fee # REMOVED fee return
+        return profit_loss
 
     def _update_portfolio_value(self, current_price: float):
         """
@@ -732,14 +735,13 @@ class TradingEnvironment(Env):
             self.balance = 0.0 # Reset balance too if it became non-finite
 
     def _calculate_reward(self, interpreted_action_code, prev_portfolio_value,
-                          fee_paid_this_step, prev_position_type, current_price):
+                          prev_position_type, current_price):
         """
         Calculate the reward for the current step.
 
         Args:
             interpreted_action_code: 0=Hold, 1=Buy/Cover, -1=Sell/Short
             prev_portfolio_value: Portfolio value from the previous step
-            fee_paid_this_step: Transaction fee paid in this step
             prev_position_type: Position type from the previous step
             current_price: Validated current price
 
@@ -780,16 +782,6 @@ class TradingEnvironment(Env):
             if std_return > ZERO_THRESHOLD:
                 sharpe_ratio_rolling = mean_return / std_return
         reward_components['sharpe_reward'] = sharpe_ratio_rolling * self.sharpe_reward_weight
-
-        # --- Reward Component 4: Fee Penalty ---
-        fee_penalty_normalized = 0.0
-        if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(fee_paid_this_step):
-            fee_penalty_normalized = fee_paid_this_step / prev_portfolio_value
-        elif not np.isfinite(prev_portfolio_value) or not np.isfinite(fee_paid_this_step):
-            logger.warning(f"Step {self.current_step}: Non-finite prev portfolio value or fee detected in fee penalty calc (prev={prev_portfolio_value}, fee={fee_paid_this_step}). Setting penalty to -1.") # noqa E501
-            fee_penalty_normalized = 1.0 # Max penalty if values non-finite
-        # Assign the component AFTER calculating the normalized value
-        reward_components['fee_penalty'] = -abs(fee_penalty_normalized) * self.fee_penalty_weight
 
         # --- Reward Component 5: Benchmark Comparison ---
         benchmark_reward = 0.0
@@ -1066,7 +1058,6 @@ class TradingEnvironment(Env):
             'total_closes': self.total_closes,
             'total_holds': self.total_holds,      # Holds while flat
             'max_drawdown': self.max_drawdown,
-            'total_fees_paid': self.total_fees_paid,
             'failed_trades': self.failed_trades,  # Failed action attempts
             'last_action': self.last_action,
             'consecutive_holds': self.consecutive_holds,  # Holds while flat
