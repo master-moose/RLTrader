@@ -23,11 +23,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 sys.path.append(PROJECT_ROOT)
 
-# Import the trainable function from train.py *after* path modification
+# --- Project Imports (Imported after path modification) --- #
 from rl_agent.train import train_rl_agent_tune
-from rl_agent.utils import ensure_dir_exists  # Removed unused load_config
+from rl_agent.utils import ensure_dir_exists
 
-# Set environment variables for Ray
+# --- Ray Tune Imports (Moved after path modification) --- #
+# Set environment variables for Ray *before* importing Ray
 os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
 
 # Ray Tune imports with improved error handling
@@ -48,7 +49,8 @@ try:
         print(f"ERROR importing Ray Tune modules: {e}")
         traceback.print_exc()
         print(
-            "\nRay was imported but Ray Tune components could not be ")
+            "\nRay was imported but Ray Tune components could not be "
+        )
         print("imported. This might be due to a version mismatch or an ")
         print("incomplete Ray installation.")
 except ImportError as e:
@@ -67,19 +69,15 @@ DEFAULT_CONFIG = {
     # Model type
     "model_type": "recurrentppo",
 
-    # Features - most important for all timeframes, using _scaled columns
+    # Features - selected important features
     # Split into multiple lines for readability
     "features": (
         "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,"  # 1m
         "sma_7_scaled,sma_25_scaled,sma_99_scaled,ema_9_scaled,"
         "ema_21_scaled,rsi_14_scaled,"
-        "open_scaled_4h,high_scaled_4h,low_scaled_4h,close_scaled_4h,"  # 4h
-        "volume_scaled_4h,sma_7_scaled_4h,sma_25_scaled_4h," 
-        "sma_99_scaled_4h,ema_9_scaled_4h,ema_21_scaled_4h," 
+        "volume_scaled_4h,ema_9_scaled_4h,ema_21_scaled_4h,"  # 4h
         "rsi_14_scaled_4h,"
-        "open_scaled_1d,high_scaled_1d,low_scaled_1d,close_scaled_1d,"  # 1d
-        "volume_scaled_1d,sma_7_scaled_1d,sma_25_scaled_1d," 
-        "sma_99_scaled_1d,ema_9_scaled_1d,ema_21_scaled_1d," 
+        "volume_scaled_1d,ema_9_scaled_1d,ema_21_scaled_1d,"  # 1d
         "rsi_14_scaled_1d"
     ),
 
@@ -219,10 +217,10 @@ def parse_args():
 def define_search_space(model_type: str) -> Dict[str, Any]:
     """Define the hyperparameter search space for Ray Tune based on model type."""
 
-    # --- Common Parameters ---
+    # --- Common Parameters --- #
     search_space = {
         # Learning rates
-        "learning_rate": tune.loguniform(1e-5, 2e-4),  # Narrowed range for stability
+        "learning_rate": tune.loguniform(1e-5, 2e-4),  # Narrowed range
         # Discount factors
         "gamma": tune.choice([0.95, 0.99, 0.995]),
         # Reward Component Weights (Focus on stability and profit)
@@ -259,13 +257,13 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
         print(f"Defining SAC-specific search space for {model_type}")
         sac_params = {
             # Replay buffer size
-            "buffer_size": tune.choice([int(5e4), int(1e5), int(5e5)]), # Smaller
+            "buffer_size": tune.choice([int(5e4), int(1e5), int(5e5)]),  # Smaller
             # Batch size for SAC updates
             "batch_size": tune.choice([256, 512, 1024]),  # Typical SAC batches
             # SAC target smoothing coefficient
             "tau": tune.loguniform(0.001, 0.02),
             # Timesteps before learning starts
-            "learning_starts": tune.choice([1000, 5000, 10000]), # Adjusted
+            "learning_starts": tune.choice([1000, 5000, 10000]),  # Adjusted
             # SAC entropy coefficient (numeric only for tuning)
             # Note: 'auto' often default, consider fixing or tuning separately
             "ent_coef": tune.loguniform(1e-4, 0.1),
@@ -297,8 +295,8 @@ def short_trial_dirname_creator(trial):
         parts = [f"trial_{shortuuid.uuid(name=trial.trial_id)[:6]}"]
         # Add key hyperparameter values for easier identification
         lr = trial.config.get("learning_rate")
-        ns = trial.config.get("n_steps") # PPO specific
-        bs = trial.config.get("batch_size") # SAC specific
+        ns = trial.config.get("n_steps")  # PPO specific
+        bs = trial.config.get("batch_size")  # SAC specific
         if lr:
             parts.append(f"lr{lr:.1e}")
         if ns:
@@ -408,13 +406,13 @@ def run_tune_experiment(args):
     # Configure search algorithm
     if args.search_algo == "optuna":
         search_alg = OptunaSearch(
-            metric="combined_score", # Renamed metric
+            metric="combined_score",  # Renamed metric
             mode="max"
         )
         print("Using Optuna search algorithm optimizing for combined score")
     elif args.search_algo == "hyperopt":
         search_alg = HyperOptSearch(
-            metric="combined_score", # Renamed metric
+            metric="combined_score",  # Renamed metric
             mode="max"
         )
         print("Using HyperOpt search algorithm optimizing for combined score")
@@ -459,7 +457,8 @@ def run_tune_experiment(args):
     # Limit the number shown if it gets too wide
     if len(parameter_columns_config) > 6:
         limited_params = parameter_columns_config[:6]
-        print(f"Warning: Limiting displayed hyperparams to first 6: {limited_params}")
+        print(f"Warning: Limiting displayed hyperparams to first 6: "
+              f"{limited_params}")
         parameter_columns_config = limited_params
 
     reporter = CLIReporter(
