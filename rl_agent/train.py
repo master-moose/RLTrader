@@ -477,48 +477,31 @@ class TuneReportCallback(BaseCallback):
         # --- Report to Ray Tune --- #
         if check_ray_session():
             try:
-                # Filter metrics_to_report to include only finite numeric values
-                # Keep original keys (including slashes)
-                final_report_dict = {}
-                for k, v in metrics_to_report.items():
-                    if isinstance(v, (int, float)) and np.isfinite(v):
-                        final_report_dict[k] = v
-                    elif isinstance(v, np.number) and np.isfinite(v):
-                        final_report_dict[k] = float(v) # Convert numpy numbers
+                # Simplify: Report the main metrics dict directly.
+                # We already ensured combined_score is present and float.
+                # Filter out non-finite values right before reporting.
+                report_dict = {k: v for k, v in metrics_to_report.items() 
+                               if isinstance(v, (int, float, np.number)) and np.isfinite(v)}
 
-                # Ensure the combined score is always reported if calculated
-                # It should already be in metrics_to_report with key 'combined_score'
-                # If it wasn't numeric/finite, it would have been filtered above.
-                # We can add an explicit check/addition just to be safe:
-                # if "combined_score" in metrics_to_report and \
-                #    isinstance(metrics_to_report["combined_score"], (int, float, np.number)) and \
-                #    np.isfinite(metrics_to_report["combined_score"]):
-                #       final_report_dict["combined_score"] = float(metrics_to_report["combined_score"])
+                # Ensure combined_score is always present, even if it was somehow non-finite before filtering
+                if 'combined_score' not in report_dict:
+                    report_dict['combined_score'] = float(self.last_combined_score)
+                else: # Ensure it's float
+                    report_dict['combined_score'] = float(report_dict['combined_score'])
+                
+                callback_logger.debug(f"Keys being reported to Ray Tune: {list(report_dict.keys())}")
 
-                # <<< ALWAYS ADD COMBINED SCORE >>>
-                # Ensure the key Optuna needs is always present, using the last known valid score or 0.0
-                # Rename key here too if necessary (depends on filtering logic - keeping separate for now)
-                # Let's ensure the renamed key is in the filtered dict
-                if "combined_score" in metrics_to_report:
-                     final_report_dict["combined_score"] = float(metrics_to_report["combined_score"])
-                else: # Add if somehow missing
-                     final_report_dict["combined_score"] = float(self.last_combined_score)
-
-                # <<< ADD DEBUG LOGGING >>>
-                callback_logger.debug(f"Keys being reported to Ray Tune: {list(final_report_dict.keys())}") # Ensure 'combined_score' appears
-                # <<< END DEBUG LOGGING >>>
-
-                if final_report_dict:
-                    # Force use of older tune.report API
-                    if hasattr(tune, "report"):
-                        tune.report(**final_report_dict) # Use **kwargs expansion
-                        callback_logger.debug(f"Reported {len(final_report_dict)} metrics via tune.report.")
-                    # Fallback to AIR if tune.report not found (unlikely but safe)
-                    elif hasattr(ray, "air") and hasattr(ray.air, "session"):
-                         ray.air.session.report(final_report_dict)
-                         callback_logger.debug(f"Reported {len(final_report_dict)} metrics via ray.air.session.report (fallback).")
+                if report_dict:
+                    # Use modern ray.air.session.report API
+                    if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                         ray.air.session.report(report_dict)
+                         callback_logger.debug(f"Reported {len(report_dict)} metrics via ray.air.session.report.")
+                    # Fallback to tune.report (passing dict, not kwargs)
+                    elif hasattr(tune, "report"):
+                         tune.report(report_dict)
+                         callback_logger.debug(f"Reported {len(report_dict)} metrics via tune.report (fallback).")
                     else:
-                        callback_logger.warning("Could not find tune.report or ray.air.session.report to report metrics.")
+                        callback_logger.warning("Could not find ray.air.session.report or tune.report to report metrics.")
                 else:
                     callback_logger.warning("No finite metrics available to report to Ray Tune.")
 
@@ -927,16 +910,16 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
                 # Use the updated check_ray_session function
                 if check_ray_session():
-                    # Force use of older tune.report API
-                    if hasattr(tune, "report"):
-                        tune.report(**failure_metrics) # Use **kwargs expansion
-                        trial_logger.info("Reported failure metrics via tune.report")
-                    # Fallback to AIR if tune.report not found
-                    elif hasattr(ray, "air") and hasattr(ray.air, "session"):
+                    # Use modern ray.air.session.report API
+                    if hasattr(ray, "air") and hasattr(ray.air, "session"):
                         ray.air.session.report(failure_metrics)
-                        trial_logger.info("Reported failure metrics via ray.air.session.report (fallback)")
+                        trial_logger.info("Reported failure metrics via ray.air.session.report")
+                    # Fallback to tune.report (passing dict)
+                    elif hasattr(tune, "report"):
+                        tune.report(failure_metrics)
+                        trial_logger.info("Reported failure metrics via tune.report (fallback)")
                     else:
-                        trial_logger.warning("Could not find tune.report or ray.air.session.report to report failure metrics.")
+                        trial_logger.warning("Could not find ray.air.session.report or tune.report to report failure metrics.")
             except Exception as report_err:
                 trial_logger.error(f"Failed to report failure: {report_err}")
         raise
@@ -1038,16 +1021,16 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
     if session_active:
         try: 
-            # Force use of older tune.report API
-            if hasattr(tune, "report"):
-                tune.report(**final_summary_metrics) # Use **kwargs expansion
-                trial_logger.info("Reported final metrics via tune.report")
-            # Fallback to AIR if tune.report not found
-            elif hasattr(ray, "air") and hasattr(ray.air, "session"):
+            # Use modern ray.air.session.report API
+            if hasattr(ray, "air") and hasattr(ray.air, "session"):
                 ray.air.session.report(final_summary_metrics) 
-                trial_logger.info("Reported final metrics via Ray AIR session (fallback)")
+                trial_logger.info("Reported final metrics via Ray AIR session")
+            # Fallback to tune.report (passing dict)
+            elif hasattr(tune, "report"):
+                tune.report(final_summary_metrics)
+                trial_logger.info("Reported final metrics via tune.report (fallback)")
             else:
-                 trial_logger.warning("Could not find tune.report or ray.air.session.report to report final metrics.")
+                 trial_logger.warning("Could not find ray.air.session.report or tune.report to report final metrics.")
 
         except Exception as re: 
             trial_logger.warning(f"Failed final Ray AIR session report: {re}")
@@ -2183,9 +2166,17 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
         
     if session_active:
         try: 
-            # Use ray.air.session.report for newer versions
-            ray.air.session.report(final_metrics) 
-            train_logger.info("Reported final metrics via Ray AIR session")
+            # Use modern ray.air.session.report API
+            if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                ray.air.session.report(final_metrics) 
+                train_logger.info("Reported final metrics via Ray AIR session")
+            # Fallback to tune.report (passing dict)
+            elif hasattr(tune, "report"):
+                tune.report(final_summary_metrics)
+                train_logger.info("Reported final metrics via tune.report (fallback)")
+            else:
+                 train_logger.warning("Could not find ray.air.session.report or tune.report to report final metrics.")
+
         except Exception as re: 
             train_logger.warning(f"Failed final Ray AIR session report: {re}")
 
