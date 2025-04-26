@@ -685,18 +685,18 @@ class CheckpointCallback(BaseCallback):
 def get_callback_list(
     eval_env: Optional[Union[gym.Env, VecEnv]] = None,
     log_dir: str = "./logs",
-    eval_freq: int = 10000,
+    eval_freq: int = 500000,
     n_eval_episodes: int = 5,
-    save_freq: int = 10000,
+    save_freq: int = 500000,
     keep_checkpoints: int = 3,
     resource_check_freq: int = 1000,
     metrics_log_freq: int = 1000,
     early_stopping_patience: int = 0,
     custom_callbacks: Optional[List[BaseCallback]] = None,
-    checkpoint_save_path: str = "./checkpoints", # Added argument
-    model_name: str = "rl_model", # Added argument
-    target_transaction_fee: float = 0.001, # Added argument for curriculum
-    curriculum_duration_fraction: float = 0.5 # Added argument for curriculum
+    checkpoint_save_path: str = "./checkpoints",
+    model_name: str = "rl_model",
+    target_transaction_fee: float = 0.001,
+    curriculum_duration_fraction: float = 0.5
 ) -> CallbackList:
     """
     Constructs the list of callbacks for training.
@@ -743,12 +743,12 @@ def get_callback_list(
         verbose=1)
     )
     
-    # Trading Metrics Logging Callback
-    callbacks.append(TradingMetricsCallback(
-        log_freq=max(1, metrics_log_freq), 
-        verbose=1, 
-        log_dir=os.path.join(log_dir, "trading_metrics"))
-    )
+    # Trading Metrics Logging Callback (COMMENTED OUT FOR DEBUGGING)
+    # callbacks.append(TradingMetricsCallback(
+    #     log_freq=max(1, metrics_log_freq), 
+    #     verbose=1, 
+    #     log_dir=os.path.join(log_dir, "trading_metrics"))
+    # )
     
     # --- Evaluation Callback ---
     if eval_env is not None:
