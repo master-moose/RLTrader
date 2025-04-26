@@ -508,6 +508,11 @@ class TcnSacPolicy(SACPolicy):
         if not isinstance(action_space, gym.spaces.Box):
              raise ValueError(f"TcnSacPolicy requires a Box action space for SAC, got {type(action_space)}")
 
+        # Store TCN parameters needed for make_features_extractor
+        self.features_per_timestep = features_per_timestep
+        self.sequence_length = sequence_length
+        self.tcn_params = tcn_params if tcn_params is not None else {}
+
         # 2. Prepare kwargs for SACPolicy's __init__
         policy_kwargs = kwargs.copy()
 
