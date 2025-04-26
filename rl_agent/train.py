@@ -342,11 +342,11 @@ class TuneReportCallback(BaseCallback):
 
                     # Use modern ray.air.session.report API
                     if RAY_AVAILABLE and hasattr(ray, "air") and hasattr(ray.air, "session"):
-                            ray.air.session.report(report_dict)
+                         ray.air.session.report(report_dict)
                             callback_logger.debug(f"Reported {len(report_dict)} metrics via ray.air.session.report (minimal).")
                     # Fallback to tune.report (passing dict, not kwargs)
                     elif RAY_AVAILABLE and hasattr(tune, "report"):
-                            tune.report(report_dict)
+                         tune.report(report_dict)
                             callback_logger.debug(f"Reported {len(report_dict)} metrics via tune.report (fallback, minimal).")
                     else:
                         callback_logger.warning("Could not find ray.air.session.report or tune.report to report minimal metrics.")
@@ -1400,9 +1400,10 @@ def create_model(
         lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
 
         # Extract TCN-specific parameters from config
+        # Hardcoding simpler TCN parameters for SAC testing
         tcn_params = {
-            "num_filters": config.get("tcn_num_filters", 64),
-            "num_layers": config.get("tcn_num_layers", 4),
+            "num_filters": 32, # Reduced from config.get("tcn_num_filters", 64)
+            "num_layers": 3,   # Reduced from config.get("tcn_num_layers", 4)
             "kernel_size": config.get("tcn_kernel_size", 3),
             "dropout": config.get("tcn_dropout", 0.2)
         }
