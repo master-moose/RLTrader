@@ -746,7 +746,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         model.learn(
             total_timesteps=train_config["total_timesteps"],
             callback=callbacks,
-            log_interval=100,  # Log SB3 stats every 100 updates
+            log_interval=250,  # Log SB3 stats every 250 updates
             reset_num_timesteps=not train_config.get("continue_training", False)
         )
         training_time = time.time() - training_start_time
@@ -1926,7 +1926,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         model.learn(
             total_timesteps=config["total_timesteps"],
             callback=callbacks,
-            log_interval=1,
+            log_interval=250,  # Log SB3 stats every 250 updates
             reset_num_timesteps=not config.get("load_model")
         )
     except Exception as e:
