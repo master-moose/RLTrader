@@ -759,9 +759,7 @@ class TradingEnvironment(Env):
         if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(self.portfolio_value):
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
         elif not np.isfinite(prev_portfolio_value) or not np.isfinite(self.portfolio_value):
-            logger.warning(f"Step {self.current_step}: Non-finite portfolio value detected in reward calc (prev={prev_portfolio_value}, curr={self.portfolio_value}). Setting change to -1.\") # noqa E501
-            portfolio_change_pct = -1.0 # Penalize heavily if values are non-finite
-        reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight
+        logger.warning(f"Step {self.current_step}: Non-finite portfolio value detected in reward calc (prev={prev_portfolio_value}, curr={self.portfolio_value}). Setting change to -1.") # noqa E501        reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight
 
         # --- Reward Component 2: Drawdown Penalty ---
         current_drawdown = 0.0
