@@ -1937,13 +1937,13 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
     ensure_dir_exists(log_path)
     # Determine console level based on verbose setting
     console_log_level = logging.DEBUG if config.get("verbose", 1) >= 2 else logging.INFO
-    # Always set file level to DEBUG
-    file_log_level = logging.DEBUG 
+    # Always set file level to DEBUG --> Change to INFO
+    file_log_level = logging.INFO # Changed from DEBUG 
     setup_logger(log_dir=log_path, log_level=file_log_level, console_level=console_log_level)
     train_logger = logging.getLogger("rl_agent")
     
-    # <<< Ensure environment logger inherits the DEBUG level >>>
-    logging.getLogger("rl_agent.environment").setLevel(logging.DEBUG)
+    # <<< Ensure environment logger inherits the DEBUG level --> Change to INFO >>>
+    logging.getLogger("rl_agent.environment").setLevel(logging.INFO) # Changed from DEBUG
     # <<< End change >>>
 
     sb3_log_path = os.path.join(log_path, "sb3_logs")
