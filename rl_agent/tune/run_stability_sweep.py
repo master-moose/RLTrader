@@ -137,22 +137,25 @@ def parse_args():
     # Add base_config (None) for compatibility
     setattr(arg_obj, "base_config", None)
     
-    # Override any loaded config with CLI arguments
-    if hasattr(arg_obj, 'base_config') and arg_obj.base_config:
-        with open(arg_obj.base_config, 'r') as f:
-            loaded_config = json.load(f)
-        loaded_config.update(vars(args))
-        for key, value in loaded_config.items():
-            setattr(arg_obj, key, value)
+    # Load base config (if provided) or use defaults
+    if args.base_config and os.path.exists(args.base_config):
+        with open(args.base_config, 'r') as f:
+            base_config = json.load(f)
+        print(f"Loaded base config from {args.base_config}")
+    else:
+        base_config = DEFAULT_CONFIG.copy()
+        print("Using default base configuration")
     
-    base_config = arg_obj.base_config
+    # Override base config with CLI arguments
+    cli_args_dict = {k: v for k, v in vars(args).items() if v is not None}
+    base_config.update(cli_args_dict)
     print(f"Config after CLI overrides: {base_config}") # Debug print
-
-    # --- Explicitly override max_steps if provided via CLI --- #
+    
+    # --- Explicitly override max_steps if provided via CLI ---
     if args.max_steps is not None:
         base_config["max_steps"] = args.max_steps
         print(f"INFO: Overriding max_steps to {args.max_steps} from CLI argument.")
-    # --- End max_steps override --- #
+    # --- End max_steps override ---
 
     # Add command line args to config (ensure paths are absolute)
     if base_config.get("data_path"):
