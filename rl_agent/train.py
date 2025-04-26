@@ -329,7 +329,7 @@ class TuneReportCallback(BaseCallback):
                     # --- Fetch latest SAC losses (if applicable) ---
                     # actor_loss = float('inf') # Default to infinite loss if not found
                     # critic_loss = float('inf')
-                    # model_type = self.model.config.get("model_type", "ppo") # Get model type
+                    model_type = self.model.config.get("model_type", "ppo") # Get model type
                     # if model_type == "sac" and self.logger is not None and hasattr(self.logger, 'name_to_value'):
                     #     actor_loss_val = self.logger.name_to_value.get("train/actor_loss")
                     #     critic_loss_val = self.logger.name_to_value.get("train/critic_loss")
