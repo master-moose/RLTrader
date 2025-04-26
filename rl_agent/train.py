@@ -268,7 +268,10 @@ class TuneReportCallback(BaseCallback):
                 fps_val = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
                 report_dict = {
                     "timesteps_total": self.num_timesteps, # Use standard Ray Tune key
-                    "fps": fps_val # Use standard key
+                    "fps": fps_val, # Use standard key
+                    # --- Add combined_score reporting here ---
+                    "combined_score": float(self.last_combined_score) 
+                    # ------------------------------------------
                 }
                 # Try different Ray versions for reporting
                 if hasattr(ray, "air") and hasattr(ray.air, "session"):
