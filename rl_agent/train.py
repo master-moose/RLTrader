@@ -721,10 +721,10 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
             os.makedirs(os.path.dirname(monitor_log), exist_ok=True)
             env = Monitor(env, filename=monitor_log)
 
-            # Explicit seeding after Monitor wrap (optional but can be helpful)
-            if instance_seed is not None:
-                env.seed(instance_seed)
-                env.action_space.seed(instance_seed)
+            # Explicit seeding after Monitor wrap is removed as create_env handles seeding
+            # if instance_seed is not None:
+            #     env.seed(instance_seed)
+            #     env.action_space.seed(instance_seed)
 
             return env
         return _init
