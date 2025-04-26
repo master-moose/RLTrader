@@ -680,14 +680,14 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     # --- Environment Creation --- #
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
  
-    def make_single_env(rank, is_eval_flag): # Added is_eval_flag parameter
+    def make_single_env(rank, is_eval_flag, base_seed): # Added base_seed parameter
         def _init():
             env_config = train_config.copy()
-            # Access base_seed from the outer scope
+            # Use passed base_seed
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
             # Use the passed is_eval_flag
-            env = create_env(config=env_config, is_eval_flag=is_eval_flag) 
+            env = create_env(config=env_config, is_eval_flag=is_eval_flag)
             log_suffix = f'monitor_eval_{rank}.csv' if is_eval_flag else f'monitor_{rank}.csv'
             monitor_log_path = os.path.join(log_dir, log_suffix)
             ensure_dir_exists(os.path.dirname(monitor_log_path))
@@ -697,7 +697,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
-        env_id=make_single_env(rank=0, is_eval_flag=False), # Removed base_seed, kept is_eval_flag
+        env_id=make_single_env(rank=0, is_eval_flag=False, base_seed=seed), # Pass base_seed
         n_envs=num_envs,
         seed=None, # Seed is handled within make_single_env._init
         vec_env_cls=vec_env_cls,
@@ -734,7 +734,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         eval_env_seed_val = seed + num_envs if seed is not None else None
         # Step 1: Create the base DummyVecEnv for evaluation
         raw_eval_env = make_vec_env(
-            env_id=make_single_env(rank=0, is_eval_flag=True), # Removed base_seed, kept is_eval_flag
+            env_id=make_single_env(rank=0, is_eval_flag=True, base_seed=eval_env_seed_val), # Pass base_seed
             n_envs=1, seed=None, vec_env_cls=DummyVecEnv, env_kwargs=None
         )
 
