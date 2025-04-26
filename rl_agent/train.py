@@ -518,6 +518,8 @@ class TuneReportCallback(BaseCallback):
             keys_to_log = [
                 "trading/sharpe_ratio", "trading/calmar_ratio", "trading/sortino_ratio",
                 "trading/max_drawdown", "trading/portfolio_return",
+                "trading/win_rate", "trading/total_trades", # Added win_rate, total_trades
+                "trading/final_balance", # Added final_balance (check if key exists)
                 "train/explained_variance", "time/time_elapsed",
             ]
             if model_type == "sac":
@@ -534,14 +536,20 @@ class TuneReportCallback(BaseCallback):
                         short_key = key.split('/')[-1].replace("_", " ").title()
                         if "ratio" in key or "score" in key or "variance" in key:
                             items_to_log.append((short_key, f"{value:.3f}"))
-                        elif "portfolio" in key or "balance" in key:
-                            items_to_log.append((short_key, f"${value:.2f}"))
-                        elif "drawdown" in key:
-                            items_to_log.append((short_key, f"{value*100:.2f}%"))
+                        elif "portfolio" in key or "balance" in key or "return" in key:
+                            # Format balance/return as currency or percentage
+                            if "return" in key:
+                                items_to_log.append((short_key, f"{value*100:.2f}%")) # Show return as %
+                            else:
+                                items_to_log.append((short_key, f"${value:.2f}")) # Show balance as $
+                        elif "drawdown" in key or "win_rate" in key:
+                            items_to_log.append((short_key, f"{value*100:.2f}%")) # Show drawdown/win_rate as %
                         elif "loss" in key or "ent_coef" in key:
                             items_to_log.append((short_key, f"{value:.4f}"))
                         elif "time_elapsed" in key:
                             items_to_log.append((short_key, f"{value:.1f}s"))
+                        elif "total_trades" in key:
+                             items_to_log.append((short_key, f"{int(value)}")) # Show trades as integer
                         else: # Default formatting
                             items_to_log.append((short_key, f"{value:.2f}"))
                     except (ValueError, TypeError):
@@ -2057,33 +2065,55 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
     # --- Final Metrics --- #
     final_metrics = {"training_time": training_time, "total_timesteps": getattr(model, 'num_timesteps', 0),
                      "model_type": config["model_type"], "eval/mean_reward": 0.0,
-                     "eval/explained_variance": 0.0, "eval/combined_score": 0.5}
+                     "eval/explained_variance": 0.0, "eval/combined_score": 0.5} # Default eval score
     if hasattr(model, 'logger') and hasattr(model.logger, 'name_to_value'):
         log_vals = model.logger.name_to_value
         final_reward = log_vals.get("rollout/ep_rew_mean", 0.0)
-        final_variance = log_vals.get("train/explained_variance", 0.0)
+        final_variance = log_vals.get("train/explained_variance", None) # Allow None
+        final_sharpe = log_vals.get("trading/sharpe_ratio", None)
+        final_calmar = log_vals.get("trading/calmar_ratio", None)
+        final_sortino = log_vals.get("trading/sortino_ratio", None)
+        final_return = log_vals.get("trading/portfolio_return", None)
+        final_max_dd = log_vals.get("trading/max_drawdown", None)
+        final_win_rate = log_vals.get("trading/win_rate", None)
+
+        # Extract final losses if available
+        final_actor_loss, final_critic_loss = None, None
+        model_type = config.get("model_type", "ppo")
+        if model_type == "sac":
+            final_actor_loss = log_vals.get("train/actor_loss", log_vals.get("train/policy_loss"))
+            final_critic_loss = log_vals.get("train/critic_loss")
+        elif model_type in ["ppo", "a2c", "tcn_ppo", "recurrentppo"]: # Include recurrentppo
+            final_actor_loss = log_vals.get("train/policy_loss")
+            final_critic_loss = log_vals.get("train/value_loss")
+
         try: final_reward = float(final_reward)
-        except (ValueError, TypeError): final_reward = 0.0
-        try: final_variance = float(final_variance)
-        except (ValueError, TypeError): final_variance = 0.0
+        except (ValueError, TypeError, AttributeError): final_reward = 0.0
+        try: final_variance = float(final_variance) if final_variance is not None else None
+        except (ValueError, TypeError, AttributeError): final_variance = None
+        # Convert losses safely
+        try: final_actor_loss = float(final_actor_loss) if final_actor_loss is not None else None
+        except (ValueError, TypeError, AttributeError): final_actor_loss = None
+        try: final_critic_loss = float(final_critic_loss) if final_critic_loss is not None else None
+        except (ValueError, TypeError, AttributeError): final_critic_loss = None
 
         final_metrics["eval/mean_reward"] = final_reward
-        # Conditionally add explained variance if not SAC
-        if config.get("model_type", "ppo") != "sac":
+        if model_type != "sac" and final_variance is not None:
             final_metrics["eval/explained_variance"] = final_variance
 
-        temp_cb = TuneReportCallback()
-        # Pass model_type here
-        final_combined = temp_cb._normalize_and_combine_metrics(
-            reward=final_reward, 
-            explained_variance=final_variance, 
-            sharpe_ratio=0.0, 
-            episode_return=0.0, 
-            calmar_ratio=0.0, 
-            sortino_ratio=0.0,
-            actor_loss=None,
-            critic_loss=None,
-            model_type=config.get("model_type", "ppo") # Get model type from config
+        # Call the standalone helper function
+        final_combined = normalize_and_combine_metrics(
+            reward=final_reward,
+            explained_variance=final_variance,
+            sharpe_ratio=final_sharpe,
+            episode_return=final_return,
+            calmar_ratio=final_calmar,
+            sortino_ratio=final_sortino,
+            actor_loss=final_actor_loss,
+            critic_loss=final_critic_loss,
+            model_type=model_type,
+            max_drawdown=final_max_dd,
+            win_rate=final_win_rate
         )
         final_metrics["eval/combined_score"] = float(final_combined)
 
@@ -2101,6 +2131,133 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
             train_logger.warning(f"Failed final Ray AIR session report: {re}")
 
     return model, final_metrics
+
+
+# --- Helper function for metric combination --- #
+
+def normalize_and_combine_metrics(
+    reward: float,
+    explained_variance: Optional[float],
+    sharpe_ratio: Optional[float],
+    episode_return: Optional[float],
+    calmar_ratio: Optional[float],
+    sortino_ratio: Optional[float],
+    actor_loss: Optional[float],
+    critic_loss: Optional[float],
+    model_type: str,
+    max_drawdown: Optional[float] = None, # Added optional max_drawdown
+    win_rate: Optional[float] = None, # Added optional win_rate
+) -> float:
+    """
+    Normalizes and combines various performance metrics into a single score.
+
+    Args:
+        reward: Mean episode reward.
+        explained_variance: Explained variance (if applicable).
+        sharpe_ratio: Sharpe ratio.
+        episode_return: Total portfolio return for the episode.
+        calmar_ratio: Calmar ratio.
+        sortino_ratio: Sortino ratio.
+        actor_loss: Actor/Policy loss (if applicable).
+        critic_loss: Critic/Value loss (if applicable).
+        model_type: The type of model ('ppo', 'sac', etc.) used for normalization logic.
+        max_drawdown: Maximum drawdown (optional).
+        win_rate: Win rate (optional).
+
+    Returns:
+        A combined score between 0 and 1.
+    """
+    callback_logger = logging.getLogger("rl_agent.metrics") # Use a specific logger
+    weights = {
+        "reward": 0.25,
+        "sharpe": 0.20,
+        "calmar": 0.10,
+        "sortino": 0.10,
+        "return": 0.10,
+        "variance": 0.05, # Lower weight unless crucial
+        "losses": 0.10, # Penalize high losses
+        "drawdown": 0.05, # Added drawdown penalty
+        "win_rate": 0.05, # Added win rate bonus
+    }
+    # Ensure weights sum to 1 (adjust if needed)
+    total_weight = sum(weights.values())
+    if not np.isclose(total_weight, 1.0):
+         callback_logger.warning(f"Metric weights sum to {total_weight:.2f}, not 1.0. Normalizing.")
+         weights = {k: v / total_weight for k, v in weights.items()}
+
+
+    score = 0.0
+
+    # --- Normalize and Add Base Reward ---
+    # Assuming reward is roughly centered around 0, scaling up slightly
+    norm_reward = np.tanh(reward * 0.5) # tanh maps to [-1, 1], centered at 0
+    score += weights["reward"] * (norm_reward + 1) / 2 # Scale to [0, 1]
+
+    # --- Normalize and Add Financial Ratios ---
+    if sharpe_ratio is not None and np.isfinite(sharpe_ratio):
+        # Sharpe: tanh maps roughly [-3, 3] to [-1, 1]. Good sharpe > 1.
+        norm_sharpe = np.tanh(sharpe_ratio / 2.0)
+        score += weights["sharpe"] * (norm_sharpe + 1) / 2 # Scale to [0, 1]
+
+    if calmar_ratio is not None and np.isfinite(calmar_ratio):
+         # Calmar: Higher is better. Tanh maps [0, 5] roughly to [0, 1]
+         norm_calmar = np.tanh(calmar_ratio / 2.5)
+         score += weights["calmar"] * max(0, norm_calmar) # Ensure non-negative contribution
+
+    if sortino_ratio is not None and np.isfinite(sortino_ratio):
+        # Sortino: Higher is better. Tanh maps [0, 6] roughly to [0, 1]
+        norm_sortino = np.tanh(sortino_ratio / 3.0)
+        score += weights["sortino"] * max(0, norm_sortino)
+
+    if episode_return is not None and np.isfinite(episode_return):
+         # Return: Map percentage return (e.g., -0.5 to 0.5) to [0, 1]
+         norm_return = np.tanh(episode_return * 2.0) # Scale input sensitivity
+         score += weights["return"] * (norm_return + 1) / 2
+
+    # --- Normalize and Add Explained Variance (Non-SAC) ---
+    # Only add variance score if it's relevant and provided
+    if model_type != "sac" and explained_variance is not None and np.isfinite(explained_variance):
+        # Explained variance is typically [0, 1] or slightly negative
+        norm_variance = max(0, explained_variance) # Clip negative values
+        score += weights["variance"] * norm_variance
+
+    # --- Penalize High Losses ---
+    # We want *low* losses. Higher loss = lower score contribution.
+    norm_actor_loss, norm_critic_loss = 0.0, 0.0
+    if actor_loss is not None and np.isfinite(actor_loss):
+        # Assuming losses are non-negative. Lower is better. Use exp(-loss) -> range (0, 1]
+        norm_actor_loss = np.exp(-abs(actor_loss) * 0.5) # Adjust multiplier for sensitivity
+    if critic_loss is not None and np.isfinite(critic_loss):
+        norm_critic_loss = np.exp(-abs(critic_loss) * 0.5)
+
+    # Average the loss scores (if both exist, otherwise use the one available)
+    if actor_loss is not None and critic_loss is not None:
+        loss_score = (norm_actor_loss + norm_critic_loss) / 2
+    elif actor_loss is not None:
+        loss_score = norm_actor_loss
+    elif critic_loss is not None:
+        loss_score = norm_critic_loss
+    else:
+        loss_score = 0.5 # Neutral score if no losses provided
+
+    score += weights["losses"] * loss_score
+
+    # --- Add Max Drawdown Penalty ---
+    if max_drawdown is not None and np.isfinite(max_drawdown):
+         # Max drawdown is [0, 1], lower is better. Score = (1 - drawdown)
+         drawdown_score = 1.0 - max(0, min(1, max_drawdown)) # Ensure it's in [0, 1]
+         score += weights["drawdown"] * drawdown_score
+
+    # --- Add Win Rate Bonus ---
+    if win_rate is not None and np.isfinite(win_rate):
+         # Win rate is [0, 1], higher is better.
+         win_rate_score = max(0, min(1, win_rate)) # Ensure it's in [0, 1]
+         score += weights["win_rate"] * win_rate_score
+
+    # --- Final Clipping ---
+    final_score = np.clip(score, 0.0, 1.0)
+    # callback_logger.debug(f"Combined Score: {final_score:.4f} (R:{norm_reward:.2f}, S:{norm_sharpe:.2f}, P/V:{loss_score:.2f})")
+    return float(final_score)
 
 
 # --- Main Execution --- #
