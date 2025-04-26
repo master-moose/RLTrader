@@ -453,8 +453,8 @@ class TradingEnvironment(Env):
                 self._close_position(
                     self.data['close'].iloc[self.current_step - 1]
                 )
-                # Update PV one last time after closing
-                self._update_portfolio_value()
+                # Update PV one last time after closing, using last valid price
+                self._update_portfolio_value(self.last_valid_price)
 
             # Get info *after* potential auto-close
             final_info = self._get_info(self.last_valid_price)

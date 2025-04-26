@@ -230,7 +230,14 @@ if __name__ == "__main__":
     print("\n=====================================================")
     print("STABILITY SWEEP RESULTS")
     print("=====================================================")
-    print(f"Best Mean Reward: {best_trial.last_result.get('eval/mean_reward', 'N/A'):.4f}")
+
+    # Safely print best reward
+    best_reward = best_trial.last_result.get('eval/mean_reward', 'N/A')
+    if isinstance(best_reward, (int, float)):
+        print(f"Best Mean Reward: {best_reward:.4f}")
+    else:
+        print(f"Best Mean Reward: {best_reward} (not formatted)")
+
     print(f"Best Explained Variance: {best_trial.last_result.get('eval/explained_variance', 'N/A')}")
     print(f"Best Combined Score: {best_trial.last_result.get('eval/combined_score', 'N/A')}")
     
