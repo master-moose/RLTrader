@@ -9,6 +9,7 @@ for the RecurrentPPO reinforcement learning agent on financial time
 series data.
 """
 
+# --- Standard Library Imports --- #
 import argparse
 import json
 import os
@@ -132,8 +133,10 @@ DEFAULT_CONFIG = {
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description="Run Ray Tune hyperparameter optimization for RecurrentPPO " 
-                    "trading agent",
+        description=(
+            "Run Ray Tune hyperparameter optimization for RecurrentPPO "
+            "trading agent"
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -421,11 +424,12 @@ def run_tune_experiment(args):
 
     # Configure scheduler for early stopping
     scheduler = ASHAScheduler(
-        time_attr="timesteps_total", # Changed from timesteps
+        time_attr="timesteps_total",    # Changed from timesteps
         metric="eval/combined_score",  # Primary metric for stopping
         mode="max",
         max_t=args.timesteps_per_trial,
-        grace_period=max(100000, int(args.timesteps_per_trial * 0.1)), # Min 10% or 100k
+        # Min 10% or 100k grace period
+        grace_period=max(100000, int(args.timesteps_per_trial * 0.1)),
         reduction_factor=2
     )
     print(f"Using ASHA scheduler with {args.timesteps_per_trial} max timesteps")
@@ -435,7 +439,7 @@ def run_tune_experiment(args):
     metric_columns = {
         "training_iteration": "iter",
         "timesteps_total": "steps",
-        "episode_reward_mean": "ep_rew_mean", # From Monitor
+        "episode_reward_mean": "ep_rew_mean",  # From Monitor
         "episode_len_mean": "ep_len_mean",    # From Monitor
         "eval/mean_reward": "eval_reward",    # From Callback
         "eval/combined_score": "score",       # From Callback
@@ -443,8 +447,8 @@ def run_tune_experiment(args):
         "eval/sharpe_ratio": "sharpe",
         "eval/sortino_ratio": "sortino",
         "eval/calmar_ratio": "calmar",
-        "eval/mean_return_pct": "return_%",  # In percent
-        "eval/max_drawdown_pct": "drawdown_%", # In percent
+        "eval/mean_return_pct": "return_%",    # In percent
+        "eval/max_drawdown_pct": "drawdown_%",  # In percent
         # "eval/total_trades": "trades",
         "time_total_s": "time(s)",
         "time/fps": "fps"  # Ensure FPS is prominently displayed
@@ -454,9 +458,9 @@ def run_tune_experiment(args):
     parameter_columns_config = list(search_space.keys())
     # Limit the number shown if it gets too wide
     if len(parameter_columns_config) > 6:
-        print(f"Warning: Limiting displayed hyperparams to first 6:")
-        print(f"  {parameter_columns_config[:6]}")
-        parameter_columns_config = parameter_columns_config[:6]
+        limited_params = parameter_columns_config[:6]
+        print(f"Warning: Limiting displayed hyperparams to first 6: {limited_params}")
+        parameter_columns_config = limited_params
 
     reporter = CLIReporter(
         metric_columns=metric_columns,

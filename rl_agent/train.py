@@ -273,7 +273,7 @@ class TuneReportCallback(BaseCallback):
                 if hasattr(ray, "air") and hasattr(ray.air, "session"):
                     ray.air.session.report(report_dict)
                 elif hasattr(tune, "report"):
-                    tune.report(**report_dict)
+                    tune.report(report_dict)
             except Exception as tune_err:
                 callback_logger.error(f"Failed to report periodic metrics: {tune_err}")
                 

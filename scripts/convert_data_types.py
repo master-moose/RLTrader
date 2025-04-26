@@ -12,16 +12,30 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def convert_h5_to_float32(input_path: str, output_path: str, keys: list[str]):
+# Map string names to NumPy dtype objects
+SUPPORTED_DTYPES = {
+    'float32': np.float32,
+    'float16': np.float16,
+    # Add others here if needed, e.g., 'float64': np.float64
+}
+
+def convert_h5_to_float32(input_path: str, output_path: str, keys: list[str], target_dtype_str: str):
     """
-    Reads DataFrames from an HDF5 file, converts float64 columns to float32,
+    Reads DataFrames from an HDF5 file, converts float64 columns to the target float dtype,
     and saves them to a new HDF5 file.
 
     Args:
         input_path (str): Path to the input HDF5 file.
         output_path (str): Path to save the output HDF5 file.
         keys (list[str]): List of keys (datasets) to process within the HDF5 file.
+        target_dtype_str (str): The target float dtype ('float32', 'float16').
     """
+    if target_dtype_str not in SUPPORTED_DTYPES:
+        logger.error(f"Unsupported target dtype: {target_dtype_str}. Supported: {list(SUPPORTED_DTYPES.keys())}")
+        sys.exit(1)
+    target_dtype = SUPPORTED_DTYPES[target_dtype_str]
+    logger.info(f"Target conversion dtype: {target_dtype_str} ({target_dtype})")
+
     if not os.path.exists(input_path):
         logger.error(f"Input file not found: {input_path}")
         sys.exit(1)
@@ -50,12 +64,12 @@ def convert_h5_to_float32(input_path: str, output_path: str, keys: list[str]):
                         # Identify float64 columns
                         float64_cols = df.select_dtypes(include='float64').columns
                         if not float64_cols.empty:
-                            logger.info(f"  Found {len(float64_cols)} float64 columns to convert.")
+                            logger.info(f"  Found {len(float64_cols)} float64 columns to convert to {target_dtype_str}.")
                             # Create a dictionary for dtype conversion
-                            dtype_conversion = {col: np.float32 for col in float64_cols}
+                            dtype_conversion = {col: target_dtype for col in float64_cols}
                             # Convert columns
                             df = df.astype(dtype_conversion)
-                            logger.info(f"  Converted float64 columns to float32.")
+                            logger.info(f"  Converted float64 columns to {target_dtype_str}.")
                         else:
                             logger.info(f"  No float64 columns found for key '{key}'.")
 
@@ -94,8 +108,15 @@ def parse_args():
         default=['15m', '4h', '1d'],
         help="Space-separated list of keys (datasets) within the HDF5 file to process (default: 15m 4h 1d)."
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default='float32',
+        choices=list(SUPPORTED_DTYPES.keys()),
+        help="Target float data type for conversion (default: float32)."
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    convert_h5_to_float32(args.input_h5, args.output_h5, args.keys) 
+    convert_h5_to_float32(args.input_h5, args.output_h5, args.keys, args.dtype) 
