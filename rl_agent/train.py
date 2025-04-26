@@ -704,7 +704,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
 
     # Define the environment creation function for Ray Tune workers
-    def make_single_env(rank):
+    def make_single_env(rank: int, base_seed_val: Optional[int]): # Added base_seed_val back
         def _init():
             env_config = train_config.copy() # Use the trial's config
             instance_seed = base_seed_val
