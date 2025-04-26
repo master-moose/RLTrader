@@ -16,7 +16,6 @@ import logging
 import os
 import sys
 import time
-from collections import deque
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # --- Third-Party Imports --- #
@@ -38,6 +37,7 @@ from stable_baselines3.common.preprocessing import is_image_space
 from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv, VecEnv,
                                              VecNormalize, sync_envs_normalization)
 from stable_baselines3.common.base_class import BaseAlgorithm
+from stable_baselines3.common.env_util import make_vec_env as sb3_make_vec_env
 
 # --- Project Imports --- #
 # Note: TradingEnvironment is imported below; create_env is defined in this file
@@ -178,6 +178,7 @@ class TuneReportCallback(BaseCallback):
         self.rollout_count = 0
         self.best_mean_reward = -np.inf
         self.best_combined_score = -np.inf
+        self.last_combined_score = 0.0  # Initialize here
         self.log_freq = 10 # Log summary table every 10 rollouts
         
     def _on_training_start(self) -> None:
@@ -479,8 +480,8 @@ class TuneReportCallback(BaseCallback):
                         ray.air.session.report(final_report_dict)
                     elif hasattr(tune, "report"):
                         # Very old Ray versions use tune.report directly
-                        # Try passing as a single 'metrics' dict instead of kwargs
-                        tune.report(metrics=final_report_dict)
+                        # Pass the dictionary directly
+                        tune.report(final_report_dict)
 
                     callback_logger.debug(f"Reported {len(final_report_dict)} metrics to Ray Tune.")
                 else:
