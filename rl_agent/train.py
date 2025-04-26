@@ -447,7 +447,7 @@ class TuneReportCallback(BaseCallback):
                     model_type=model_type # Pass inferred model type
                 )
                 self.last_combined_score = combined_score # Store for logging table
-                metrics_to_report["rollout/combined_score"] = combined_score
+                metrics_to_report["eval/combined_score"] = combined_score
                 callback_logger.debug(f"Combined score calculated: {combined_score:.4f}")
             except Exception as score_err:
                  callback_logger.error(f"Error calculating combined score: {score_err}", exc_info=True)
@@ -475,7 +475,7 @@ class TuneReportCallback(BaseCallback):
 
                 # Ensure the combined score is always reported if calculated (key already flat)
                 if combined_score is not None and np.isfinite(combined_score):
-                    reportable_metrics["rollout_combined_score"] = float(combined_score)
+                    reportable_metrics["eval_combined_score"] = float(combined_score)
 
                 # <<< ADD DEBUG LOGGING >>>
                 callback_logger.debug(f"Keys being reported to Ray Tune: {list(reportable_metrics.keys())}")
