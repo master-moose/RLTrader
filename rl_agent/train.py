@@ -21,6 +21,11 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # --- Third-Party Imports --- #
 import gym
+# Add support for gymnasium (newer version of gym)
+try:
+    import gymnasium
+except ImportError:
+    gymnasium = None
 import numpy as np
 import pandas as pd
 import ray
@@ -1636,8 +1641,8 @@ def create_model(
         
         # --- Infer actual features per timestep from environment's observation space ---
         # The 'env' passed here is the VecNormalize-wrapped environment
-        if not isinstance(env.observation_space, gym.spaces.Box):
-             raise ValueError(f"TcnPolicy requires a Box observation space, got {type(env.observation_space)}")
+        if not hasattr(env.observation_space, 'shape'):
+             raise ValueError(f"TcnPolicy requires a Box observation space with a shape attribute, got {type(env.observation_space)}")
     
         obs_shape = env.observation_space.shape
         if len(obs_shape) != 1:
@@ -1699,8 +1704,9 @@ def create_model(
         sequence_length = config.get("sequence_length", 60)
         
         # --- Infer actual features per timestep ---
-        if not isinstance(env.observation_space, gym.spaces.Box):
-             raise ValueError(f"TcnSacPolicy requires a Box observation space, got {type(env.observation_space)}")
+        # Check for Box space from either gym or gymnasium
+        if not hasattr(env.observation_space, 'shape'):
+             raise ValueError(f"TcnSacPolicy requires a Box observation space with a shape attribute, got {type(env.observation_space)}")
     
         obs_shape = env.observation_space.shape
         if len(obs_shape) != 1:
