@@ -437,7 +437,8 @@ class TradingEnvironment(Env):
         if episode_ended:
             # Ensure portfolio is updated with the final price if not end of data # noqa E501
             if not is_end_of_data:
-                self._update_portfolio_value()
+                # Pass the last known valid price
+                self._update_portfolio_value(self.last_valid_price)
 
             # If episode ends with an open position, close it automatically
             # to get final PnL reflected in the balance.
