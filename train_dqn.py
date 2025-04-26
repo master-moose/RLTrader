@@ -15,10 +15,35 @@ import os
 import sys
 import logging
 
-# Set project root to path to allow importing rl_agent
-project_root = os.path.dirname(os.path.abspath(__file__))
+# --- Robust Project Root Setup ---
+def find_project_root(marker='.git'):
+    """Find the project root directory by searching upwards for a marker."""
+    path = os.path.abspath(__file__)
+    while True:
+        parent = os.path.dirname(path)
+        if os.path.exists(os.path.join(path, marker)):
+            return path
+        if parent == path: # Reached filesystem root
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.path.exists(os.path.join(script_dir, 'rl_agent')):
+                 return script_dir
+            # Fallback if marker not found but rl_agent exists in parent
+            parent_dir = os.path.dirname(script_dir)
+            if os.path.exists(os.path.join(parent_dir, 'rl_agent')):
+                return parent_dir
+            print("Warning: Project root marker not found. Using script directory.", file=sys.stderr)
+            return script_dir
+        path = parent
+
+project_root = find_project_root()
 if project_root not in sys.path:
-    sys.path.append(project_root)
+    sys.path.insert(0, project_root)
+# --- End Project Root Setup ---
+
+# Set project root to path to allow importing rl_agent
+# project_root = os.path.dirname(os.path.abspath(__file__)) # Old method removed
+# if project_root not in sys.path: # Old method removed
+#     sys.path.append(project_root) # Old method removed
 
 # Import necessary components from the rl_agent package
 try:

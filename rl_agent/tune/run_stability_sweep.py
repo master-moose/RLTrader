@@ -12,8 +12,44 @@ import sys
 import traceback
 import json
 
+# --- Robust Project Root Setup ---
+def find_project_root(marker='.git'):
+    """Find the project root directory by searching upwards for a marker."""
+    path = os.path.abspath(__file__)
+    while True:
+        parent = os.path.dirname(path)
+        if os.path.exists(os.path.join(path, marker)):
+            # Check if the found path is the rl_agent directory itself
+            if os.path.basename(path) == 'rl_agent':
+                # If yes, return the parent directory (ltsm-dqn)
+                return os.path.dirname(path)
+            return path
+        if parent == path: # Reached filesystem root
+            # Fallback: Assume script is in root or one/two levels down
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            # Check if script is in rl_agent/tune
+            parent_dir = os.path.dirname(script_dir)
+            grandparent_dir = os.path.dirname(parent_dir)
+            if os.path.basename(parent_dir) == 'rl_agent' and os.path.exists(os.path.join(grandparent_dir, marker)):
+                return grandparent_dir
+            # Check if script is in rl_agent
+            if os.path.basename(script_dir) == 'rl_agent' and os.path.exists(os.path.join(parent_dir, marker)):
+                 return parent_dir
+            # Check if script is in root
+            if os.path.exists(os.path.join(script_dir, marker)):
+                 return script_dir
+            print("Warning: Project root marker not found. Using grandparent directory as fallback.", file=sys.stderr)
+            return grandparent_dir # Fallback for scripts deep in structure
+        path = parent
+
+project_root = find_project_root()
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+    # print(f"Debug: Added {project_root} to sys.path for {__file__}") # Optional debug
+# --- End Project Root Setup ---
+
 # Add parent directory to path for local imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))) # Old method removed
 
 # Note: Environment variables are now set in run_tune_sweep.py
 # Both TUNE_DISABLE_STRICT_METRIC_CHECKING and RAY_AIR_LOCAL_CACHE_DIR
