@@ -38,7 +38,7 @@ from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv, VecEnv
                                              VecNormalize, sync_envs_normalization)
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.env_util import make_vec_env as sb3_make_vec_env
-from stable_baselines3.sac.policies import SacMlpPolicy  # Updated import path for SacMlpPolicy
+from stable_baselines3.sac.policies import MlpPolicy  # Use MlpPolicy instead of SacMlpPolicy
 
 # --- Project Imports --- #
 # Note: TradingEnvironment is imported below; create_env is defined in this file
@@ -1274,7 +1274,7 @@ def create_model(
             except ValueError: sac_ent_coef = 'auto'; logger.warning(f"Invalid SAC ent_coef. Defaulting auto.")
 
         model_kwargs.update({
-            "policy": SacMlpPolicy, # Use the imported policy
+            "policy": MlpPolicy, # Use the imported MlpPolicy
             "learning_rate": lr_schedule, # Use schedule
             "buffer_size": config["buffer_size"],
             "batch_size": config["batch_size"],
@@ -1453,7 +1453,7 @@ def create_model(
 
         # Update model_kwargs with SAC algorithm parameters
         model_kwargs.update({
-            "policy": SacMlpPolicy, # TEMP: Use standard MLP policy for testing SAC slowdown
+            "policy": MlpPolicy, # TEMP: Use standard MLP policy for testing SAC slowdown
             # "policy": TcnSacPolicy, # Original TCN policy
             "learning_rate": lr_schedule,
             "buffer_size": config.get("buffer_size", 1000000), # SAC default buffer size
