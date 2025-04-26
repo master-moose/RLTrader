@@ -283,7 +283,7 @@ class TradingEnvironment(Env):
 
         # Get initial observation and info
         observation = self._get_observation()
-        info = self._get_info()
+        info = self._get_info(self.last_valid_price)
 
         return observation, info
 
@@ -392,7 +392,7 @@ class TradingEnvironment(Env):
                 self._update_portfolio_value()
 
             # Get info *after* potential auto-close
-            final_info = self._get_info()
+            final_info = self._get_info(self.last_valid_price)
 
             # --- Format Episode End Log as Markdown Table --- #
             log_table = "| Metric              | Value     |\n"
@@ -436,7 +436,7 @@ class TradingEnvironment(Env):
 
         # Get new observation and info for the *next* step
         observation = self._get_observation()  # Based on self.current_step (t+1)
-        info = self._get_info()           # Based on self.current_step (t+1)
+        info = self._get_info(self.last_valid_price)           # Based on self.current_step (t+1)
 
         # Gymnasium expects 5 return values
         return observation, reward, terminated, truncated, info
