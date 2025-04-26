@@ -98,6 +98,7 @@ DEFAULT_CONFIG = {
     "gae_lambda": 0.95,
     "max_grad_norm": 0.5,
     "norm_obs": "auto",
+    "gradient_steps": 1, # Fixed for SAC
     
     # Training parameters
     "total_timesteps": 1000000,  # 1M steps total
@@ -228,8 +229,6 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
             "batch_size": tune.choice([256, 512, 1024]), # Typical SAC batches
             # SAC target smoothing coefficient
             "tau": tune.loguniform(0.001, 0.02),
-            # Number of gradient steps per sample
-            "gradient_steps": tune.choice([1, 2, 4]), # Allow more steps
             # Timesteps before learning starts
             "learning_starts": tune.choice([1000, 5000, 10000]), # Adjusted range
             # SAC entropy coefficient (numeric only for tuning)
@@ -246,7 +245,7 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
         for k in ["n_steps", "vf_coef", "clip_range", "gae_lambda", "n_epochs", "max_grad_norm"]:
             search_space.pop(k, None)
     if 'sac' not in model_type:
-        for k in ["buffer_size", "batch_size", "tau", "gradient_steps", "learning_starts"]:
+        for k in ["buffer_size", "batch_size", "tau", "learning_starts"]:
             search_space.pop(k, None)
     # Note: ent_coef is kept for both, but might need separate handling for SAC 'auto'
 
