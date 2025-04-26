@@ -485,10 +485,14 @@ class TuneReportCallback(BaseCallback):
                 # It should already be in metrics_to_report with key 'eval/combined_score'
                 # If it wasn't numeric/finite, it would have been filtered above.
                 # We can add an explicit check/addition just to be safe:
-                if "eval/combined_score" in metrics_to_report and \
-                   isinstance(metrics_to_report["eval/combined_score"], (int, float, np.number)) and \
-                   np.isfinite(metrics_to_report["eval/combined_score"]):
-                      final_report_dict["eval/combined_score"] = float(metrics_to_report["eval/combined_score"])
+                # if "eval/combined_score" in metrics_to_report and \
+                #    isinstance(metrics_to_report["eval/combined_score"], (int, float, np.number)) and \
+                #    np.isfinite(metrics_to_report["eval/combined_score"]):
+                #       final_report_dict["eval/combined_score"] = float(metrics_to_report["eval/combined_score"])
+
+                # <<< ALWAYS ADD COMBINED SCORE >>>
+                # Ensure the key Optuna needs is always present, using the last known valid score or 0.0
+                final_report_dict["eval/combined_score"] = float(self.last_combined_score)
 
                 # <<< ADD DEBUG LOGGING >>>
                 callback_logger.debug(f"Keys being reported to Ray Tune: {list(final_report_dict.keys())}")
@@ -701,17 +705,15 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
  
     def make_single_env(rank):
         def _init():
-            # Fix: Use train_config and create_env instead of the non-existent env_id
-            env_config = train_config.copy() # Use the config from the outer scope
-            instance_seed = seed # Use the seed defined in train_rl_agent_tune scope
-            if instance_seed is not None:
-                 instance_seed += rank
-            env_config["seed"] = instance_seed
-            env = create_env(config=env_config, is_eval=False) # Assuming train env here
-            # Optionally add Monitor wrapper if needed for Ray Tune reporting, though Monitor might be added later
-            # monitor_log = os.path.join(log_dir, f'monitor_tune_train_{rank}.csv')
-            # os.makedirs(os.path.dirname(monitor_log), exist_ok=True)
-            # env = Monitor(env, filename=monitor_log)
+            if callable(env_id):
+                env = env_id()
+            else:
+                raise ValueError(f"Expected callable env_id, got {type(env_id)}")
+            
+            if seed is not None:
+                env.seed(seed + rank)
+                env.action_space.seed(seed + rank)
+            
             return env
         return _init
 
