@@ -562,13 +562,15 @@ class TradingEnvironment(Env):
         elif abs(action) < 0.1:  # Zone around zero: Try Close or Hold Flat
             if self.position_type != 0:  # If in position, try Close
                 interpreted_action_code = 3 # Intention: Close
-                closed_pnl = self._close_position(current_price)
-                if closed_pnl is not None:  # Check if close was successful
+                # Unpack the returned tuple
+                profit_loss, fee_on_close = self._close_position(current_price)
+                if profit_loss is not None:  # Check if close was successful using PnL
                     trade_successful = True
                     self.total_closes += 1
                     logger.debug(
                         f"Step {self.current_step}: [Act: {action:.2f} in +/-0.1] -> Closed Position. "
-                        f"PnL: {closed_pnl:.2f} -> Bal: {self.balance:.2f}"
+                        # Use the unpacked profit_loss variable for formatting
+                        f"PnL: {profit_loss:.2f} -> Bal: {self.balance:.2f}"
                     )
                 else: # Close failed (e.g., insufficient funds for short close)
                     self.failed_trades += 1
