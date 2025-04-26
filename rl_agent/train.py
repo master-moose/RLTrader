@@ -88,6 +88,15 @@ class TuneReportCallback(BaseCallback):
     """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
     def __init__(self, rollout_buffer_size=100):
         super().__init__(verbose=0)
+        # Initialize counters and metrics
+        self.step_count = 0
+        self.episode_count = 0
+        self.prev_ep_count = 0
+        self.last_combined_score = 0.0
+        self.best_combined_score = -np.inf
+        self.best_mean_reward = -np.inf
+        self.best_mean_return = -np.inf
+        self.best_explained_variance = -np.inf
         # Store last known variance
         self.last_explained_variance = 0.0
         # Buffer to store final metrics from completed episodes during rollout
@@ -328,28 +337,30 @@ class TuneReportCallback(BaseCallback):
             
             # Get model-specific metrics if available
             env_metrics = {}
-            if hasattr(self.model, "env") and hasattr(self.model.env, "get_episode_metrics"):
-                # For vectorized envs, we get the metrics from the first env
-                try:
+            try:
+                # Handle VecEnv and single env cases
+                if hasattr(self.model, "env"):
                     if hasattr(self.model.env, "venv") and hasattr(self.model.env.venv, "envs"):
                         # For VecMonitor wrapped envs
-                        env_metrics = self.model.env.venv.envs[0].get_episode_metrics()
+                        if hasattr(self.model.env.venv.envs[0], "get_episode_metrics"):
+                            env_metrics = self.model.env.venv.envs[0].get_episode_metrics()
                     elif hasattr(self.model.env, "envs"):
                         # Direct VecEnv
-                        env_metrics = self.model.env.envs[0].get_episode_metrics()
-                    else:
+                        if hasattr(self.model.env.envs[0], "get_episode_metrics"):
+                            env_metrics = self.model.env.envs[0].get_episode_metrics()
+                    elif hasattr(self.model.env, "get_episode_metrics"):
                         # Single env
                         env_metrics = self.model.env.get_episode_metrics()
-                except (AttributeError, IndexError) as e:
-                    callback_logger.warning(f"Failed to get env metrics: {e}")
-            
+            except (AttributeError, IndexError) as e:
+                callback_logger.warning(f"Failed to get env metrics: {e}")
+
             # Get financial metrics from env_metrics
             financial_metrics = {}
             for key, value in env_metrics.items():
                 try:
                     if isinstance(value, (int, float)) and np.isfinite(value):
                         financial_metrics[f"trading/{key}"] = value
-                except:
+                except (ValueError, TypeError):
                     pass
             
             # Combine all metrics for this episode
@@ -358,70 +369,94 @@ class TuneReportCallback(BaseCallback):
                 "episodes": episode_num,
                 "reward": ep_reward,
                 "length": ep_length,
-                "fps": self.last_fps,  # Always include FPS in reported metrics
+                "fps": self.last_fps,  # Always include FPS
             }
-            
+
             # Add explained variance if available
-            if "train/explained_variance" in sb3_metrics:
-                metrics_to_report["explained_variance"] = sb3_metrics["train/explained_variance"]
-                self.last_explained_variance = sb3_metrics["train/explained_variance"]
-            
+            exp_var = sb3_metrics.get("train/explained_variance")
+            if exp_var is not None and np.isfinite(exp_var):
+                metrics_to_report["explained_variance"] = exp_var
+                self.last_explained_variance = exp_var
+
             # Add model losses if available (based on model type)
             model_type = self.model.config.get("model_type", "ppo")
-            
+            actor_loss = None
+            critic_loss = None
+
             if model_type == "sac":
-                if "train/actor_loss" in sb3_metrics:
-                    metrics_to_report["actor_loss"] = sb3_metrics["train/actor_loss"]
-                if "train/critic_loss" in sb3_metrics:
-                    metrics_to_report["critic_loss"] = sb3_metrics["train/critic_loss"]
+                actor_loss = sb3_metrics.get("train/actor_loss")
+                critic_loss = sb3_metrics.get("train/critic_loss")
+                if actor_loss is not None:
+                    metrics_to_report["actor_loss"] = actor_loss
+                if critic_loss is not None:
+                    metrics_to_report["critic_loss"] = critic_loss
             elif model_type == "ppo":
-                if "train/policy_loss" in sb3_metrics:
-                    metrics_to_report["policy_loss"] = sb3_metrics["train/policy_loss"]
-                if "train/value_loss" in sb3_metrics:
-                    metrics_to_report["value_loss"] = sb3_metrics["train/value_loss"]
-                if "train/entropy_loss" in sb3_metrics or "train/entropy" in sb3_metrics:
-                    entropy_key = "train/entropy_loss" if "train/entropy_loss" in sb3_metrics else "train/entropy"
-                    metrics_to_report["entropy"] = sb3_metrics[entropy_key]
-            
+                policy_loss = sb3_metrics.get("train/policy_loss")
+                value_loss = sb3_metrics.get("train/value_loss")
+                entropy = sb3_metrics.get("train/entropy_loss",
+                                          sb3_metrics.get("train/entropy"))
+                if policy_loss is not None:
+                    metrics_to_report["policy_loss"] = policy_loss
+                if value_loss is not None:
+                    metrics_to_report["value_loss"] = value_loss
+                if entropy is not None:
+                    metrics_to_report["entropy"] = entropy
+
             # Add financial metrics
             metrics_to_report.update(financial_metrics)
-            
+
             # Calculate combined score if we have the required metrics
-            if all(key in financial_metrics for key in ["trading/sharpe_ratio", "trading/calmar_ratio"]):
+            sharpe = financial_metrics.get("trading/sharpe_ratio")
+            calmar = financial_metrics.get("trading/calmar_ratio")
+            sortino = financial_metrics.get("trading/sortino_ratio")
+            ep_return = financial_metrics.get("trading/episode_return")
+
+            # Check if all required base metrics are available
+            if all(v is not None for v in [sharpe, calmar, sortino, ep_return, exp_var]):
                 # Compute a combined score from multiple metrics
-                sharpe = financial_metrics["trading/sharpe_ratio"]
-                calmar = financial_metrics["trading/calmar_ratio"]
-                sortino = financial_metrics.get("trading/sortino_ratio", 0.0)
-                
-                # Normalize metrics to 0-1 range with reasonable bounds
-                norm_sharpe = max(0.0, min(1.0, (sharpe + 1.0) / 4.0))  # -1 to 3 range
-                norm_sortino = max(0.0, min(1.0, (sortino + 1.0) / 4.0))  # -1 to 3 range
-                norm_calmar = max(0.0, min(1.0, calmar / 3.0))  # 0 to 3 range
-                
-                # Weighted average favoring Sharpe ratio
-                combined_score = (0.5 * norm_sharpe + 0.3 * norm_sortino + 0.2 * norm_calmar)
+                combined_score = self._normalize_and_combine_metrics(
+                    reward=ep_reward,
+                    explained_variance=exp_var,
+                    sharpe_ratio=sharpe,
+                    episode_return=ep_return,
+                    calmar_ratio=calmar,
+                    sortino_ratio=sortino,
+                    actor_loss=actor_loss,
+                    critic_loss=critic_loss,
+                    model_type=model_type
+                )
                 metrics_to_report["combined_score"] = combined_score
                 self.last_combined_score = combined_score
-                
+
                 # Update best score if this is better
                 if combined_score > self.best_combined_score:
                     self.best_combined_score = combined_score
                     metrics_to_report["best_combined_score"] = combined_score
-            
+            else:
+                missing_keys = [k for k, v in {
+                    "sharpe": sharpe, "calmar": calmar, "sortino": sortino,
+                    "return": ep_return, "exp_var": exp_var
+                }.items() if v is None]
+                callback_logger.debug(
+                    f"Skipping combined score calculation (missing: {missing_keys})"
+                )
+
             # Log the parsed metrics
             if metrics_to_report:
                 log_level = logging.INFO if episode_num % 10 == 0 else logging.DEBUG
-                metrics_str = ", ".join([f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" 
-                                      for k, v in metrics_to_report.items()])
-                callback_logger.log(log_level, f"Episode {episode_num} completed: {metrics_str}")
-            
+                metrics_str = ", ".join(
+                    [f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
+                     for k, v in metrics_to_report.items()])
+                callback_logger.log(log_level,
+                                    f"Episode {episode_num} completed: {metrics_str}")
+
             # Report to Ray Tune
             if tune.is_session_enabled():
                 tune.report(**metrics_to_report)
-            
+
             # Increment episode counter
             self.episode_count += 1
-        
+
         # You would return False to stop training
         return True
 
@@ -435,7 +470,7 @@ class TuneReportCallback(BaseCallback):
         sb3_metrics = {}
         if self.logger is not None and hasattr(self.logger, 'name_to_value'):
             sb3_metrics = self.logger.name_to_value
-        
+
         episode_rewards = np.array(self.model.ep_info_buffer)
         if len(episode_rewards) > 0:
             ep_rewards = episode_rewards[:, 0]  # Rewards are first column
@@ -453,12 +488,12 @@ class TuneReportCallback(BaseCallback):
             ep_mean_reward = 0.0
             ep_mean_length = 0
             mean_return = 0.0
-            
+
         # Fetch losses from SB3 metrics (if available)
         model_type = self.model.config.get("model_type", "ppo")
         actor_loss = None
         critic_loss = None
-        
+
         if model_type == "sac":
             if "train/actor_loss" in sb3_metrics:
                 try:
@@ -481,17 +516,17 @@ class TuneReportCallback(BaseCallback):
                     critic_loss = float(sb3_metrics["train/value_loss"])
                 except (ValueError, TypeError):
                     critic_loss = None
-        
+
         # Update and store best metrics for summary table
         if len(episode_rewards) > 0 and ep_mean_reward > self.best_mean_reward:
             self.best_mean_reward = ep_mean_reward
             self.best_mean_return = mean_return
             self.best_explained_variance = self.last_explained_variance
-        
+
         # For TensorBoard/detailed logs, use all metrics
         logger = logging.getLogger("rl_agent.train")
         completed_episodes = len(episode_rewards)
-        
+
         # Get FPS from SB3 metrics or use last known value
         current_fps = self.last_fps  # Default to the last known FPS
         if "time/fps" in sb3_metrics:
@@ -502,7 +537,7 @@ class TuneReportCallback(BaseCallback):
                     self.last_fps = fps_val  # Update the last known FPS
             except (ValueError, TypeError):
                 pass  # Keep using the last known FPS
-        
+
         # --- Progress Summary Table --- #
         items_to_log = [
             # Always include progress metrics in table
@@ -511,18 +546,18 @@ class TuneReportCallback(BaseCallback):
             ("FPS", f"{current_fps:.1f}"),  # Add FPS to prominent location in table
             ("Mean Reward", f"{ep_mean_reward:.2f}"),
         ]
-        
+
         # Add financial/trading metrics if they exist
-        keys_to_log = ["trading/sharpe_ratio", "trading/sortino_ratio", 
-                      "trading/calmar_ratio", "trading/total_trades",
-                      "trading/portfolio_value", "trading/max_drawdown"]
-        
+        keys_to_log = ["trading/sharpe_ratio", "trading/sortino_ratio",
+                       "trading/calmar_ratio", "trading/total_trades",
+                       "trading/portfolio_value", "trading/max_drawdown"]
+
         # Add model-specific losses to log
         if model_type == "sac":
             keys_to_log.extend(["train/actor_loss", "train/critic_loss"])
         elif model_type == "ppo":
             keys_to_log.extend(["train/policy_loss", "train/value_loss", "train/entropy_loss"])
-        
+
         # Add selected metrics to the table if they exist
         for key in keys_to_log:
             if key in sb3_metrics:
@@ -823,18 +858,48 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                 # Try to get last metrics
                 last_reward = 0.0
                 last_variance = 0.0
+                last_actor_loss = None
+                last_critic_loss = None
                 if hasattr(model, 'logger') and hasattr(model.logger, 'name_to_value'):
                     log_vals = model.logger.name_to_value
                     last_reward = log_vals.get("rollout/ep_rew_mean", 0.0)
                     last_variance = log_vals.get("train/explained_variance", 0.0)
+                    # Try to get losses based on model type
+                    model_type = train_config.get("model_type", "ppo")
+                    if model_type == "sac":
+                        last_actor_loss = log_vals.get("train/actor_loss")
+                        last_critic_loss = log_vals.get("train/critic_loss")
+                    elif model_type == "ppo":
+                        last_actor_loss = log_vals.get("train/policy_loss")
+                        last_critic_loss = log_vals.get("train/value_loss")
+                    
                     try: last_reward = float(last_reward)
                     except (ValueError, TypeError): last_reward = 0.0
                     try: last_variance = float(last_variance)
                     except (ValueError, TypeError): last_variance = 0.0
+                    try: 
+                        if last_actor_loss is not None:
+                            last_actor_loss = float(last_actor_loss)
+                    except (ValueError, TypeError): 
+                        last_actor_loss = None
+                    try: 
+                        if last_critic_loss is not None:
+                            last_critic_loss = float(last_critic_loss)
+                    except (ValueError, TypeError): 
+                        last_critic_loss = None
 
                 temp_cb = TuneReportCallback()
-                combo_score = temp_cb._normalize_and_combine_metrics(last_reward, last_variance, 0.0, 0.0, 0.0, 0.0,
-                                                                    model_type=train_config.get("model_type", "ppo"))
+                combo_score = temp_cb._normalize_and_combine_metrics(
+                    reward=last_reward, 
+                    explained_variance=last_variance, 
+                    sharpe_ratio=0.0, 
+                    episode_return=0.0, 
+                    calmar_ratio=0.0, 
+                    sortino_ratio=0.0,
+                    actor_loss=last_actor_loss,
+                    critic_loss=last_critic_loss,
+                    model_type=train_config.get("model_type", "ppo")
+                )
                 failure_metrics["eval/mean_reward"] = last_reward
                 if train_config.get("model_type", "ppo") != "sac":
                     failure_metrics["eval/explained_variance"] = last_variance
@@ -923,8 +988,17 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         final_summary_metrics["final_logger_explained_variance"] = final_variance
 
         temp_cb = TuneReportCallback()
-        final_combined = temp_cb._normalize_and_combine_metrics(final_reward, final_variance, 0.0, 0.0, 0.0, 0.0,
-                                                                model_type=train_config.get("model_type", "ppo"))
+        final_combined = temp_cb._normalize_and_combine_metrics(
+            reward=final_reward, 
+            explained_variance=final_variance, 
+            sharpe_ratio=0.0, 
+            episode_return=0.0, 
+            calmar_ratio=0.0, 
+            sortino_ratio=0.0,
+            actor_loss=None,
+            critic_loss=None,
+            model_type=train_config.get("model_type", "ppo")
+        )
         final_summary_metrics["eval/combined_score"] = float(final_combined)
 
     trial_logger.info("Final Summary Metrics:")
@@ -2033,7 +2107,14 @@ def train(config: Dict[str, Any]) -> Tuple[BaseRLModel, Dict[str, Any]]:
         temp_cb = TuneReportCallback()
         # Pass model_type here
         final_combined = temp_cb._normalize_and_combine_metrics(
-            final_reward, final_variance, 0.0, 0.0, 0.0, 0.0,
+            reward=final_reward, 
+            explained_variance=final_variance, 
+            sharpe_ratio=0.0, 
+            episode_return=0.0, 
+            calmar_ratio=0.0, 
+            sortino_ratio=0.0,
+            actor_loss=None,
+            critic_loss=None,
             model_type=config.get("model_type", "ppo") # Get model type from config
         )
         final_metrics["eval/combined_score"] = float(final_combined)
