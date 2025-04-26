@@ -46,11 +46,27 @@ else:
     print("pip install 'ray[tune]>=2.0.0' hyperopt>=0.2.7 optuna>=3.0.0")
     sys.exit(1)
 
+# Default configuration for the stability sweep
+DEFAULT_CONFIG = {
+    "learning_rate": 3e-4,
+    "gamma": 0.99,
+    "n_steps": 2048,
+    "batch_size": 64,
+    "num_envs": 8,
+    "max_steps": 1000
+}
+
 def parse_args():
     """Parse command line arguments with preset values for stability sweep"""
     parser = argparse.ArgumentParser(
         description="Run a stability-focused hyperparameter sweep for RecurrentPPO",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # Add base_config argument
+    parser.add_argument(
+        "--base_config", type=str, default=None,
+        help="Path to a base configuration JSON file to override defaults"
     )
     
     # Required arguments
@@ -133,9 +149,6 @@ def parse_args():
     
     # Add ray_address (None) for compatibility
     setattr(arg_obj, "ray_address", None)
-    
-    # Add base_config (None) for compatibility
-    setattr(arg_obj, "base_config", None)
     
     # Load base config (if provided) or use defaults
     if args.base_config and os.path.exists(args.base_config):
