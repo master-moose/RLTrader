@@ -2172,7 +2172,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
                 train_logger.info("Reported final metrics via Ray AIR session")
             # Fallback to tune.report (passing dict)
             elif hasattr(tune, "report"):
-                tune.report(final_summary_metrics)
+                tune.report(final_metrics)
                 train_logger.info("Reported final metrics via tune.report (fallback)")
             else:
                  train_logger.warning("Could not find ray.air.session.report or tune.report to report final metrics.")
