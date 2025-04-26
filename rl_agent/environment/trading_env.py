@@ -294,6 +294,13 @@ class TradingEnvironment(Env):
         continuous_action = action[0] if isinstance(action, np.ndarray) else action
         continuous_action = np.clip(continuous_action, -1.0, 1.0) # Ensure within bounds
 
+        # --- PRE-ACTION NAN CHECK ---
+        if not np.isfinite(continuous_action):
+            logger.error(f"[NAN_CHECK] NaN detected in continuous_action BEFORE _take_action: {continuous_action}")
+            # Optional: default to hold? Or raise error?
+            continuous_action = 0.0 
+        # --------------------------
+
         # Execute the action and get the interpreted discrete code
         interpreted_action_code = self._take_action(continuous_action)
 
@@ -323,6 +330,13 @@ class TradingEnvironment(Env):
 
         # Store portfolio value history for step t
         self.portfolio_values.append(self.portfolio_value)
+
+        # --- PRE-REWARD NAN CHECK ---
+        if not np.isfinite(self.portfolio_value):
+             logger.error(f"[NAN_CHECK] NaN portfolio_value ({self.portfolio_value}) BEFORE reward calculation at step {self.current_step}.")
+        if not np.isfinite(prev_portfolio_value):
+             logger.error(f"[NAN_CHECK] NaN prev_portfolio_value ({prev_portfolio_value}) BEFORE reward calculation at step {self.current_step}.")
+        # ---------------------------
 
         # Calculate step return for Sharpe ratio (t vs t-1)
         if abs(prev_portfolio_value) > ZERO_THRESHOLD:
@@ -437,6 +451,13 @@ class TradingEnvironment(Env):
         if (self.exploration_decay_rate > 0 and
                 self.exploration_bonus_value > self.exploration_end):
             self.exploration_bonus_value -= self.exploration_decay_rate
+
+        # --- PRE-OBSERVATION NAN CHECK ---
+        if not np.isfinite(self.portfolio_value):
+             logger.error(f"[NAN_CHECK] NaN portfolio_value ({self.portfolio_value}) BEFORE observation calculation at step {self.current_step}.")
+        if not np.isfinite(self.balance):
+             logger.error(f"[NAN_CHECK] NaN balance ({self.balance}) BEFORE observation calculation at step {self.current_step}.")
+        # -------------------------------
 
         # Get new observation and info for the *next* step
         observation = self._get_observation()  # Based on self.current_step (t+1)
@@ -899,6 +920,16 @@ class TradingEnvironment(Env):
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
         historical_data = self.data.iloc[start_idx:end_idx+1]
+
+        # --- RAW DATA NAN CHECK ---
+        raw_features_df = historical_data[self.features]
+        if not np.all(np.isfinite(raw_features_df.values)):
+            logger.error(f"[NAN_CHECK] NaN found in raw historical_data slice (Step: {safe_step}, Indices: {start_idx}-{end_idx}) before processing.")
+            # Log columns with NaNs
+            nan_cols = raw_features_df.columns[raw_features_df.isnull().any()].tolist()
+            if nan_cols:
+                logger.error(f"[NAN_CHECK] Columns with NaNs in raw slice: {nan_cols}")
+        # -------------------------
 
         # Ensure we have exactly sequence_length rows for feature data
         if len(historical_data) < self.sequence_length:

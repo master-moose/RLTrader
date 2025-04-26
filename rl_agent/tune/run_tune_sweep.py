@@ -269,9 +269,6 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
             # SAC entropy coefficient (numeric only for tuning)
             # Note: 'auto' often default, consider fixing or tuning separately
             "ent_coef": tune.loguniform(1e-4, 0.1),
-            # --- Add Gradient Clipping for SAC --- #
-            "max_grad_norm": tune.choice([0.5, 1.0, 5.0, 10.0]), # Add search space for SAC grad clip
-            # ------------------------------------- #
             # Add SDE tuning if desired
             # "use_sde": tune.choice([True, False]),
             # "sde_sample_freq": tune.choice([-1, 4, 8]), # If use_sde=True
@@ -281,19 +278,11 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
     # Remove parameters not relevant for the specific model type
     if 'ppo' not in model_type:
         keys_to_pop = ["n_steps", "vf_coef", "clip_range", "gae_lambda",
-                       "n_epochs"]
-        # --- Keep max_grad_norm if model is SAC --- #
-        if 'sac' not in model_type:
-             keys_to_pop.append("max_grad_norm")
-        # ------------------------------------------ #
+                       "n_epochs", "max_grad_norm"]
         for k in keys_to_pop:
             search_space.pop(k, None)
     if 'sac' not in model_type:
         keys_to_pop = ["buffer_size", "batch_size", "tau", "learning_starts"]
-        # --- Keep max_grad_norm if model is PPO --- #
-        if 'ppo' not in model_type:
-             keys_to_pop.append("max_grad_norm")
-        # ------------------------------------------ #
         for k in keys_to_pop:
             search_space.pop(k, None)
     # Note: ent_coef kept for both, might need separate handling for SAC 'auto'

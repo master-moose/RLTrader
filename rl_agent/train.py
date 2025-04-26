@@ -1678,10 +1678,7 @@ def create_model(
             "tau": config.get("tau", 0.005), # SAC default tau
             "ent_coef": sac_ent_coef,
             "use_sde": config.get("use_sde", False), # Optional SAC param
-            "sde_sample_freq": config.get("sde_sample_freq", -1), # Optional SAC param
-            # --- Explicitly add max_grad_norm --- #
-            "max_grad_norm": config.get("max_grad_norm", 1.0) # Default 1.0 if not in config
-            # ------------------------------------ #
+            "sde_sample_freq": config.get("sde_sample_freq", -1) # Optional SAC param
         })
 
         logger.info(f"TCN-SAC configuration: layers={tcn_params['num_layers']}, filters={tcn_params['num_filters']}, kernel={tcn_params['kernel_size']}, dropout={tcn_params['dropout']}, features/step={actual_features_per_timestep}")
