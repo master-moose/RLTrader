@@ -142,9 +142,12 @@ class TradingEnvironment(Env):
                 )
 
         # --- Define action and observation spaces ---
-        # Action space: Continuous value between -1 (max short/close) and 1 (max long/close)
+        # Action space: Continuous value between -1 (max short/close)
+        # and 1 (max long/close)
         # Interpretation thresholds will be used in _take_action
-        self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
+        self.action_space = spaces.Box(
+            low=-1, high=1, shape=(1,), dtype=np.float32
+        )
 
         # Observation space: features + pos_type + norm_entry_price
         # position_type: -1 (Short), 0 (Flat), 1 (Long)
@@ -224,14 +227,21 @@ class TradingEnvironment(Env):
         self.max_portfolio_value = self.portfolio_value
 
         # <<< ADDED: Initialize last valid price >>>
-        # Try to get the first valid price, fallback to 0 if data starts with NaN/inf
+        # Try to get the first valid price, fallback to 0 if data starts
+        # with NaN/inf
         first_valid_price = self.data['close'].iloc[self.current_step]
         if not np.isfinite(first_valid_price):
-            logger.warning(f"Initial price at step {self.current_step} is non-finite ({first_valid_price}). Searching for first valid price...")
-            first_valid_price = self.data['close'].iloc[self.current_step:].dropna().iloc[0] if not self.data['close'].iloc[self.current_step:].dropna().empty else 0.0
+            logger.warning(
+                f"Initial price at step {self.current_step} is non-finite "
+                f"({first_valid_price}). Searching for first valid price..."
+            )
+            valid_prices = self.data['close'].iloc[self.current_step:].dropna()
+            first_valid_price = valid_prices.iloc[0] if not valid_prices.empty else 0.0
             if not np.isfinite(first_valid_price):
-                logger.error("Could not find any valid starting price in data!")
-                first_valid_price = 0.0 # Ultimate fallback
+                logger.error(
+                    "Could not find any valid starting price in data!"
+                )
+                first_valid_price = 0.0  # Ultimate fallback
         self.last_valid_price = first_valid_price
         # <<< END ADDED >>>
 
@@ -254,7 +264,7 @@ class TradingEnvironment(Env):
         self.consecutive_holds = 0  # Track consecutive holds while FLAT
         # self.consecutive_buys = 0 # Removed
         # self.consecutive_sells = 0 # Removed
-        self.last_action = 0.0 # Initialize last action as float for continuous
+        self.last_action = 0.0  # Init last action as float for continuous
         self.exploration_bonus_value = self.exploration_start
         self.failed_trades = 0  # General counter for failed actions
         # Add cumulative reward component trackers
@@ -323,14 +333,14 @@ class TradingEnvironment(Env):
             interpreted_action_code,
             prev_portfolio_value,
             prev_position_type,
-            validated_price # Pass validated price
+            validated_price  # Pass validated price
         )
         self.rewards.append(reward)
         self.portfolio_values.append(self.portfolio_value)
 
         # --- Update consecutive holds (only when flat) ---
         # Use interpreted action code for hold logic
-        if self.position_type == 0 and interpreted_action_code == 0:  # If flat and held
+        if self.position_type == 0 and interpreted_action_code == 0:
             self.consecutive_holds += 1
         else:
             self.consecutive_holds = 0  # Reset if not flat or didn't hold flat
@@ -419,14 +429,22 @@ class TradingEnvironment(Env):
 
         # --- PRE-OBSERVATION NAN CHECK ---
         if not np.isfinite(self.portfolio_value):
-             logger.error(f"[NAN_CHECK] NaN portfolio_value ({self.portfolio_value}) BEFORE observation calculation at step {self.current_step}.")
+             logger.error(
+                 f"[NAN_CHECK] NaN portfolio_value ({self.portfolio_value}) "
+                 f"BEFORE observation calculation at step {self.current_step}."
+             )
         if not np.isfinite(self.balance):
-             logger.error(f"[NAN_CHECK] NaN balance ({self.balance}) BEFORE observation calculation at step {self.current_step}.")
+             logger.error(
+                 f"[NAN_CHECK] NaN balance ({self.balance}) BEFORE "
+                 f"observation calculation at step {self.current_step}."
+             )
         # -------------------------------
 
         # Get new observation and info for the *next* step
-        observation = self._get_observation()  # Based on self.current_step (t+1)
-        info = self._get_info(self.last_valid_price)           # Based on self.current_step (t+1)
+        # Based on self.current_step (t+1)
+        observation = self._get_observation()
+        # Based on self.current_step (t+1)
+        info = self._get_info(self.last_valid_price)
 
         # Gymnasium expects 5 return values
         return observation, reward, terminated, truncated, info
@@ -444,7 +462,7 @@ class TradingEnvironment(Env):
         """
         # --- Action Interpretation Thresholds ---
         # Define thresholds to map continuous action to discrete decisions
-        # Example: [-1.0, -0.5): Sell/Short | [-0.5, 0.5]: Hold | (0.5, 1.0]: Buy/Cover
+        # Ex: [-1.0, -0.5): Sell/Short | [-0.5, 0.5]: Hold | (0.5, 1.0]: Buy/Cover
         sell_short_threshold = -0.5
         buy_cover_threshold = 0.5
         # --- End Thresholds ---
@@ -455,7 +473,10 @@ class TradingEnvironment(Env):
 
         # Price is passed in and assumed validated by step method
         if not np.isfinite(current_price) or current_price <= ZERO_THRESHOLD:
-             logger.error(f"Step {self.current_step}: Invalid price ({current_price:.2f}) received in _take_action. Cannot execute trade.") # noqa E501
+             logger.error(
+                 f"Step {self.current_step}: Invalid price ({current_price:.2f})"
+                 f" received in _take_action. Cannot execute trade."
+             )
              self.failed_trades += 1
              # return 0, 0.0 # REMOVED fee return
              return 0 # Return Hold
@@ -473,7 +494,7 @@ class TradingEnvironment(Env):
                         proceeds = shares_to_short * current_price
                         # fee = proceeds * self.transaction_fee # REMOVED
                         # self.balance += (proceeds - fee) # REMOVED fee
-                        self.balance += proceeds # Add net proceeds
+                        self.balance += proceeds  # Add net proceeds
                         self.shares_held = shares_to_short
                         self.position_type = -1
                         self.entry_price = current_price
@@ -484,25 +505,31 @@ class TradingEnvironment(Env):
                         trade_info = {
                             'step': self.current_step, 'type': 'short_entry',
                             'price': current_price, 'shares': self.shares_held,
-                            'proceeds': proceeds, # 'fee': fee, # REMOVED
+                            'proceeds': proceeds,  # 'fee': fee, # REMOVED
                             'balance_after': self.balance
                         }
                         self.trades.append(trade_info)
                         logger.debug(
-                            f"Step {self.current_step}: [Act: {action:.2f} < {sell_short_threshold}] -> Entered SHORT "
+                            f"Step {self.current_step}: [Act: {action:.2f} < "
+                            f"{sell_short_threshold}] -> Entered SHORT "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
-                            f"(Proceeds: {proceeds:.2f}) -> " # Removed Fee log
+                            f"(Proceeds: {proceeds:.2f}) -> "  # Removed Fee log
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
                         self.failed_trades += 1
-                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but calculated shares {shares_to_short:.8f} <= threshold.") # noqa E501
+                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but calculated shares {shares_to_short:.8f} <= threshold.")
                 else:
                     self.failed_trades += 1
-                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but insufficient target value ({short_value_target:.2f}) or zero price.") # noqa E501
+                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Short, but insufficient target value ({short_value_target:.2f}) or zero price.")
             else:  # Already in a position, treat as Hold
                 interpreted_action_code = 0 # Override intention: Hold
-                logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Wanted Short, but already in {'Long' if self.position_type == 1 else 'Short'}. Holding.") # noqa E501
+                logger.debug(
+                    f"Step {self.current_step}: [Act: {action:.2f}] Wanted "
+                    f"Short, but already in "
+                    f"{'Long' if self.position_type == 1 else 'Short'}. "
+                    f"Holding."
+                )
 
         elif action > buy_cover_threshold:
             # Action: Buy/Cover
@@ -516,7 +543,7 @@ class TradingEnvironment(Env):
                     # shares_num = invest_amount # REMOVED
                     # shares_den = (current_price * fee_multiplier) # REMOVED
                     # shares_to_buy = shares_num / shares_den # REMOVED
-                    shares_to_buy = invest_amount / current_price # Simplified
+                    shares_to_buy = invest_amount / current_price  # Simplified
 
                     if shares_to_buy > ZERO_THRESHOLD:
                         cost = shares_to_buy * current_price
@@ -534,25 +561,31 @@ class TradingEnvironment(Env):
                         trade_info = {
                             'step': self.current_step, 'type': 'long_entry',
                             'price': current_price, 'shares': self.shares_held,
-                            'cost': cost, # 'fee': fee, # REMOVED
+                            'cost': cost,  # 'fee': fee, # REMOVED
                             'balance_after': self.balance
                         }
                         self.trades.append(trade_info)
                         logger.debug(
-                            f"Step {self.current_step}: [Act: {action:.2f} > {buy_cover_threshold}] -> Entered LONG "
+                            f"Step {self.current_step}: [Act: {action:.2f} > "
+                            f"{buy_cover_threshold}] -> Entered LONG "
                             f"{self.shares_held:.6f} @ {current_price:.2f} "
-                            f"(Cost: {cost:.2f}) -> " # Removed Fee log
+                            f"(Cost: {cost:.2f}) -> "  # Removed Fee log
                             f"Bal: {self.balance:.2f}"
                         )
                     else:
                         self.failed_trades += 1
-                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but calculated shares {shares_to_buy:.8f} <= threshold.") # noqa E501
+                        logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but insufficient balance ({self.balance:.2f}) or zero price.")
                 else:
                     self.failed_trades += 1
-                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but insufficient balance ({self.balance:.2f}) or zero price.") # noqa E501
+                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Long, but insufficient balance ({self.balance:.2f}) or zero price.")
             else:  # Already in a position, treat as Hold
                 interpreted_action_code = 0 # Override intention: Hold
-                logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Wanted Long, but already in {'Long' if self.position_type == 1 else 'Short'}. Holding.") # noqa E501
+                logger.debug(
+                    f"Step {self.current_step}: [Act: {action:.2f}] Wanted "
+                    f"Long, but already in "
+                    f"{'Long' if self.position_type == 1 else 'Short'}. "
+                    f"Holding."
+                )
 
         elif abs(action) < 0.1:  # Zone around zero: Try Close or Hold Flat
             if self.position_type != 0:  # If in position, try Close
@@ -563,24 +596,28 @@ class TradingEnvironment(Env):
                     trade_successful = True
                     self.total_closes += 1
                     logger.debug(
-                        f"Step {self.current_step}: [Act: {action:.2f} in +/-0.1] -> Closed Position. "
+                        f"Step {self.current_step}: [Act: {action:.2f} in "
+                        f"+/-0.1] -> Closed Position. "
                         # Use the unpacked profit_loss variable for formatting
                         f"PnL: {profit_loss:.2f} -> Bal: {self.balance:.2f}"
                     )
-                else: # Close failed (e.g., insufficient funds for short close)
+                else:  # Close failed (e.g., insufficient funds for short close)
                     self.failed_trades += 1
                     interpreted_action_code = 0 # Treat failed close as Hold
-                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Close, but failed. Holding position.") # noqa E501
+                    logger.debug(f"Step {self.current_step}: [Act: {action:.2f}] Attempted Close, but failed. Holding position.")
             else:  # Already flat, Hold Flat
                 interpreted_action_code = 0 # Intention: Hold Flat
                 self.total_holds += 1
-                logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in +/-0.1] -> Held Flat.")
+                logger.debug(
+                    f"Step {self.current_step}: [Act: {action:.2f} in +/-0.1]"
+                    f" -> Held Flat."
+                )
 
         else:  # Dead zone between close and trade thresholds: Hold Position
             interpreted_action_code = 0 # Intention: Hold
             pos_desc = ('Long' if self.position_type == 1 else
                         'Short' if self.position_type == -1 else 'Flat')
-            logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in dead zone] -> Holding {pos_desc} Position.") # noqa E501
+            logger.debug(f"Step {self.current_step}: [Act: {action:.2f} in dead zone] -> Holding {pos_desc} Position.")
 
         # Fee calculation is handled within the specific trade logic (buy/sell/close) # REMOVED
 
@@ -604,7 +641,11 @@ class TradingEnvironment(Env):
         # Price passed should already be validated by the 'step' method
         # But we add a check here as a failsafe
         if not np.isfinite(closing_price) or closing_price <= ZERO_THRESHOLD:
-             logger.error(f"Step {self.current_step}: Invalid closing price ({closing_price:.2f}) passed to _close_position. Cannot close.") # noqa E501
+             logger.error(
+                 f"Step {self.current_step}: Invalid closing price "
+                 f"({closing_price:.2f}) passed to _close_position. "
+                 f"Cannot close."
+             )
              # return None, 0.0 # REMOVED fee return
              return None
         # --- End Validation ---
@@ -615,11 +656,11 @@ class TradingEnvironment(Env):
             # fee = sell_value * self.transaction_fee # REMOVED
             # self.balance += sell_value - fee # REMOVED fee deduction
             self.balance += sell_value
-            # profit_loss = (closing_price - self.entry_price) * self.shares_held - fee # REMOVED fee deduction
+            # PnL includes fee # REMOVED
+            # profit_loss = (closing_price - self.entry_price) * self.shares_held - fee
             profit_loss = (closing_price - self.entry_price) * self.shares_held
             logger.debug(
                 f"Closing Long: {self.shares_held:.6f} sold @ "
-                f"{closing_price:.2f}, Entry: {self.entry_price:.2f}"
                 # f", Fee: {fee:.2f}" # REMOVED
             )
 
@@ -646,11 +687,11 @@ class TradingEnvironment(Env):
 
             # self.balance -= total_cost  # Deduct cost + fee # REMOVED fee
             self.balance -= buy_cost # Deduct only buy cost
-            # PnL for short = (Entry Price - Closing Price) * Shares - Fee # REMOVED fee
+            # PnL for short = (Entry Price - Closing Price) * Shares - Fee
+            # REMOVED fee
             profit_loss = (self.entry_price - closing_price) * self.shares_held
             logger.debug(
                 f"Closing Short: {self.shares_held:.6f} bought @ "
-                f"{closing_price:.2f}, Entry: {self.entry_price:.2f}"
                 # f", Fee: {fee:.2f}" # REMOVED
             )
 
@@ -658,7 +699,8 @@ class TradingEnvironment(Env):
         trade_info = {
             'step': self.current_step, 'type': trade_type,
             'price': closing_price, 'shares': self.shares_held,
-            'entry_price': self.entry_price, 'pnl': profit_loss, # 'fee': fee, # REMOVED
+            'entry_price': self.entry_price,
+            'pnl': profit_loss,  # 'fee': fee, # REMOVED
             'balance_after': self.balance
         }
         self.trades.append(trade_info)
@@ -683,11 +725,19 @@ class TradingEnvironment(Env):
         # Price passed should already be validated by the 'step' method
         # Add a check here as a failsafe
         if not np.isfinite(current_price):
-             logger.error(f"Step {self.current_step}: Invalid price ({current_price:.2f}) received in _update_portfolio_value. Using last valid: {self.last_valid_price}") # noqa E501
-             current_price = self.last_valid_price # Use last valid as fallback
-             if not np.isfinite(current_price): # If last valid is also bad, extreme fallback
-                  logger.error(f"Step {self.current_step}: Last valid price ({self.last_valid_price}) also invalid! Portfolio calculation will likely fail.")
-                  current_price = 0.0 # Prevent crash, but PV will be wrong
+            logger.error(
+                f"Step {self.current_step}: Invalid price ({current_price:.2f})"
+                f" received in _update_portfolio_value. "
+                f"Using last valid: {self.last_valid_price}"
+            )
+            current_price = self.last_valid_price  # Use last valid as fallback
+            if not np.isfinite(current_price):  # If last valid is also bad
+                logger.error(
+                    f"Step {self.current_step}: Last valid price "
+                    f"({self.last_valid_price}) also invalid! "
+                    f"Portfolio calculation will likely fail."
+                )
+                current_price = 0.0  # Prevent crash, but PV will be wrong
         # --- End Validation ---
 
         self.asset_value = 0.0  # Reset asset value
@@ -709,14 +759,6 @@ class TradingEnvironment(Env):
             self.portfolio_value = self.balance
             self.asset_value = 0.0  # Explicitly zero
 
-        # --- DETAILED LOGGING FOR PORTFOLIO VALUE --- #
-        # logger.debug(
-        #     f"_update_portfolio_value (Step {self.current_step}): "
-        #     f"PosType={self.position_type}, Price={current_price:.4f}, "
-        #     f"Shares={self.shares_held:.8f}, Bal={self.balance:.4f}, "
-        #     f"Entry={self.entry_price}, AssetVal={self.asset_value:.4f}, "
-        #     f"PortVal={self.portfolio_value:.4f}"
-        # )
         # --- Check for non-finite values immediately after calculation --- #
         if not np.isfinite(self.portfolio_value) or not np.isfinite(self.balance):
             logger.error(
@@ -728,11 +770,11 @@ class TradingEnvironment(Env):
                 f" -> AssetVal={self.asset_value}, "
                 f"PortVal={self.portfolio_value}"
             )
-            # Attempt to recover by setting to a large negative value to penalize heavily
-            # or potentially use last known good value if tracked.
-            # Using initial balance might be too forgiving. Let's use 0 for now.
-            self.portfolio_value = 0.0 # Emergency reset? Or use self.initial_balance?
-            self.balance = 0.0 # Reset balance too if it became non-finite
+            # Attempt to recover by setting to a large negative value
+            # to penalize heavily or use last known good value.
+            # Using initial balance might be too forgiving. Use 0 for now.
+            self.portfolio_value = 0.0  # Emergency reset?
+            self.balance = 0.0  # Reset balance too if it became non-finite
 
     def _calculate_reward(self, interpreted_action_code, prev_portfolio_value,
                           prev_position_type, current_price):
@@ -754,24 +796,41 @@ class TradingEnvironment(Env):
         # Price is passed in and assumed validated by step method
         # Add check anyway as failsafe for benchmark calc
         if not np.isfinite(current_price):
-             logger.warning(f"Step {self.current_step}: Invalid price ({current_price:.2f}) in _calculate_reward. Benchmark reward might be inaccurate.") # noqa E501
-             # Proceed with calculations, components using price will likely be 0
+            logger.warning(
+                f"Step {self.current_step}: Invalid price ({current_price:.2f})"
+                f" in _calculate_reward. Benchmark reward might be inaccurate."
+            )
+            # Proceed, components using price will likely be 0
 
         # --- Reward Component 1: Portfolio Value Change ---
         portfolio_change_pct = 0.0
-        if abs(prev_portfolio_value) > ZERO_THRESHOLD and np.isfinite(prev_portfolio_value) and np.isfinite(self.portfolio_value):
+        if (abs(prev_portfolio_value) > ZERO_THRESHOLD and
+                np.isfinite(prev_portfolio_value) and
+                np.isfinite(self.portfolio_value)):
             portfolio_change_pct = (self.portfolio_value - prev_portfolio_value) / prev_portfolio_value
         elif not np.isfinite(prev_portfolio_value) or not np.isfinite(self.portfolio_value):
-            logger.warning(f"Step {self.current_step}: Non-finite portfolio value detected in reward calc (prev={prev_portfolio_value}, curr={self.portfolio_value}). Setting change to -1.") # noqa E501
-            portfolio_change_pct = -1.0 # Penalize heavily if values are non-finite
+            logger.warning(
+                f"Step {self.current_step}: Non-finite portfolio value "
+                f"detected in reward calc (prev={prev_portfolio_value}, "
+                f"curr={self.portfolio_value}). Setting change to -1."
+            )
+            portfolio_change_pct = -1.0 # Penalize heavily for non-finite
         # Assign the component AFTER calculating the percentage
-        reward_components['portfolio_change'] = portfolio_change_pct * self.portfolio_change_weight
+        reward_components['portfolio_change'] = (
+            portfolio_change_pct * self.portfolio_change_weight
+        )
 
         # --- Reward Component 2: Drawdown Penalty ---
         current_drawdown = 0.0
         if self.max_portfolio_value > ZERO_THRESHOLD:
-            current_drawdown = max(0.0, (self.max_portfolio_value - self.portfolio_value) / self.max_portfolio_value)
-        reward_components['drawdown_penalty'] = -current_drawdown * self.drawdown_penalty_weight
+            current_drawdown = max(
+                0.0,
+                (self.max_portfolio_value - self.portfolio_value) /
+                self.max_portfolio_value
+            )
+        reward_components['drawdown_penalty'] = (
+            -current_drawdown * self.drawdown_penalty_weight
+        )
 
         # --- Reward Component 3: Sharpe Ratio Reward ---
         sharpe_ratio_rolling = 0.0
@@ -781,7 +840,9 @@ class TradingEnvironment(Env):
             std_return = np.std(window_returns)
             if std_return > ZERO_THRESHOLD:
                 sharpe_ratio_rolling = mean_return / std_return
-        reward_components['sharpe_reward'] = sharpe_ratio_rolling * self.sharpe_reward_weight
+        reward_components['sharpe_reward'] = (
+            sharpe_ratio_rolling * self.sharpe_reward_weight
+        )
 
         # --- Reward Component 5: Benchmark Comparison ---
         benchmark_reward = 0.0
@@ -789,19 +850,24 @@ class TradingEnvironment(Env):
         # Use last_valid_price for previous step if current_step > 0
         prev_step_index = self.current_step - 1
         if prev_step_index >= 0:
-             prev_price = self.data['close'].iloc[prev_step_index]
-             # Use last_valid_price if the historical price is invalid
-             if not np.isfinite(prev_price):
-                  logger.warning(f"Step {self.current_step}: Invalid historical price at {prev_step_index} for benchmark. Using last valid: {self.last_valid_price}") # noqa E501
-                  prev_price = self.last_valid_price # Fallback needed?
+            prev_price = self.data['close'].iloc[prev_step_index]
+            # Use last_valid_price if the historical price is invalid
+            if not np.isfinite(prev_price):
+                logger.warning(
+                    f"Step {self.current_step}: Invalid historical price at "
+                    f"{prev_step_index} for benchmark. Using last valid: "
+                    f"{self.last_valid_price}"
+                )
+                prev_price = self.last_valid_price  # Fallback needed?
         else:
-             prev_price = self.episode_start_price # Use validated start price
+            prev_price = self.episode_start_price  # Use validated start price
 
         # Check validity of prices for benchmark calculation
-        if np.isfinite(prev_price) and prev_price > ZERO_THRESHOLD and np.isfinite(current_price):
+        if (np.isfinite(prev_price) and prev_price > ZERO_THRESHOLD and
+                np.isfinite(current_price)):
             benchmark_return = (current_price / prev_price) - 1.0
             # Access portfolio_change component AFTER it has been assigned
-            agent_step_return = reward_components['portfolio_change'] # From portfolio_change component
+            # agent_step_return = reward_components['portfolio_change'] # Unused
             benchmark_reward = benchmark_return * self.benchmark_reward_weight
 
         reward_components['benchmark_reward'] = benchmark_reward
@@ -820,9 +886,11 @@ class TradingEnvironment(Env):
             idle_penalty = -1.0  # Base penalty for being idle too long
         reward_components['idle_penalty'] = idle_penalty * self.idle_penalty_weight
 
-        # --- Reward Component 8: Profit/Closing Bonus (Only when Closing a position) ---
+        # --- Reward Component 8: Profit/Closing Bonus (Only when Closing) ---
         profit_bonus = 0.0
-        if interpreted_action_code == 3 and prev_position_type != 0 and self.position_type == 0:
+        # Check if action was close, prev pos wasn't flat, current pos is flat
+        if (interpreted_action_code == 3 and prev_position_type != 0 and
+                self.position_type == 0):
             # PnL was calculated in _close_position
             # Find the PnL from the last trade entry in self.trades
             last_trade = self.trades[-1] if self.trades else None
@@ -844,7 +912,9 @@ class TradingEnvironment(Env):
                     # else: Add penalty for losing closes? Optional.
                     #     profit_bonus = pnl_pct * some_penalty_multiplier
 
-        reward_components['profit_bonus'] = profit_bonus * self.profit_bonus_weight
+        reward_components['profit_bonus'] = (
+            profit_bonus * self.profit_bonus_weight
+        )
 
         # --- Reward Component 9: Exploration Bonus (Optional) ---
         # ... (kept commented out)
@@ -884,7 +954,9 @@ class TradingEnvironment(Env):
             ])
             logger.debug(
                 f"Step {self.current_step} (EpStep {self.episode_step}) "
-                f"ContAct {self.last_action:.2f} (Interpreted: {interpreted_action_code}) -> Reward: {total_reward:.4f}"
+                f"ContAct {self.last_action:.2f} "
+                f"(Interpreted: {interpreted_action_code}) -> "
+                f"Reward: {total_reward:.4f}"
                 f" | Components: {component_str}"
             )
 
@@ -927,13 +999,29 @@ class TradingEnvironment(Env):
         historical_data = self.data.iloc[start_idx:end_idx+1]
 
         # --- RAW DATA NAN CHECK ---
-        raw_features_df = historical_data[self.features]
+        # <<< MODIFIED: Apply forward fill first >>>
+        historical_data_filled = historical_data.fillna(method='ffill')
+        # Fill any remaining NaNs (e.g., at the start) with 0
+        historical_data_filled = historical_data_filled.fillna(0)
+
+        raw_features_df = historical_data_filled[self.features]
         if not np.all(np.isfinite(raw_features_df.values)):
-            logger.error(f"[NAN_CHECK] NaN found in raw historical_data slice (Step: {safe_step}, Indices: {start_idx}-{end_idx}) before processing.")
+            logger.error(
+                f"[NAN_CHECK] NaN found in raw feature data *after* ffill/fillna(0) " # noqa E501
+                f"(Step: {safe_step}, Indices: {start_idx}-{end_idx}). "
+                f"This should not happen."
+            )
             # Log columns with NaNs
-            nan_cols = raw_features_df.columns[raw_features_df.isnull().any()].tolist()
+            nan_cols = raw_features_df.columns[
+                raw_features_df.isnull().any()
+            ].tolist()
             if nan_cols:
-                logger.error(f"[NAN_CHECK] Columns with NaNs in raw slice: {nan_cols}")
+                logger.error(
+                    f"[NAN_CHECK] Columns with NaNs after fill: {nan_cols}"
+                )
+            # If this error occurs, something is fundamentally wrong.
+            # Return zeros as a last resort to prevent crash.
+            return np.zeros(self.observation_space.shape, dtype=np.float32)
         # -------------------------
 
         # Ensure we have exactly sequence_length rows for feature data
@@ -961,15 +1049,17 @@ class TradingEnvironment(Env):
         # Extract features and flatten
         feature_data = []
         for feature in self.features:
-            # Ensure feature exists and handle potential NaNs
-            if feature in historical_data.columns:
-                # Fill NaNs with 0
-                values = historical_data[feature].fillna(0).values
+            # <<< MODIFIED: Use the pre-filled data >>>
+            # Ensure feature exists (should always now)
+            if feature in historical_data_filled.columns:
+                # Values should already be finite after ffill/fillna(0)
+                values = historical_data_filled[feature].values
                 feature_data.extend(values)
             else:
+                # This case should be less likely now
                 logger.warning(
-                    f"Feature '{feature}' not found in historical data for "
-                    f"observation. Appending zeros."
+                    f"Feature '{feature}' still not found after processing "
+                    f"for observation. Appending zeros."
                 )
                 feature_data.extend([0.0] * self.sequence_length)
 
@@ -981,7 +1071,7 @@ class TradingEnvironment(Env):
         # (current_price / entry_price) - 1 if in position, else 0
         # Use the already validated last_valid_price
         normalized_entry_price = 0.0
-        current_price_obs = self.last_valid_price # Use validated price
+        current_price_obs = self.last_valid_price  # Use validated price
         # <<< ADDED: Check entry price validity >>>
         entry_price_valid = (self.entry_price is not None and
                              np.isfinite(self.entry_price) and
@@ -993,14 +1083,26 @@ class TradingEnvironment(Env):
                 normalized_entry_price = (current_price_obs / self.entry_price) - 1.0 # noqa E501
                 # --- Check for non-finite result ---
                 if not np.isfinite(normalized_entry_price):
-                     logger.warning(f"Step {self.current_step}: normalized_entry_price became non-finite ({normalized_entry_price}). Current: {current_price_obs}, Entry: {self.entry_price}. Setting to 0.") # noqa E501
-                     normalized_entry_price = 0.0
+                    logger.warning(
+                        f"Step {self.current_step}: normalized_entry_price "
+                        f"became non-finite ({normalized_entry_price}). "
+                        f"Current: {current_price_obs}, Entry: {self.entry_price}. "
+                        f"Setting to 0."
+                    )
+                    normalized_entry_price = 0.0
                  # --- End Check ---
             else:
                  # This should not happen if last_valid_price is truly valid
-                 logger.warning(f"Step {self.current_step}: Skipping norm_entry_price calc due to non-finite/zero validated current price ({current_price_obs})") # noqa E501
+                logger.warning(
+                    f"Step {self.current_step}: Skipping norm_entry_price calc"
+                    f" due to non-finite/zero validated current price "
+                    f"({current_price_obs})"
+                )
         elif self.position_type != 0 and not entry_price_valid:
-             logger.warning(f"Step {self.current_step}: Skipping norm_entry_price calc due to invalid entry price ({self.entry_price})") # noqa E501
+            logger.warning(
+                f"Step {self.current_step}: Skipping norm_entry_price calc "
+                f"due to invalid entry price ({self.entry_price})"
+            )
         # --- End Position Information ---
 
         # Combine features and position info
@@ -1010,9 +1112,14 @@ class TradingEnvironment(Env):
 
         # Check for non-finite values in observation BEFORE returning
         if not np.all(np.isfinite(observation)):
-            logger.warning(f"Step {self.current_step}: Non-finite values detected in observation BEFORE clipping. Clipping to finite range.") # noqa E501
-            # Replace NaNs with 0 and Infs with large finite numbers
-            observation = np.nan_to_num(observation, nan=0.0, posinf=1e9, neginf=-1e9)
+            logger.warning(
+                f"Step {self.current_step}: Non-finite values detected in "
+                f"observation BEFORE clipping. Clipping to finite range."
+            )
+            # Replace NaNs/Infs with large finite numbers or zero
+            observation = np.nan_to_num(
+                observation, nan=0.0, posinf=1e9, neginf=-1e9
+            )
 
         # --- DETAILED LOGGING FOR OBSERVATION --- #
         # logger.debug(f"Observation (Step {self.current_step}): {observation}")
@@ -1033,8 +1140,12 @@ class TradingEnvironment(Env):
         safe_step = min(self.current_step, len(self.data) - 1)
         # current_price is passed in, already validated
         if not np.isfinite(current_price):
-             logger.warning(f"Step {self.current_step}: Invalid price ({current_price:.2f}) received in _get_info. Using last valid: {self.last_valid_price}") # noqa E501
-             current_price = self.last_valid_price # Use last valid as fallback
+            logger.warning(
+                f"Step {self.current_step}: Invalid price ({current_price:.2f})"
+                f" received in _get_info. "
+                f"Using last valid: {self.last_valid_price}"
+            )
+            current_price = self.last_valid_price  # Use last valid as fallback
 
         # Base info
         info = {
