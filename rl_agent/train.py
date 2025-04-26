@@ -477,6 +477,10 @@ class TuneReportCallback(BaseCallback):
                 if combined_score is not None and np.isfinite(combined_score):
                     reportable_metrics["rollout_combined_score"] = float(combined_score)
 
+                # <<< ADD DEBUG LOGGING >>>
+                callback_logger.debug(f"Keys being reported to Ray Tune: {list(reportable_metrics.keys())}")
+                # <<< END DEBUG LOGGING >>>
+
                 if reportable_metrics:
                     # Use our check_ray_session helper function
                     # Modern Ray version uses session.report
