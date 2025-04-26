@@ -839,7 +839,8 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
         early_stopping_patience=config.get("early_stopping_patience", 10),
         checkpoint_save_path=checkpoint_dir,
         model_name=train_config["model_type"],
-        custom_callbacks=[TuneReportCallback()],
+        # Conditionally add TuneReportCallback only if running under Ray Tune
+        custom_callbacks=[TuneReportCallback()] if check_ray_session() else [],
         curriculum_duration_fraction=0.0
     )
 
@@ -1360,8 +1361,8 @@ def create_env(
         env_kwargs["features"] = []
 
     # Filter out features with suffixes for other timeframes
-    features = [f for f in env_kwargs['features'] if not f.endswith(('_15m', '_4h', '_1d'))]
-    env_kwargs['features'] = features
+    # features = [f for f in env_kwargs['features'] if not f.endswith(('_15m', '_4h', '_1d'))] # Removed filtering
+    # env_kwargs['features'] = features # Keep all features specified in config
 
     reward_param_keys = [
         "portfolio_change_weight", "drawdown_penalty_weight", "sharpe_reward_weight",
@@ -2080,7 +2081,8 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
         early_stopping_patience=config.get("early_stopping_patience", 10),
         checkpoint_save_path=checkpoint_dir,
         model_name=config["model_type"],
-        custom_callbacks=[TuneReportCallback()],
+        # REMOVE TuneReportCallback entirely from standard train function
+        custom_callbacks=[],
         curriculum_duration_fraction=0.0
     )
 
