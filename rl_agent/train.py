@@ -263,7 +263,8 @@ class TuneReportCallback(BaseCallback):
         has_ray_session = check_ray_session()
         
         # Periodically report FPS and step metrics
-        if self.step_count % 10 == 0 and has_ray_session:
+        # Reduce frequency from 10 to 1000
+        if self.step_count % 1000 == 0 and has_ray_session:
             try:
                 fps_val = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
                 report_dict = {
@@ -273,9 +274,11 @@ class TuneReportCallback(BaseCallback):
                     "combined_score": float(self.last_combined_score) 
                     # ------------------------------------------
                 }
-                # Try different Ray versions for reporting
+                # Use the modern check_ray_session function
+                # Use the modern reporting API if available
                 if hasattr(ray, "air") and hasattr(ray.air, "session"):
                     ray.air.session.report(report_dict)
+                # Fallback to tune.report (passing dict)
                 elif hasattr(tune, "report"):
                     tune.report(report_dict)
             except Exception as tune_err:
