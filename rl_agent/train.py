@@ -25,28 +25,81 @@ import gym
 try:
     import gymnasium
 except ImportError:
-    gymnasium = None
+    pass
+    
 import numpy as np
 import pandas as pd
-import ray
 import torch
-from ray import tune
-from stable_baselines3 import A2C, DQN, PPO, SAC  # Removed QRDQN from here
-from stable_baselines3.common.base_class import BaseAlgorithm  # Changed BaseRLModel to BaseAlgorithm
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3 import A2C, DQN, PPO, SAC
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EvalCallback
+from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.policies import ActorCriticPolicy
-from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy # Import DQN's MlpPolicy
-from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy  # Import SAC's MlpPolicy
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, SubprocVecEnv # Removed make_vec_env
-from sb3_contrib import RecurrentPPO, QRDQN  # Changed from stable_baselines3_contrib to sb3_contrib
-from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.utils import get_device
-from stable_baselines3.common.vec_env.base_vec_env import VecEnv
+from stable_baselines3.common.preprocessing import is_image_space
+from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv, VecEnv,
+                                             VecNormalize, sync_envs_normalization)
+from stable_baselines3.common.base_class import BaseAlgorithm
+
+# --- Project Imports --- #
+# Note: TradingEnvironment is imported below; create_env is defined in this file
+from rl_agent.utils import (calculate_max_drawdown, setup_logger, ensure_dir_exists)
+# from rl_agent.features import load_model_features, FEATURE_CHOICES # Removed non-existent import
+
+# --- Ray Tune Support --- #
+RAY_AVAILABLE = False
+try:
+    import ray
+    from ray import tune
+    RAY_AVAILABLE = True
+except ImportError:
+    pass
+
+def check_ray_session():
+    """Helper function to check if a Ray Tune session is available in a way that works with different Ray versions."""
+    if not RAY_AVAILABLE:
+        return False
+    
+    try:
+        # Modern Ray version uses session.report
+        if hasattr(ray, "air") and hasattr(ray.air, "session"):
+            return True
+        # Older Ray versions check tune.is_session_enabled
+        elif hasattr(tune, "is_session_enabled"):
+            return tune.is_session_enabled()
+        # Very old Ray versions use tune.report directly
+        elif hasattr(tune, "report"):
+            return True
+        return False
+    except (AttributeError, ImportError):
+        return False
 
 # --- Local Imports --- #
-_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(_parent_dir)
+# _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # No longer needed
+# sys.path.append(_parent_dir) # No longer needed
+
+def find_project_root(marker='.git'):
+    """Find the project root directory by searching upwards for a marker."""
+    path = os.path.abspath(__file__)
+    while True:
+        parent = os.path.dirname(path)
+        if os.path.exists(os.path.join(path, marker)):
+            return path
+        if parent == path: # Reached filesystem root
+            # Fallback: Assume script is in root or one level down
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            if os.path.exists(os.path.join(script_dir, 'rl_agent')):
+                 return script_dir
+            parent_dir = os.path.dirname(script_dir)
+            if os.path.exists(os.path.join(parent_dir, 'rl_agent')):
+                 return parent_dir
+            # If still not found, default to script's directory
+            print("Warning: Project root marker not found. Using script directory.", file=sys.stderr)
+            return script_dir
+        path = parent
+
+project_root = find_project_root()
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+    # print(f"Debug: Added {project_root} to sys.path") # Optional debug
 
 from rl_agent.callbacks import get_callback_list
 from rl_agent.data.data_loader import DataLoader
@@ -97,13 +150,6 @@ def make_vec_env(env_id, n_envs=1, seed=None, vec_env_cls=None, env_kwargs=None)
     
     return vec_env_cls([make_env(i) for i in range(n_envs)])
 
-# Check if Ray is available
-try:
-    ray_available = ray is not None
-except NameError:
-    ray_available = False
-RAY_AVAILABLE = ray_available
-
 # Initialize logger globally (will be configured later)
 # Use specific logger name instead of __name__ for consistency
 logger = logging.getLogger("rl_agent")
@@ -112,170 +158,75 @@ logger = logging.getLogger("rl_agent")
 # --- Ray Tune Callback Class --- #
 
 class TuneReportCallback(BaseCallback):
-    """Callback to report metrics to Ray Tune, focusing on scheduler needs."""
-    def __init__(self, rollout_buffer_size=100):
-        super().__init__(verbose=0)
-        # Initialize counters and metrics
-        self.step_count = 0
+    """
+    Callback for reporting metrics to Ray Tune during training.
+    Tracks and reports episode rewards, returns, lengths, and other metrics.
+    """
+    
+    def __init__(self, n_eval_episodes: int = 5, verbose: int = 0):
+        super().__init__(verbose)
+        self.n_eval_episodes = n_eval_episodes
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.episode_returns = []
+        self.eval_env_ids = []
         self.episode_count = 0
-        self.prev_ep_count = 0
-        self.last_combined_score = 0.0
-        self.best_combined_score = -np.inf
-        self.best_mean_reward = -np.inf
-        self.best_mean_return = -np.inf
-        self.best_explained_variance = -np.inf
-        # Store last known variance
-        self.last_explained_variance = 0.0
-        # Buffer to store final metrics from completed episodes during rollout
-        self.rollout_metrics_buffer = deque(maxlen=rollout_buffer_size)
-        # Store last known FPS
-        self.last_fps = 0.0
-        self.rollout_count = 0
-        self.log_freq = 10
+        self.step_count = 0
         self.start_time = time.time()
-        self.last_fps_log_time = 0
-
-    def _on_init(self) -> None:
-        """Ensure the logger is available."""
-        callback_logger = logging.getLogger("rl_agent")
-        if self.logger is None:
-            callback_logger.warning(
-                "SB3 logger not available in TuneReportCallback logger attr."
-            )
-        callback_logger.info(
-            "TuneReportCallback initialized - reporting metrics at rollout end."
-        )
-
-    def _normalize_and_combine_metrics(
-        self, reward, explained_variance, sharpe_ratio, episode_return,
-        calmar_ratio, sortino_ratio, actor_loss, critic_loss,
-        model_type: str = "ppo"
-    ):
+        self.num_timesteps = 0
+        
+    def _on_training_start(self) -> None:
         """
-        Create a normalized combined score weighting various performance metrics,
-        including bonuses for meeting specific ratio thresholds and penalties for
-        high losses (for SAC).
+        Called at the start of training.
         """
-        # Constants for metric targets and weights
-        TARGET_SHARPE = 1.0  # Can adjust this target
-        TARGET_SORTINO = 1.0  # Can adjust this target
-        TARGET_CALMAR = 0.5  # Can adjust this target
-        METRIC_BONUS = 0.15  # Bonus added for each threshold met
-        LOSS_SCALE_FACTOR = 0.1  # Scale factor for loss normalization
-
-        # --- Handle missing or invalid inputs --- #
-        if reward is None or not isinstance(reward, (int, float, np.number)):
-            reward = 0.0
-        if (explained_variance is None or 
-                not isinstance(explained_variance, (int, float, np.number))):
-            explained_variance = 0.0
-        if (sharpe_ratio is None or 
-                not isinstance(sharpe_ratio, (int, float, np.number)) or 
-                not np.isfinite(sharpe_ratio)):
-            sharpe_ratio = 0.0  # Neutral Sharpe if invalid/infinite
-        if (episode_return is None or 
-                not isinstance(episode_return, (int, float, np.number)) or 
-                not np.isfinite(episode_return)):
-            episode_return = 0.0  # Neutral return if invalid/infinite
-        if (calmar_ratio is None or 
-                not isinstance(calmar_ratio, (int, float, np.number)) or 
-                not np.isfinite(calmar_ratio)):
-            calmar_ratio = 0.0  # Neutral Calmar if invalid/infinite
-        if (sortino_ratio is None or 
-                not isinstance(sortino_ratio, (int, float, np.number)) or 
-                not np.isfinite(sortino_ratio)):
-            sortino_ratio = 0.0  # Neutral Sortino if invalid/infinite
-        # Handle losses (default to infinity if missing, so normalized value is 0)
-        if (actor_loss is None or 
-                not isinstance(actor_loss, (int, float, np.number)) or 
-                not np.isfinite(actor_loss)):
-            actor_loss = float('inf')
-        if (critic_loss is None or 
-                not isinstance(critic_loss, (int, float, np.number)) or 
-                not np.isfinite(critic_loss)):
-            critic_loss = float('inf')
-
-        # --- Normalization (aiming for values roughly in [-1, 1] or [0, 1]) --- #
-        normalized_reward = np.tanh(reward / 1000.0)
-        normalized_variance = np.clip(explained_variance, -1.0, 1.0)
-        # Divisor 5 assumes typical range -5 to 5
-        normalized_sharpe = np.tanh(sharpe_ratio / 5.0)
-        normalized_return = np.tanh(episode_return / 2.0)  # Scale by 2
-        # Divisor 2 assumes typical range -2 to 2
-        normalized_calmar = np.tanh(calmar_ratio / 2.0)
-        # Divisor 3 assumes typical range -3 to 3
-        normalized_sortino = np.tanh(sortino_ratio / 3.0)
-        # Normalize losses using exp(-loss*scale), higher value (closer to 1) is better
-        normalized_actor_loss = np.exp(-actor_loss * LOSS_SCALE_FACTOR)
-        normalized_critic_loss = np.exp(-critic_loss * LOSS_SCALE_FACTOR)
-
-        # Weights for metrics
-        w_reward = 0.25
-        # Zero weight for SAC variance
-        w_variance = 0.10 if model_type != "sac" else 0.0
-        w_sharpe = 0.15
-        w_sortino = 0.20  # Reduced weight slightly
-        w_calmar = 0.20  # Reduced weight slightly
-        w_return = 0.0  # Keep return weight 0
-        w_actor_loss = 0.05 if model_type == "sac" else 0.0  # Only for SAC
-        w_critic_loss = 0.05 if model_type == "sac" else 0.0  # Only for SAC
-
-        # Calculate weighted sum
-        combined_score_raw = (
-            w_reward * normalized_reward +
-            w_variance * normalized_variance +
-            w_sharpe * normalized_sharpe +
-            w_return * normalized_return +
-            w_calmar * normalized_calmar +  # Added Calmar
-            w_sortino * normalized_sortino +  # Added Sortino
-            w_actor_loss * normalized_actor_loss +  # Added Actor Loss (SAC only)
-            w_critic_loss * normalized_critic_loss  # Added Critic Loss (SAC only)
+        self.start_time = time.time()
+        
+    def _calculate_eval_score(self, rewards, max_drawdown, sharpe, avg_trade_duration, win_rate):
+        """Calculate a combined evaluation score.
+        
+        Args:
+            rewards: Total episode rewards
+            max_drawdown: Maximum drawdown (0-1 scale, lower is better)
+            sharpe: Sharpe ratio (higher is better)
+            avg_trade_duration: Average trade duration in steps
+            win_rate: Proportion of winning trades (0-1)
+            
+        Returns:
+            Combined score from 0-1
+        """
+        # Normalize values to appropriate ranges for scoring
+        norm_drawdown = 1 - max_drawdown  # Convert so higher is better
+        norm_sharpe = min(max(sharpe / 3.0, 0), 1)  # Scale with 3.0 being excellent
+        
+        # Calculate duration score (we want longer trades generally)
+        # Scale so 20-step trades get 0.8 score, 50+ gets 1.0
+        duration_score = min(avg_trade_duration / 50.0, 1.0)
+        
+        # Weights for combined score (sum should be 1.0)
+        weights = {
+            'reward': 0.3,
+            'sharpe': 0.3,
+            'drawdown': 0.2,
+            'win_rate': 0.1,
+            'duration': 0.1
+        }
+        
+        # Calculate weighted score
+        combined_score = (
+            weights['reward'] * rewards +
+            weights['sharpe'] * norm_sharpe +
+            weights['drawdown'] * norm_drawdown +
+            weights['win_rate'] * win_rate +
+            weights['duration'] * duration_score
         )
-
-        # --- Add Threshold Bonuses --- #
-        bonus_score = 0.0
-        if sharpe_ratio > TARGET_SHARPE:
-            bonus_score += METRIC_BONUS
-            logging.getLogger("rl_agent").debug(
-                f"Sharpe bonus added ({sharpe_ratio:.2f} > {TARGET_SHARPE})"
-            )
-        if sortino_ratio > TARGET_SORTINO:
-            bonus_score += METRIC_BONUS
-            logging.getLogger("rl_agent").debug(
-                f"Sortino bonus added ({sortino_ratio:.2f} > {TARGET_SORTINO})"
-            )
-        if calmar_ratio > TARGET_CALMAR:
-            bonus_score += METRIC_BONUS
-            logging.getLogger("rl_agent").debug(
-                f"Calmar bonus added ({calmar_ratio:.2f} > {TARGET_CALMAR})"
-            )
-
-        combined_score_with_bonuses = combined_score_raw + bonus_score
-
-        # Calculate min/max possible scores based on weights
-        current_weights = [w_reward, w_sharpe, w_sortino, w_calmar]
-        if model_type != "sac":
-            current_weights.append(w_variance)
-        else:  # For SAC, add loss weights
-            current_weights.extend([w_actor_loss, w_critic_loss])
-
-        # Max score includes positive weights and bonuses
-        max_possible_score = sum(w for w in current_weights if w > 0) + 3 * METRIC_BONUS
-        # Min score includes negative contributions (normalized metrics can be -1)
-        min_possible_score = -sum(abs(w) for w in current_weights if w > 0 and 
-                                w not in [w_actor_loss, w_critic_loss])  # Losses are >=0 normalized
-
-        score_range = max_possible_score - min_possible_score
-
-        # Normalize to [0, 1] range
-        if score_range > 0:
-            combined_score_normalized = (
-                (combined_score_with_bonuses - min_possible_score) / score_range
-            )
-        else:
-            combined_score_normalized = 0.5  # Fallback
-
-        # Ensure final score is strictly within [0, 1]
+        
+        # Normalize to 0-1 range for final score
+        # Using a logistic function to map values to 0-1 range
+        # Adjust the scale to calibrate sensitivity
+        scale = 5.0
+        combined_score_normalized = 1 / (1 + np.exp(-scale * (combined_score - 0.5)))
+        
+        # Clip to ensure we're in the 0-1 range
         combined_score_final = np.clip(combined_score_normalized, 0.0, 1.0)
         return combined_score_final
 
@@ -291,6 +242,10 @@ class TuneReportCallback(BaseCallback):
             model_type = "sac"
         elif "ppo" in policy_name:
             model_type = "ppo"
+        elif "dqn" in policy_name:
+            model_type = "dqn"
+        elif "a2c" in policy_name:
+            model_type = "a2c"
         else:
             model_type = "unknown"
         
@@ -298,186 +253,81 @@ class TuneReportCallback(BaseCallback):
         self.num_timesteps = self.model.num_timesteps
         callback_logger = logging.getLogger("rl_agent.train")
         
-        # Update FPS tracking - check if available in logger
-        if self.logger is not None and hasattr(self.logger, 'name_to_value'):
-            if "time/fps" in self.logger.name_to_value:
-                try:
-                    fps_val = float(self.logger.name_to_value["time/fps"])
-                    if np.isfinite(fps_val):
-                        self.last_fps = fps_val
-                except (ValueError, TypeError):
-                    pass  # Keep using the last known FPS
+        # Check for Ray Tune session in a way that works with different Ray versions
+        has_ray_session = check_ray_session()
         
-        # Report FPS to Ray Tune periodically (every 10 steps)
-        # This ensures FPS metrics are updated continuously
-        if self.step_count % 10 == 0 and tune.is_session_enabled():
-            tune.report(fps=self.last_fps)
-        
-        # --- Check for completed episodes ---
-        # We determine if an episode has completed by comparing
-        # the current number of episodes with previous states.
-        # Modified to use dones from model.ep_info_buffer
-        completed_episodes = []
-        
-        # Check if any environments have completed episodes
-        if hasattr(self.model, "ep_info_buffer") and len(self.model.ep_info_buffer) > 0:
-            # Get current episode count
-            current_ep_count = len(self.model.ep_info_buffer)
-            
-            # If we have new episodes completed
-            if current_ep_count > self.prev_ep_count:
-                # Get the newly completed episodes
-                new_episodes = self.model.ep_info_buffer[self.prev_ep_count:current_ep_count]
-                completed_episodes.extend(new_episodes)
-                self.prev_ep_count = current_ep_count
-        
-        # --- Process completed episodes ---
-        for episode_info in completed_episodes:
-            episode_num = self.episode_count
-            # Extract basic episode stats
-            ep_reward = episode_info.get("r", 0)
-            ep_length = episode_info.get("l", 0)
-            
-            # Access SB3 metrics directly 
-            sb3_metrics = {}
-            if self.logger is not None and hasattr(self.logger, 'name_to_value'):
-                for key, value in self.logger.name_to_value.items():
-                    try:
-                        # Convert to float if possible
-                        sb3_metrics[key] = float(value)
-                    except (ValueError, TypeError):
-                        # Keep as is if not convertible
-                        sb3_metrics[key] = value
-            
-            # Get model-specific metrics if available
-            env_metrics = {}
+        # Periodically report FPS and step metrics
+        if self.step_count % 10 == 0 and has_ray_session:
             try:
-                # Handle VecEnv and single env cases
-                if hasattr(self.model, "env"):
-                    if hasattr(self.model.env, "venv") and hasattr(self.model.env.venv, "envs"):
-                        # For VecMonitor wrapped envs
-                        if hasattr(self.model.env.venv.envs[0], "get_episode_metrics"):
-                            env_metrics = self.model.env.venv.envs[0].get_episode_metrics()
-                    elif hasattr(self.model.env, "envs"):
-                        # Direct VecEnv
-                        if hasattr(self.model.env.envs[0], "get_episode_metrics"):
-                            env_metrics = self.model.env.envs[0].get_episode_metrics()
-                    elif hasattr(self.model.env, "get_episode_metrics"):
-                        # Single env
-                        env_metrics = self.model.env.get_episode_metrics()
-            except (AttributeError, IndexError) as e:
-                callback_logger.warning(f"Failed to get env metrics: {e}")
-            
-            # Get financial metrics from env_metrics
-            financial_metrics = {}
-            for key, value in env_metrics.items():
-                try:
-                    if isinstance(value, (int, float)) and np.isfinite(value):
-                        financial_metrics[f"trading/{key}"] = value
-                except (ValueError, TypeError):
-                    pass
-            
-            # Combine all metrics for this episode
-            metrics_to_report = {
-                "timesteps": self.num_timesteps,
-                "episodes": episode_num,
-                "reward": ep_reward,
-                "length": ep_length,
-                "fps": self.last_fps,  # Always include FPS
-            }
-            
-            # Add explained variance if available
-            exp_var = sb3_metrics.get("train/explained_variance")
-            if exp_var is not None and np.isfinite(exp_var):
-                metrics_to_report["explained_variance"] = exp_var
-                self.last_explained_variance = exp_var
-            
-            # Add model losses if available (based on model type)
-            actor_loss = None
-            critic_loss = None
-            
-            if model_type == "sac":
-                actor_loss = sb3_metrics.get("train/actor_loss")
-                critic_loss = sb3_metrics.get("train/critic_loss")
-                if actor_loss is not None:
-                    metrics_to_report["actor_loss"] = actor_loss
-                if critic_loss is not None:
-                    metrics_to_report["critic_loss"] = critic_loss
-            elif model_type == "ppo":
-                policy_loss = sb3_metrics.get("train/policy_loss")
-                value_loss = sb3_metrics.get("train/value_loss")
-                entropy = sb3_metrics.get("train/entropy_loss",
-                                          sb3_metrics.get("train/entropy"))
-                if policy_loss is not None:
-                    metrics_to_report["policy_loss"] = policy_loss
-                if value_loss is not None:
-                    metrics_to_report["value_loss"] = value_loss
-                if entropy is not None:
-                    metrics_to_report["entropy"] = entropy
-            
-            # Add financial metrics
-            metrics_to_report.update(financial_metrics)
-            
-            # Calculate combined score if we have the required metrics
-            sharpe = financial_metrics.get("trading/sharpe_ratio")
-            calmar = financial_metrics.get("trading/calmar_ratio")
-            sortino = financial_metrics.get("trading/sortino_ratio")
-            ep_return = financial_metrics.get("trading/episode_return")
-
-            # Check if all required base metrics are available
-            if all(v is not None for v in [sharpe, calmar, sortino, ep_return, exp_var]):
-                # Compute a combined score from multiple metrics
-                combined_score = self._normalize_and_combine_metrics(
-                    reward=ep_reward,
-                    explained_variance=exp_var,
-                    sharpe_ratio=sharpe,
-                    episode_return=ep_return,
-                    calmar_ratio=calmar,
-                    sortino_ratio=sortino,
-                    actor_loss=actor_loss,
-                    critic_loss=critic_loss,
-                    model_type=model_type
-                )
-                metrics_to_report["combined_score"] = combined_score
-                self.last_combined_score = combined_score
+                fps = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
+                report_dict = {
+                    "time/steps": self.num_timesteps,
+                    "time/fps": fps
+                }
+                # Try different Ray versions for reporting
+                if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                    ray.air.session.report(report_dict)
+                elif hasattr(tune, "report"):
+                    tune.report(**report_dict)
+            except Exception as tune_err:
+                callback_logger.error(f"Failed to report periodic metrics: {tune_err}")
                 
-                # Update best score if this is better
-                if combined_score > self.best_combined_score:
-                    self.best_combined_score = combined_score
-                    metrics_to_report["best_combined_score"] = combined_score
-            else:
-                missing_keys = [k for k, v in {
-                    "sharpe": sharpe, "calmar": calmar, "sortino": sortino,
-                    "return": ep_return, "exp_var": exp_var
-                }.items() if v is None]
-                callback_logger.debug(
-                    f"Skipping combined score calculation (missing: {missing_keys})"
+        # Get most recently completed episodes
+        for env_idx, info in enumerate(self.locals.get("infos", [])):
+            # Episode completed
+            if "episode" in info.keys():
+                # Log episode metrics
+                episode_info = info["episode"]
+                self.episode_rewards.append(episode_info.r)
+                self.episode_lengths.append(episode_info.l)
+                self.episode_returns.append(episode_info.r)  # Same as rewards for now
+                self.eval_env_ids.append(env_idx)
+                
+                # Info logging
+                callback_logger.info(
+                    f"Episode {self.episode_count}: reward={episode_info.r:.2f}, "
+                    f"length={episode_info.l}, env_id={env_idx}"
                 )
-            
-            # Log the parsed metrics
-            if metrics_to_report:
-                log_level = logging.INFO if episode_num % 10 == 0 else logging.DEBUG
-                metrics_str = ", ".join(
-                    [f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
-                                      for k, v in metrics_to_report.items()])
-                callback_logger.log(log_level,
-                                    f"Episode {episode_num} completed: {metrics_str}")
-            
-            # Report to Ray Tune
-            if tune.is_session_enabled():
-                tune.report(**metrics_to_report)
-            
-            # Increment episode counter
-            self.episode_count += 1
+                
+                # Ray Tune reporting (if available)
+                if has_ray_session:
+                    try:
+                        # Create report dictionary with episode metrics
+                        report_dict = {
+                            f"{model_type}/train/episode_reward": episode_info.r,
+                            f"{model_type}/train/episode_length": episode_info.l,
+                            "time/episodes": self.episode_count,
+                            "time/total_timesteps": self.model.num_timesteps,
+                        }
+                        
+                        # Add custom metrics if available
+                        if "metrics" in info:
+                            for k, v in info["metrics"].items():
+                                if isinstance(v, (int, float)):
+                                    report_dict[f"metrics/{k}"] = v
+                        
+                        # Try different Ray versions for reporting
+                        if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                            ray.air.session.report(report_dict)
+                        elif hasattr(tune, "report"):
+                            tune.report(**report_dict)
+                    except Exception as tune_err:
+                        callback_logger.error(f"Failed to report episode metrics: {tune_err}")
+                
+                # Increment episode counter
+                self.episode_count += 1
         
         # You would return False to stop training
         return True
 
     def _on_rollout_end(self) -> None:
         """
-        Called at the end of each rollout. Calculates and logs metrics,
-        updates best metrics, and reports to Ray Tune if enabled.
+        This method will be called by the model after each rollout end.
         """
+        # Skip if not using ray tune
+        if not check_ray_session():
+            return
+
         callback_logger = logging.getLogger("rl_agent.callback")
         if self.num_timesteps == 0: return  # Skip initial call
 
@@ -606,23 +456,29 @@ class TuneReportCallback(BaseCallback):
             self.last_combined_score = 0.0 # Reset if cannot calculate
 
         # --- Report to Ray Tune --- #
-        if RAY_AVAILABLE and tune.is_session_enabled():
+        if check_ray_session():
             try:
-                # Filter out non-serializable types if any (like np.inf)
+                # Filter non-finite values to avoid Ray Tune errors
                 reportable_metrics = {}
                 for k, v in metrics_to_report.items():
-                    if isinstance(v, (int, float, bool)) and np.isfinite(v):
+                    if isinstance(v, (int, float)) and np.isfinite(v):
                         reportable_metrics[k] = v
                     elif isinstance(v, np.number) and np.isfinite(v):
-                         reportable_metrics[k] = float(v) # Convert numpy numbers
+                        reportable_metrics[k] = float(v) # Convert numpy numbers
 
                 # Ensure the combined score is always reported if calculated
                 if combined_score is not None and np.isfinite(combined_score):
-                     reportable_metrics["rollout/combined_score"] = float(combined_score)
+                    reportable_metrics["rollout/combined_score"] = float(combined_score)
 
                 if reportable_metrics:
-                    # Use modern session.report API
-                    ray.air.session.report(reportable_metrics)
+                    # Use our check_ray_session helper function
+                    # Modern Ray version uses session.report
+                    if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                        ray.air.session.report(reportable_metrics)
+                    elif hasattr(tune, "report"):
+                        # Very old Ray versions use tune.report directly
+                        tune.report(**reportable_metrics)
+                    
                     callback_logger.debug(f"Reported {len(reportable_metrics)} metrics to Ray Tune.")
                 else:
                     callback_logger.warning("No finite metrics available to report to Ray Tune.")
@@ -739,7 +595,7 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
     train_config["log_dir"] = log_dir
     train_config["checkpoint_dir"] = checkpoint_dir
 
-    # --- Logger Setup ---
+    # --- Logger Setup --- #
     log_level_to_set = logging.DEBUG if config.get("verbose", 1) >= 2 \
         else logging.INFO
     setup_logger(
@@ -810,13 +666,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
 
     # --- Environment Creation --- #
     trial_logger.info(f"Creating {num_envs} parallel environment(s)...")
-
-    def make_single_env(rank: int, base_seed: Optional[int], is_eval_flag: bool = False):
+ 
+    def make_single_env(rank):
         def _init():
             env_config = train_config.copy()
             instance_seed = base_seed + rank if base_seed is not None else None
             env_config["seed"] = instance_seed
-            env = create_env(config=env_config, is_eval=is_eval_flag)
+            env = create_env(config=env_config, is_eval_flag=is_eval_flag)
             log_suffix = f'monitor_eval_{rank}.csv' if is_eval_flag else f'monitor_{rank}.csv'
             monitor_log_path = os.path.join(log_dir, log_suffix)
             ensure_dir_exists(os.path.dirname(monitor_log_path))
@@ -1011,11 +867,13 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
                 failure_metrics["eval/combined_score"] = combo_score
                 trial_logger.info(f"Reporting failure: {failure_metrics}")
 
-                if hasattr(ray, "air") and hasattr(ray.air, "session") \
-                   and ray.air.session.is_active():
-                    ray.air.session.report(failure_metrics)
-                else:
-                    tune.report(**failure_metrics)
+                # Use the updated check_ray_session function
+                if check_ray_session():
+                    if hasattr(ray, "air") and hasattr(ray.air, "session"):
+                        ray.air.session.report(failure_metrics)
+                    elif hasattr(tune, "report"):
+                        tune.report(**failure_metrics)
+                    trial_logger.info("Reported failure metrics to Ray Tune")
             except Exception as report_err:
                 trial_logger.error(f"Failed to report failure: {report_err}")
         raise
@@ -1628,21 +1486,20 @@ def create_model(
         lr = config["learning_rate"]
         lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
         
-        # Extract TCN-specific parameters from config
+        # Configure TCN parameters
+        sequence_length = config.get("sequence_length", 60)
         tcn_params = {
-            "num_filters": config.get("tcn_num_filters", 64),
             "num_layers": config.get("tcn_num_layers", 4),
+            "num_filters": config.get("tcn_num_filters", 64),
             "kernel_size": config.get("tcn_kernel_size", 3),
             "dropout": config.get("tcn_dropout", 0.2)
         }
         
-        # Get sequence length from config
-        sequence_length = config.get("sequence_length", 60)
-        
         # --- Infer actual features per timestep from environment's observation space ---
         # The 'env' passed here is the VecNormalize-wrapped environment
+        # Updated to handle both gym and gymnasium Box spaces 
         if not hasattr(env.observation_space, 'shape'):
-             raise ValueError(f"TcnPolicy requires a Box observation space with a shape attribute, got {type(env.observation_space)}")
+            raise ValueError(f"TcnPolicy requires an observation space with a shape attribute, got {type(env.observation_space)}")
     
         obs_shape = env.observation_space.shape
         if len(obs_shape) != 1:
@@ -1704,9 +1561,9 @@ def create_model(
         sequence_length = config.get("sequence_length", 60)
         
         # --- Infer actual features per timestep ---
-        # Check for Box space from either gym or gymnasium
+        # Updated to handle both gym and gymnasium Box spaces
         if not hasattr(env.observation_space, 'shape'):
-             raise ValueError(f"TcnSacPolicy requires a Box observation space with a shape attribute, got {type(env.observation_space)}")
+            raise ValueError(f"TcnSacPolicy requires an observation space with a shape attribute, got {type(env.observation_space)}")
     
         obs_shape = env.observation_space.shape
         if len(obs_shape) != 1:
@@ -2023,7 +1880,7 @@ def train(config: Dict[str, Any]) -> Tuple[BaseAlgorithm, Dict[str, Any]]:
 
     # --- Environment Creation --- #
     # --- Restore: Allow num_envs from config for non-tune runs ---
-    # is_tune_run = RAY_AVAILABLE and tune.is_session_enabled()
+    # is_tune_run = RAY_AVAILABLE and check_ray_session()
     # if not is_tune_run:
     #     if config.get("num_envs", 1) != 1:
     #         train_logger.warning(f"Overriding num_envs from config ({config.get('num_envs')}) to 1 for standalone run.")
