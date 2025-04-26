@@ -116,7 +116,7 @@ DEFAULT_CONFIG = {
     # Other fixed params
     "gae_lambda": 0.95,
     "max_grad_norm": 0.5,
-    "norm_obs": "false",  # Explicitly disable VecNormalize for observations
+    "norm_obs": "auto",  # Revert back to auto for VecNormalize
     "gradient_steps": 1,  # Fixed for SAC
 
     # Training parameters
