@@ -72,7 +72,7 @@ DEFAULT_CONFIG = {
     # Features - selected important features
     # Split into multiple lines for readability
     "features": (
-        "open,high,low,close,volume_scaled,"  # Raw OHLC, Scaled Volume (1m)
+        "open_scaled,high_scaled,low_scaled,close_scaled,volume_scaled,"  # Scaled OHLCV (1m)
         "sma_7_scaled,sma_25_scaled,sma_99_scaled,ema_9_scaled,"
         "ema_21_scaled,rsi_14_scaled,"
         "volume_scaled_4h,ema_9_scaled_4h,ema_21_scaled_4h,"  # 4h
