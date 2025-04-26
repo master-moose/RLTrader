@@ -33,12 +33,11 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.dqn.policies import MlpPolicy as DqnMlpPolicy # Import DQN's MlpPolicy
 from stable_baselines3.sac.policies import MlpPolicy as SacMlpPolicy  # Import SAC's MlpPolicy
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, SubprocVecEnv
-from stable_baselines3_contrib import RecurrentPPO, QRDQN  # Added QRDQN here
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, SubprocVecEnv # Removed make_vec_env
+from sb3_contrib import RecurrentPPO, QRDQN  # Changed from stable_baselines3_contrib to sb3_contrib
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.utils import get_device
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
-from stable_baselines3.common.vec_env.util import make_vec_env
 
 # --- Local Imports --- #
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +56,48 @@ from rl_agent.utils import (
 )
 
 # --- Global Settings --- #
+
+# Define our own make_vec_env function
+def make_vec_env(env_id, n_envs=1, seed=None, vec_env_cls=None, env_kwargs=None):
+    """
+    Create a wrapped, vectorized environment.
+    Equivalent to stable_baselines3's make_vec_env function, implementing it here
+    since it might not be available in some SB3 versions.
+    
+    :param env_id: The environment callable to create (can be a function returning a gym.Env)
+    :param n_envs: The number of environments to create
+    :param seed: The initial seed for the environment
+    :param vec_env_cls: The vectorized env class to use (default: DummyVecEnv)
+    :param env_kwargs: Additional keyword arguments for the environment
+    :return: The vectorized environment
+    """
+    if vec_env_cls is None:
+        vec_env_cls = DummyVecEnv
+    
+    env_kwargs = {} if env_kwargs is None else env_kwargs
+    
+    def make_env(rank):
+        def _init():
+            if callable(env_id):
+                env = env_id()
+            else:
+                raise ValueError(f"Expected callable env_id, got {type(env_id)}")
+            
+            if seed is not None:
+                env.seed(seed + rank)
+                env.action_space.seed(seed + rank)
+            
+            return env
+        return _init
+    
+    return vec_env_cls([make_env(i) for i in range(n_envs)])
+
+# Check if Ray is available
+try:
+    ray_available = ray is not None
+except NameError:
+    ray_available = False
+RAY_AVAILABLE = ray_available
 
 # Initialize logger globally (will be configured later)
 # Use specific logger name instead of __name__ for consistency
