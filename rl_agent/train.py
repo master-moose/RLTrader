@@ -682,17 +682,36 @@ def train_rl_agent_tune(config: Dict[str, Any]) -> None:
  
     def make_single_env(rank, is_eval_flag, base_seed): # Added base_seed parameter
         def _init():
-            env_config = train_config.copy()
-            # Use passed base_seed
-            instance_seed = base_seed + rank if base_seed is not None else None
-            env_config["seed"] = instance_seed
-            # Use the passed is_eval_flag
-            env = create_env(config=env_config, is_eval_flag=is_eval_flag)
-            log_suffix = f'monitor_eval_{rank}.csv' if is_eval_flag else f'monitor_{rank}.csv'
-            monitor_log_path = os.path.join(log_dir, log_suffix)
-            ensure_dir_exists(os.path.dirname(monitor_log_path))
-            env = Monitor(env, filename=monitor_log_path)
-            return env
+            # Use a specific logger for this child process
+            _proc_logger = logging.getLogger(f"rl_agent.env_proc_{rank}")
+            _proc_logger.setLevel(logging.DEBUG) # Ensure it captures debug messages
+            # Note: Logger configuration (handlers) might need to be done here
+            # if not inherited properly from the parent process or Ray setup.
+            _proc_logger.info(f"Process {rank}: Initializing environment (eval={is_eval_flag}, seed={base_seed})")
+
+            try:
+                env_config = train_config.copy()
+                instance_seed = base_seed + rank if base_seed is not None else None
+                env_config["seed"] = instance_seed
+                _proc_logger.debug(f"Process {rank}: Creating env with seed {instance_seed}")
+
+                env = create_env(config=env_config, is_eval_flag=is_eval_flag)
+                _proc_logger.debug(f"Process {rank}: Environment created successfully.")
+
+                log_suffix = f'monitor_eval_{rank}.csv' if is_eval_flag else f'monitor_{rank}.csv'
+                # Ensure log_dir is accessible and correct here
+                monitor_log_path = os.path.join(log_dir, log_suffix)
+                _proc_logger.debug(f"Process {rank}: Monitor path: {monitor_log_path}")
+                ensure_dir_exists(os.path.dirname(monitor_log_path))
+                _proc_logger.debug(f"Process {rank}: Wrapping environment with Monitor.")
+
+                env = Monitor(env, filename=monitor_log_path)
+                _proc_logger.info(f"Process {rank}: Environment initialization complete.")
+                return env
+            except Exception as e:
+                _proc_logger.error(f"Process {rank}: CRITICAL ERROR during env init: {e}", exc_info=True)
+                # Re-raise the exception to ensure the process fails and Ray notices
+                raise
         return _init
 
     vec_env_cls = SubprocVecEnv if num_envs > 1 else DummyVecEnv
