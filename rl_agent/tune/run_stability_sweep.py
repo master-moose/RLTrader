@@ -117,6 +117,9 @@ def parse_args():
     )
     # ---------------------------- #
 
+    # Add max_steps argument here
+    parser.add_argument("--max_steps", type=int, default=None, help="Maximum steps per episode in the environment (overrides config)")
+
     args = parser.parse_args()
     
     # Create a class to match the expected arguments structure
@@ -141,6 +144,19 @@ def parse_args():
         loaded_config.update(vars(args))
         for key, value in loaded_config.items():
             setattr(arg_obj, key, value)
+    
+    base_config = arg_obj.base_config
+    print(f"Config after CLI overrides: {base_config}") # Debug print
+
+    # --- Explicitly override max_steps if provided via CLI --- #
+    if args.max_steps is not None:
+        base_config["max_steps"] = args.max_steps
+        print(f"INFO: Overriding max_steps to {args.max_steps} from CLI argument.")
+    # --- End max_steps override --- #
+
+    # Add command line args to config (ensure paths are absolute)
+    if base_config.get("data_path"):
+        data_path = os.path.abspath(os.path.expanduser(base_config["data_path"]))
     
     return arg_obj
 
