@@ -227,7 +227,6 @@ def define_search_space(model_type: str) -> Dict[str, Any]:
         "portfolio_change_weight": tune.uniform(1.0, 7.0),
         "drawdown_penalty_weight": tune.uniform(0.01, 0.2),
         "idle_penalty_weight": tune.uniform(0.0, 0.05),
-        "profit_bonus_weight": tune.uniform(0.5, 1.5),
         "trade_penalty_weight": tune.uniform(0.0, 0.1),
     }
 
