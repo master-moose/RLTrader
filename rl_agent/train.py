@@ -1452,7 +1452,8 @@ def create_model(
 
         # Update model_kwargs with SAC algorithm parameters
         model_kwargs.update({
-            "policy": TcnSacPolicy, # Use the new policy
+            "policy": SacMlpPolicy, # TEMP: Use standard MLP policy for testing SAC slowdown
+            # "policy": TcnSacPolicy, # Original TCN policy
             "learning_rate": lr_schedule,
             "buffer_size": config.get("buffer_size", 1000000), # SAC default buffer size
             "batch_size": config.get("batch_size", 256), # SAC default batch size
