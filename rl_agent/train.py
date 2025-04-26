@@ -1274,7 +1274,7 @@ def create_model(
             except ValueError: sac_ent_coef = 'auto'; logger.warning(f"Invalid SAC ent_coef. Defaulting auto.")
 
         model_kwargs.update({
-            "policy": SacMlpPolicy, # Reverted back to SacMlpPolicy
+            "policy": "MlpPolicy", # Use standard string identifier
             "learning_rate": lr_schedule, # Use schedule
             "buffer_size": config["buffer_size"],
             "batch_size": config["batch_size"],
