@@ -441,7 +441,12 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
     model.to(device)
     best_val_loss = float('inf')
     patience_counter = 0
-    history = {'train_loss': [], 'val_loss': [], 'lr': []}
+    # Initialize history with lists for new validation metrics
+    history = {
+        'train_loss': [], 'val_loss': [], 'lr': [],
+        'val_mae': [], 'val_rmse': [], 'val_dir_acc': [], 'val_custom_acc': []
+    }
+    epsilon = 1e-10 # For safe division in accuracy metrics
 
     logger.info(f"Starting training for {epochs} epochs on device: {device}")
 
@@ -474,10 +479,18 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
         # Validation
         model.eval()
         epoch_val_loss = 0.0
+        epoch_val_preds = []
+        epoch_val_targets = []
+        avg_val_loss = float('nan') # Default to NaN
+        val_mae = float('nan')
+        val_rmse = float('nan')
+        val_dir_acc = float('nan')
+        val_custom_acc = float('nan')
+
         # Check if val_loader is empty
         if len(val_loader) == 0:
              logger.warning(f"Epoch {epoch+1}: Validation loader is empty, skipping validation phase.")
-             avg_val_loss = float('inf') # Assign high loss if no validation data
+             avg_val_loss = float('inf') # Assign high loss for scheduler/early stopping if needed
         else:
             with torch.no_grad():
                 for batch_features, batch_targets in val_loader:
@@ -485,36 +498,73 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
                     outputs = model(batch_features)
                     loss = criterion(outputs, batch_targets)
                     epoch_val_loss += loss.item()
+
+                    # Collect predictions and targets for metric calculation
+                    epoch_val_preds.extend(outputs.cpu().numpy().flatten())
+                    epoch_val_targets.extend(batch_targets.cpu().numpy().flatten())
+
             avg_val_loss = epoch_val_loss / len(val_loader)
 
+            # Calculate validation metrics if predictions were collected
+            if epoch_val_preds and epoch_val_targets:
+                preds_np = np.array(epoch_val_preds)
+                targets_np = np.array(epoch_val_targets)
+
+                val_mae = np.mean(np.abs(preds_np - targets_np))
+                val_rmse = np.sqrt(np.mean((preds_np - targets_np)**2))
+
+                correct_direction = (np.sign(preds_np) == np.sign(targets_np))
+                correct_direction[targets_np == 0] = (preds_np[targets_np == 0] == 0)
+                val_dir_acc = np.mean(correct_direction)
+
+                relative_error = np.abs(preds_np - targets_np) / (np.abs(targets_np) + epsilon)
+                # Assuming default threshold of 0.01 (1%) if not passed explicitly
+                # This might need adjustment if accuracy_threshold is needed here
+                val_custom_acc = np.mean(relative_error < 0.01)
+
+        # Store validation metrics in history
         history['val_loss'].append(avg_val_loss)
-        # Record current learning rate
+        history['val_mae'].append(val_mae)
+        history['val_rmse'].append(val_rmse)
+        history['val_dir_acc'].append(val_dir_acc)
+        history['val_custom_acc'].append(val_custom_acc)
+
+        # --- Logging & Scheduler/Early Stopping --- #
         current_lr = optimizer.param_groups[0]['lr']
         history['lr'].append(current_lr)
-
         epoch_duration = time.time() - start_time
 
-        # Handle potential division by zero if loaders were empty
-        train_loss_str = f"{avg_train_loss:.6f}" if len(train_loader) > 0 else "N/A (empty loader)"
-        val_loss_str = f"{avg_val_loss:.6f}" if len(val_loader) > 0 else "N/A (empty loader)"
+        # Format metrics for logging (handle NaNs)
+        train_loss_str = f"{avg_train_loss:.6f}" if not np.isnan(avg_train_loss) else "N/A"
+        val_loss_str = f"{avg_val_loss:.6f}" if not np.isnan(avg_val_loss) else "N/A"
+        val_mae_str = f"{val_mae:.6f}" if not np.isnan(val_mae) else "N/A"
+        val_rmse_str = f"{val_rmse:.6f}" if not np.isnan(val_rmse) else "N/A"
+        val_dir_acc_str = f"{val_dir_acc:.2%}" if not np.isnan(val_dir_acc) else "N/A"
+        val_custom_acc_str = f"{val_custom_acc:.2%}" if not np.isnan(val_custom_acc) else "N/A"
 
 
-        logger.info(f"Epoch [{epoch+1}/{epochs}] - "
-                    f"Train Loss: {train_loss_str}, "
-                    f"Val Loss: {val_loss_str}, "
-                    f"LR: {current_lr:.1e}, "
-                    f"Duration: {epoch_duration:.2f}s")
+        log_msg = (
+            f"Epoch [{epoch+1}/{epochs}] - "
+            f"Train Loss: {train_loss_str}, "
+            f"Val Loss: {val_loss_str}, "
+            f"Val MAE: {val_mae_str}, "
+            f"Val RMSE: {val_rmse_str}, "
+            f"Val Dir Acc: {val_dir_acc_str}, "
+            f"Val Custom Acc: {val_custom_acc_str}, "
+            f"LR: {current_lr:.1e}, "
+            f"Duration: {epoch_duration:.2f}s"
+        )
+        logger.info(log_msg)
 
         # Learning rate scheduler step (requires valid avg_val_loss)
-        if len(val_loader) > 0 and scheduler is not None:
+        if not np.isnan(avg_val_loss) and scheduler is not None:
              scheduler.step(avg_val_loss)
-             # Log if LR changed
              new_lr = optimizer.param_groups[0]['lr']
              if new_lr < current_lr:
                  logger.info(f"Learning rate reduced to {new_lr:.1e}")
 
         # Early stopping logic requires a valid avg_val_loss
-        if len(val_loader) > 0:
+        if not np.isnan(avg_val_loss):
              if avg_val_loss < best_val_loss:
                  best_val_loss = avg_val_loss
                  patience_counter = 0
