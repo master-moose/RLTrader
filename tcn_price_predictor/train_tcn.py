@@ -673,7 +673,7 @@ def main():
     if args.test_data_path:
         if os.path.exists(args.test_data_path):
             try:
-                X_test, y_test = load_and_prepare_data(
+                X_test, y_test, _ = load_and_prepare_data(
                     args.test_data_path, args.sequence_length, args.target_col, args.prediction_steps,
                     fit_scalers=None
                 )
@@ -743,15 +743,15 @@ def main():
 
     # Create DataLoaders
     # Use persistent_workers and pin_memory if CUDA is available for potential speedup
-    num_workers = 4 if device == torch.device("cuda") else 0 # Use workers only with CUDA
+    num_workers = 0 # Set to 0 to avoid potential issues on Windows
     pin_memory = True if device == torch.device("cuda") else False
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+                              num_workers=num_workers, pin_memory=pin_memory)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+                            num_workers=num_workers, pin_memory=pin_memory)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
-                             num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+                             num_workers=num_workers, pin_memory=pin_memory)
 
     # Log the number of batches in each loader
     logger.info(f"Number of training batches: {len(train_loader)}")
