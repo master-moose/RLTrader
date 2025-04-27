@@ -383,7 +383,8 @@ if __name__ == "__main__":
     )
 
     # --- Shutdown Ray --- #
-    ray.shutdown()
+    # Moved this lower, after accessing results
+    # ray.shutdown()
 
     # Print best result
     # Wrapped long line
@@ -420,4 +421,7 @@ if __name__ == "__main__":
     else:
         logger.warning("No successful trials completed or best trial could not be determined.")
 
-    logger.info("Ray Tune script finished.") 
+    logger.info("Ray Tune script finished.")
+
+    # --- Shutdown Ray (Now moved to the very end) --- #
+    ray.shutdown() 
