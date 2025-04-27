@@ -392,17 +392,12 @@ if __name__ == "__main__":
     )
     if best_trial:
         logger.info("--- Best Trial Found ---")
-        # Access the best reported result dictionary directly
-        best_metric_result = best_trial.last_result # Get the latest reported metrics
-        # Alternative: use analysis.best_result if available and preferred
-        # best_metric_result = analysis.best_result 
-        # Note: analysis.best_result might be deprecated or behave differently
-        # Using best_trial.last_result is generally reliable for the final metrics.
+        # Access the best reported result dictionary directly from the trial object
+        best_metric_result = best_trial.last_result # Get the latest reported metrics from the best trial
 
         if best_metric_result:
-             # Fixed indentation & quotes, wrapped long line
              # Check if the metric key exists before accessing
-             metric_key = "val_dir_acc"
+             metric_key = "val_dir_acc" # The metric we optimized for
              metric_value = best_metric_result.get(metric_key, 'N/A')
              epoch_value = best_metric_result.get('epoch', 'N/A')
              if isinstance(metric_value, float):
@@ -416,15 +411,13 @@ if __name__ == "__main__":
                  f"{epoch_value}"
              )
         else:
-             # Fixed indentation
-             logger.warning("Could not retrieve best result details from best_trial.last_result.")
+             logger.warning("Could not retrieve best result details (last_result) from best_trial object.")
         logger.info(f"Best Config: {best_trial.config}")
-        # Wrapped long line
         # Get logdir from the trial object itself
         logger.info(
-            f"Log Directory: {best_trial.logdir}"
+            f"Log Directory: {best_trial.local_path}" # Use local_path instead of logdir
         )
     else:
-        logger.warning("No successful trials completed.")
+        logger.warning("No successful trials completed or best trial could not be determined.")
 
     logger.info("Ray Tune script finished.") 
