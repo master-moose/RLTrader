@@ -182,25 +182,38 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
                 df = pd.read_hdf(h5_path, key=key_path)
                 logger.info(f"Reading dataset: {key_path} using pandas")
 
-                # --- Post-read processing --- #
-                if 'timestamp' in df.columns:
-                    # timestamp conversion logic can stay the same
-                    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                        try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                # --- Post-read processing (Use Index for Timestamp) --- #
+                # Check if index is already DatetimeIndex
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    logger.warning(f"Index for {key_path} is not DatetimeIndex (type: {type(df.index)}). Attempting conversion.")
+                    try:
+                        # Try converting assuming it's numeric (unix timestamp)
+                        df.index = pd.to_datetime(df.index, unit='s') # Assume seconds first
+                    except (ValueError, TypeError):
+                        try:
+                           df.index = pd.to_datetime(df.index, unit='ms') # Try milliseconds
                         except (ValueError, TypeError):
-                            try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                            except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key_path}")
-                    df.set_index('timestamp', inplace=True)
-                    df.sort_index(inplace=True)
-                    # Add suffix to columns for non-base timeframes
-                    if suffix:
-                        df = df.add_suffix(suffix)
-                    # Store using the timeframe name
-                    timeframe_key = key_path.split('/')[1]
-                    dfs[timeframe_key] = df
-                    logger.info(f"Loaded {key_path}: {df.shape[0]} rows, {df.shape[1]} columns.")
-                else:
-                    raise ValueError(f"'timestamp' column missing in {key_path}")
+                            try:
+                                # Try converting assuming it's a string representation
+                                df.index = pd.to_datetime(df.index)
+                            except (ValueError, TypeError) as e:
+                                logger.error(f"Failed to convert index to Datetime for {key_path}. Error: {e}", exc_info=True)
+                                raise ValueError(f"Cannot interpret index as timestamp in {key_path}")
+                
+                # Ensure index is named 'timestamp' for consistency if needed later (though merge_asof uses index directly)
+                # df.index.name = 'timestamp' 
+
+                # Sort by index (timestamp)
+                df.sort_index(inplace=True)
+
+                # Add suffix to columns for non-base timeframes
+                if suffix:
+                    df = df.add_suffix(suffix)
+
+                # Store using the timeframe name (derived from key_path)
+                timeframe_key = key_path.split('/')[1]
+                dfs[timeframe_key] = df
+                logger.info(f"Loaded {key_path}: {df.shape[0]} rows, {df.shape[1]} columns. Index type: {type(df.index)}")
 
             except KeyError:
                 # Handle case where the key_path doesn't exist in the HDF5 file
