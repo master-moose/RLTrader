@@ -315,36 +315,21 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
 
     logger.info(f"Selected {len(feature_columns)} scaled feature columns: {feature_columns[:5]}...") # Log first few
 
-    # Select only the chosen features and the target column for further processing
-    final_df = aligned_df[feature_columns + ['target']].copy()
+    # Keep the original target column temporarily for % change calculation
+    cols_to_keep = feature_columns + ['target', raw_target_col]
+    # Ensure no duplicates if raw_target_col somehow ended up in feature_columns
+    cols_to_keep = list(dict.fromkeys(cols_to_keep))
+    final_df = aligned_df[cols_to_keep].copy()
 
     # --- Handle NaNs --- #
     initial_rows = len(final_df)
-    final_df.dropna(subset=['target'], inplace=True) # Drop rows where target is NaN
-    logger.info(f"Dropped {initial_rows - len(final_df)} rows with NaN target.")
-
-    # Forward fill remaining NaNs in feature columns (from merging)
-    final_df.fillna(method='ffill', inplace=True)
-
-    # Final drop of any remaining NaNs (e.g., at the beginning after ffill)
-    rows_before_final_na_drop = len(final_df)
-    final_df.dropna(inplace=True)
-    if len(final_df) < rows_before_final_na_drop:
-        logger.warning(f"Dropped an additional {rows_before_final_na_drop - len(final_df)} rows due to NaNs after forward fill.")
-
-    if final_df.empty:
-         logger.error("DataFrame is empty after processing NaNs and selecting features.")
-         raise ValueError("No valid data remaining after preprocessing.")
-
-    logger.info(f"Final DataFrame shape after NaN handling: {final_df.shape}")
-
     # Separate features and target
     features_df = final_df[feature_columns]
     target_series = final_df['target']
 
     # --- Calculate Target: Percentage Change --- #
     # Use the *original* non-shifted, non-scaled target column for calculation base
-    # Ensure it exists before proceeding
+    # Ensure it exists before proceeding (should be guaranteed by including it in cols_to_keep)
     if raw_target_col not in final_df.columns:
          logger.error(f"Original target column '{raw_target_col}' needed for % change calculation not found in final DataFrame.")
          raise ValueError(f"Missing '{raw_target_col}' for target calculation.")
@@ -369,16 +354,23 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     if len(target_pct_change) < initial_target_len:
         logger.warning(f"Dropped {initial_target_len - len(target_pct_change)} rows due to NaNs in target % change calculation.")
 
-    # Align features and target after potential NaN drops in target
+    # --- Final Feature & Target Preparation --- #
+    # Select only the feature columns *after* pct change calc is done
+    features_df = final_df[feature_columns].copy()
+
+    # Align features and the calculated target series using their common index
     common_index = features_df.index.intersection(target_pct_change.index)
-    if len(common_index) < len(features_df):
-        logger.info(f"Aligning features ({len(features_df)}) and target ({len(target_pct_change)}) after NaN handling. New length: {len(common_index)}")
+    if len(common_index) < len(features_df) or len(common_index) < len(target_pct_change):
+        logger.info(f"Aligning features ({len(features_df)}) and target ({len(target_pct_change)}) on common index after NaN handling. New length: {len(common_index)}")
         features_df = features_df.loc[common_index]
         target_pct_change = target_pct_change.loc[common_index]
 
+    # Convert to numpy arrays
     features_final = features_df.values
     target_final = target_pct_change.values
-    logger.info(f"Calculated target as percentage change. Target shape: {target_final.shape}")
+
+    logger.info(f"Final features shape: {features_final.shape}")
+    logger.info(f"Final target shape (percentage change): {target_final.shape}")
 
     # --- Create Sequences --- #
     logger.info(f"Creating sequences of length {sequence_length}...")
