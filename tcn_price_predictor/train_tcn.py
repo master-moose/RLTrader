@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm
 from torch.utils.data import DataLoader, Dataset, random_split
-from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 
 # --- Logger Setup --- #
@@ -139,23 +138,22 @@ class PriceDataset(Dataset):
 
 
 def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', prediction_steps=1,
-                          fit_scalers=True, existing_feature_scaler=None, existing_target_scaler=None):
+                          fit_scalers=True, existing_target_scaler=None):
     """
-    Loads data from HDF5, merges timeframes, selects scaled features, scales target, and creates sequences.
+    Loads data from HDF5, merges timeframes, selects scaled features, and creates sequences with raw target values.
 
     Args:
         h5_path (str): Path to the HDF5 file.
         sequence_length (int): Length of input sequences.
         target_col (str): Name of the target column (e.g., 'close_4h') - This should be the NON-SCALED version for prediction.
         prediction_steps (int): Number of steps ahead to predict.
-        fit_scalers (bool): If True, fit a new target scaler. If False, use the existing one.
-        existing_feature_scaler: **UNUSED** (features are assumed pre-scaled).
-        existing_target_scaler (MinMaxScaler, optional): Pre-fitted target scaler.
+        fit_scalers: **UNUSED** (no scaling performed).
+        existing_target_scaler: **UNUSED**.
 
     Returns:
-        tuple: (X, y, feature_columns, target_scaler)
-               feature_columns (list): List of feature names used.
-               target_scaler (MinMaxScaler): Fitted or existing target scaler.
+        tuple: (X, y, feature_columns)
+                feature_columns (list): List of feature names used.
+                y (np.ndarray): Array of raw target values.
     """
     logger.info(f"Loading data from {h5_path}")
     dfs = {}
@@ -301,24 +299,9 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     features_df = final_df[feature_columns]
     target_series = final_df['target']
 
-    # --- Target Scaling --- #
-    if fit_scalers:
-        logger.info("Fitting target scaler...")
-        target_scaler = MinMaxScaler()
-        valid_targets = target_series.values[~np.isnan(target_series.values)].reshape(-1, 1)
-        if valid_targets.shape[0] == 0:
-            logger.error("No valid target values left to fit the scaler.")
-            raise ValueError("Cannot fit scaler on empty target data.")
-        target_scaler.fit(valid_targets)
-    else:
-        logger.info("Using existing target scaler...")
-        if existing_target_scaler is None:
-            raise ValueError("Existing target scaler must be provided when fit_scalers is False.")
-        target_scaler = existing_target_scaler
-
-    # Apply target scaling
-    target_scaled = target_scaler.transform(target_series.values.reshape(-1, 1)).flatten()
-    logger.info("Target scaling complete.")
+    # --- Target values are used directly (NO SCALING) --- #
+    target_raw = target_series.values
+    logger.info("Using raw target values.")
 
     # Features are already scaled, directly use their values
     features_final = features_df.values
@@ -329,12 +312,9 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     X, y = [], []
     # Check if enough data for at least one sequence
     if len(features_final) < sequence_length:
-         if fit_scalers:
-             logger.error(f"Not enough training data ({len(features_final)} rows) to create sequences of length {sequence_length}.")
-             raise ValueError("Insufficient training data for sequence creation.")
-         else:
-             logger.warning(f"Not enough data ({len(features_final)} rows) in {h5_path} to create sequences of length {sequence_length}. Returning empty arrays.")
-             return np.array([]), np.array([]), feature_columns, target_scaler # Return empty arrays
+        # This check applies regardless of fit_scalers now
+        logger.error(f"Not enough data ({len(features_final)} rows) in {h5_path} to create sequences of length {sequence_length}. Returning empty arrays.")
+        return np.array([]), np.array([]), feature_columns
 
     # Create sequences
     for i in range(len(features_final) - sequence_length + 1):
@@ -342,8 +322,8 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
         # Target corresponds to the end of the sequence for price prediction
         # If prediction_steps=1, target is one step after sequence end
         target_idx = i + sequence_length -1 + prediction_steps
-        if target_idx < len(target_scaled):
-            y.append(target_scaled[target_idx])
+        if target_idx < len(target_raw):
+            y.append(target_raw[target_idx]) # Use raw target value
         else:
             # This happens if prediction_steps pushes index out of bounds near the end
             # We need to shorten X to match the available y
@@ -355,12 +335,8 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
 
     # Final check if sequence creation resulted in empty arrays or mismatch
     if X.shape[0] == 0 or y.shape[0] == 0:
-         if fit_scalers:
-              logger.error("Sequence creation resulted in empty arrays for training data.")
-              raise ValueError("Empty sequences generated from training data.")
-         else:
-              logger.warning(f"Sequence creation resulted in empty arrays for {h5_path}.")
-         return np.array([]), np.array([]), feature_columns, target_scaler
+        logger.warning(f"Sequence creation resulted in empty arrays for {h5_path}.")
+        return np.array([]), np.array([]), feature_columns
     elif X.shape[0] != y.shape[0]:
          logger.warning(f"Sequence length mismatch after creation: X={X.shape[0]}, y={y.shape[0]}. Trimming X.")
          min_len = min(X.shape[0], y.shape[0])
@@ -374,8 +350,8 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     logger.info(f"Feature sequence shape: {X.shape}") # (num_sequences, seq_len, num_features)
     logger.info(f"Target shape: {y.shape}") # (num_sequences,)
 
-    # Return the list of feature names used, and the target scaler
-    return X, y, feature_columns, target_scaler
+    # Return the features, raw targets, and the list of feature names used
+    return X, y, feature_columns
 
 # --- Training and Evaluation --- #
 
@@ -492,18 +468,15 @@ def evaluate_model(model, test_loader, criterion, device, target_scaler):
             loss = criterion(outputs, batch_targets)
             test_loss += loss.item()
 
-            # Inverse transform predictions and targets
-            preds_scaled = outputs.cpu().numpy()
-            targets_scaled = batch_targets.cpu().numpy()
-
-            preds_original = target_scaler.inverse_transform(preds_scaled)
-            targets_original = target_scaler.inverse_transform(targets_scaled)
+            # Get predictions and targets directly (they are already on the original scale)
+            preds_original = outputs.cpu().numpy()
+            targets_original = batch_targets.cpu().numpy()
 
             all_preds.extend(preds_original.flatten())
             all_targets.extend(targets_original.flatten())
 
     avg_test_loss = test_loss / len(test_loader)
-    logger.info(f"Average Test Loss (Scaled): {avg_test_loss:.6f}")
+    logger.info(f"Average Test Loss (Original Scale): {avg_test_loss:.6f}") # Loss is now on original scale
 
     # Calculate metrics on original scale
     if not all_preds or not all_targets: # Check if lists are empty
@@ -582,7 +555,7 @@ def main():
     # --- Load Training Data & Fit Scalers --- #
     logger.info("--- Loading Training Data ---")
     try:
-        X_train, y_train, feature_columns, target_scaler = load_and_prepare_data(
+        X_train, y_train, feature_columns = load_and_prepare_data(
             args.data_path, args.sequence_length, args.target_col, args.prediction_steps,
             fit_scalers=True # Fit scalers on training data
         )
@@ -600,11 +573,9 @@ def main():
     if args.val_data_path:
         if os.path.exists(args.val_data_path):
             try:
-                X_val, y_val, _, _ = load_and_prepare_data(
+                X_val, y_val = load_and_prepare_data(
                     args.val_data_path, args.sequence_length, args.target_col, args.prediction_steps,
-                    fit_scalers=False,
-                    existing_feature_scaler=feature_scaler,
-                    existing_target_scaler=target_scaler
+                    fit_scalers=False
                 )
                 if X_val.size > 0:
                      val_dataset = PriceDataset(X_val, y_val)
@@ -639,11 +610,9 @@ def main():
     if args.test_data_path:
         if os.path.exists(args.test_data_path):
             try:
-                X_test, y_test, _, _ = load_and_prepare_data(
+                X_test, y_test = load_and_prepare_data(
                     args.test_data_path, args.sequence_length, args.target_col, args.prediction_steps,
-                    fit_scalers=False,
-                    existing_feature_scaler=feature_scaler,
-                    existing_target_scaler=target_scaler
+                    fit_scalers=False
                 )
                 if X_test.size > 0:
                      test_dataset = PriceDataset(X_test, y_test)
@@ -757,11 +726,6 @@ def main():
 
     # --- Evaluate --- #
     logger.info("--- Starting Evaluation ---")
-    # Ensure target_scaler exists before evaluation
-    if target_scaler is None:
-         logger.error("Target scaler was not properly fitted during training data loading. Cannot evaluate.")
-         sys.exit(1)
-
     predictions, actuals, test_loss = evaluate_model(
         model, test_loader, criterion, device, target_scaler
     )
