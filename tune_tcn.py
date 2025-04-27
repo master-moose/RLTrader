@@ -36,14 +36,14 @@ def tune_trainable(config):
     # 1. Get Default Arguments & Override with Tune Config
     default_args = parse_args([])
     args = default_args
-    args.tcn_channels = config[\"tcn_channels\"]
-    args.tcn_kernel_size = config[\"tcn_kernel_size\"]
-    args.tcn_dropout = config[\"tcn_dropout\"]
-    args.learning_rate = config[\"learning_rate\"]
+    args.tcn_channels = config["tcn_channels"]
+    args.tcn_kernel_size = config["tcn_kernel_size"]
+    args.tcn_dropout = config["tcn_dropout"]
+    args.learning_rate = config["learning_rate"]
     # --- Determine max_epochs based on ASHA scheduler max_t --- #
     # We get max_t from the scheduler config passed by tune.run automatically
     # Defaulting to args.epochs if not running under Tune (e.g., debugging)
-    max_epochs = config.get(\"max_t\", args.epochs)
+    max_epochs = config.get("max_t", args.epochs)
     # Use a fixed, potentially smaller number of epochs for tuning if desired
     # max_epochs = 50 # Example: Fix epochs for tuning
 
@@ -53,40 +53,40 @@ def tune_trainable(config):
     torch.manual_seed(args.seed)
     if torch.cuda.is_available() and not args.no_cuda:
         torch.cuda.manual_seed(args.seed)
-        device = torch.device(\"cuda\")
+        device = torch.device("cuda")
     else:
-        device = torch.device(\"cpu\")
+        device = torch.device("cpu")
 
     # 3. Load Data
     try:
-        logger.info(f\"Tune Trial: Loading training data from {args.data_path}\")
+        logger.info(f"Tune Trial: Loading training data from {args.data_path}")
         X_train, y_train, feature_columns = load_and_prepare_data(
             args.data_path, args.sequence_length, args.target_col, args.prediction_steps
         )
         if X_train.size == 0:
-            logger.error(\"Tune Trial: Training data loading resulted in empty sequences.\")
+            logger.error("Tune Trial: Training data loading resulted in empty sequences.")
             tune.report(val_dir_acc=float('-inf')) # Report worst score
             return
         train_dataset = PriceDataset(X_train, y_train)
         num_features = X_train.shape[2]
 
-        logger.info(f\"Tune Trial: Loading validation data from {args.val_data_path}\")
+        logger.info(f"Tune Trial: Loading validation data from {args.val_data_path}")
         X_val, y_val, _ = load_and_prepare_data(
             args.val_data_path, args.sequence_length, args.target_col, args.prediction_steps
         )
         if X_val.size == 0:
-            logger.warning(f\"Tune Trial: Validation data file {args.val_data_path} resulted in zero sequences.\")
+            logger.warning(f"Tune Trial: Validation data file {args.val_data_path} resulted in zero sequences.")
             val_dataset = PriceDataset(np.array([]), np.array([]))
         else:
             val_dataset = PriceDataset(X_val, y_val)
 
     except Exception as e:
-        logger.error(f\"Tune Trial: Failed to load data: {e}\", exc_info=True)
+        logger.error(f"Tune Trial: Failed to load data: {e}", exc_info=True)
         tune.report(val_dir_acc=float('-inf'))
         return
 
     # Create DataLoaders
-    pin_memory = True if device == torch.device(\"cuda\") else False
+    pin_memory = True if device == torch.device("cuda") else False
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=pin_memory)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
@@ -110,7 +110,7 @@ def tune_trainable(config):
     if args.use_scheduler:
         lr_scheduler_internal = ReduceLROnPlateau(
             optimizer,
-            mode=\'min\',
+            mode='min',
             factor=args.scheduler_factor,
             patience=args.scheduler_patience,
             min_lr=args.scheduler_min_lr,
@@ -118,7 +118,7 @@ def tune_trainable(config):
 
     # 7. Training Loop (Replicated and Modified for Tune Reporting)
     epsilon = 1e-10
-    logger.info(f\"Tune Trial: Starting training for max {max_epochs} epochs.\")
+    logger.info(f"Tune Trial: Starting training for max {max_epochs} epochs.")
 
     for epoch in range(max_epochs):
         # --- Training --- 
@@ -178,14 +178,14 @@ def tune_trainable(config):
 
         # --- Report Metrics to Ray Tune --- 
         report_dict = {
-            \"epoch\": epoch + 1,
-            \"val_loss\": avg_val_loss,
-            \"val_mae\": val_mae,
-            \"val_rmse\": val_rmse,
-            \"val_dir_acc\": val_dir_acc,
-            \"val_custom_acc\": val_custom_acc,
-            \"train_loss\": avg_train_loss,
-            \"lr\": optimizer.param_groups[0]['lr']
+            "epoch": epoch + 1,
+            "val_loss": avg_val_loss,
+            "val_mae": val_mae,
+            "val_rmse": val_rmse,
+            "val_dir_acc": val_dir_acc,
+            "val_custom_acc": val_custom_acc,
+            "train_loss": avg_train_loss,
+            "lr": optimizer.param_groups[0]['lr']
         }
         # Clean NaNs for reporting, replace with a value Tune can handle (e.g., -inf for accuracy)
         for key, value in report_dict.items():
@@ -205,29 +205,29 @@ def tune_trainable(config):
         # (independent of other trials), you could re-add patience logic here, 
         # but it might interfere with ASHA.
 
-    logger.info(f\"Tune Trial: Finished training after {epoch+1} epochs.\")
+    logger.info(f"Tune Trial: Finished training after {epoch+1} epochs.")
 
 
-if __name__ == \"__main__\":
+if __name__ == "__main__":
     # --- Add CLI Arguments for Resources ---
-    parser = argparse.ArgumentParser(description=\"Tune TCN Hyperparameters\")
+    parser = argparse.ArgumentParser(description="Tune TCN Hyperparameters")
     parser.add_argument(
-        \"--cpus_per_trial\",
+        "--cpus_per_trial",
         type=int,
         default=2,
-        help=\"Number of CPUs to allocate per Ray Tune trial.\"
+        help="Number of CPUs to allocate per Ray Tune trial."
     )
     parser.add_argument(
-        \"--gpus_per_trial\",
+        "--gpus_per_trial",
         type=int,
         default=0,
-        help=\"Number of GPUs to allocate per Ray Tune trial.\"
+        help="Number of GPUs to allocate per Ray Tune trial."
     )
     parser.add_argument(
-        \"--num_samples\",
+        "--num_samples",
         type=int,
         default=20,
-        help=\"Number of hyperparameter combinations to try.\"
+        help="Number of hyperparameter combinations to try."
     )
     # Add other CLI args if needed (e.g., for local_dir, experiment_name)
     cli_args = parser.parse_args()
@@ -235,25 +235,25 @@ if __name__ == \"__main__\":
 
     # Define Search Space
     search_space = {
-        \"tcn_channels\": tune.choice([
+        "tcn_channels": tune.choice([
             [64, 128, 256],
             [128, 256, 512],
             [64, 128, 256, 512],
             [128, 256, 512, 512]
         ]),
         # Ensure kernel size is odd and reasonable
-        \"tcn_kernel_size\": tune.choice([3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]),
-        \"tcn_dropout\": tune.uniform(0.1, 0.6),
-        \"learning_rate\": tune.loguniform(1e-5, 1e-3),
+        "tcn_kernel_size": tune.choice([3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23]),
+        "tcn_dropout": tune.uniform(0.1, 0.6),
+        "learning_rate": tune.loguniform(1e-5, 1e-3),
         # Add other parameters from 'args' here if you want to tune them, e.g.:
-        # \"batch_size\": tune.choice([16, 32, 64]),
+        # "batch_size": tune.choice([16, 32, 64]),
     }
 
     # Configure ASHA Scheduler
     scheduler = ASHAScheduler(
-        metric=\"val_dir_acc\", # Metric to compare trials
-        mode=\"max\",           # We want to maximize directional accuracy
-        # time_attr=\"epoch\", # Use 'epoch' reported in tune.report
+        metric="val_dir_acc", # Metric to compare trials
+        mode="max",           # We want to maximize directional accuracy
+        # time_attr="epoch", # Use 'epoch' reported in tune.report
         max_t=100,            # Max training epochs per trial (adjust as needed)
         grace_period=10,       # Min epochs before a trial can be stopped
         reduction_factor=2     # Halve the number of trials each round
@@ -268,17 +268,17 @@ if __name__ == \"__main__\":
     analysis = tune.run(
         tune_trainable,
         # Use CLI args for resources
-        resources_per_trial={\"cpu\": cli_args.cpus_per_trial, \"gpu\": cli_args.gpus_per_trial},
+        resources_per_trial={"cpu": cli_args.cpus_per_trial, "gpu": cli_args.gpus_per_trial},
         config=search_space,
         num_samples=cli_args.num_samples, # Use CLI arg for num_samples
         scheduler=scheduler,
         # search_alg=search_alg, # Uncomment if using HyperOpt
-        name=\"tcn_tune_dir_acc_epoch\", # Updated experiment name
-        local_dir=\"./ray_results\", # Where to store results
+        name="tcn_tune_dir_acc_epoch", # Updated experiment name
+        local_dir="./ray_results", # Where to store results
         verbose=1, # 0 = silent, 1 = progress bar, 2 = detailed trial info
         # Add checkpointing config if needed later
         # keep_checkpoints_num=1,
-        # checkpoint_score_attr=\"val_dir_acc\",
+        # checkpoint_score_attr="val_dir_acc",
         # checkpoint_freq=5, # Save every 5 epochs
     )
 
@@ -286,18 +286,18 @@ if __name__ == \"__main__\":
     ray.shutdown()
 
     # Print best result
-    best_trial = analysis.get_best_trial(\"val_dir_acc\", \"max\", \"last\")
+    best_trial = analysis.get_best_trial("val_dir_acc", "max", "last")
     if best_trial:
-        logger.info(\"--- Best Trial Found ---\")
+        logger.info("--- Best Trial Found ---")
         # Access the best reported result for the metric
-        best_metric_result = analysis.get_best_result(metric=\"val_dir_acc\", mode=\"max\")
+        best_metric_result = analysis.get_best_result(metric="val_dir_acc", mode="max")
         if best_metric_result:
-             logger.info(f\"Best Metric (val_dir_acc): {best_metric_result[\"val_dir_acc\"]:.4f} at epoch {best_metric_result[\"epoch\"]}\")
+             logger.info(f"Best Metric (val_dir_acc): {best_metric_result['val_dir_acc']:.4f} at epoch {best_metric_result['epoch']}")
         else:
-            logger.warning(\"Could not retrieve best result details.\")
-        logger.info(f\"Best Config: {best_trial.config}\")
-        logger.info(f\"Log Directory: {best_trial.logdir}\")
+            logger.warning("Could not retrieve best result details.")
+        logger.info(f"Best Config: {best_trial.config}")
+        logger.info(f"Log Directory: {best_trial.logdir}")
     else:
-        logger.warning(\"No successful trials completed.\")
+        logger.warning("No successful trials completed.")
 
-    logger.info(\"Ray Tune script finished.\") 
+    logger.info("Ray Tune script finished.") 
