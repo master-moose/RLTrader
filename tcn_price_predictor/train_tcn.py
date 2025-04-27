@@ -722,42 +722,77 @@ def plot_results(predictions, actuals, filename="prediction_vs_actual.png"):
     plt.close()
 
 
-# --- Main Execution --- #
+# --- Argument Parsing and Main Execution --- #
+
+def add_tcn_training_args(parser):
+    """Adds TCN training specific arguments to the provided parser."""
+    parser.add_argument("--data_path", type=str, required=True, help="Path to the training HDF5 file.")
+    parser.add_argument("--val_data_path", type=str, required=True, help="Path to the validation HDF5 file.")
+    parser.add_argument("--test_data_path", type=str, required=True, help="Path to the test HDF5 file.")
+    parser.add_argument("--config-name", type=str, default="tcn_config.yaml", help="Name of the config file in config directory")
+    parser.add_argument("--symbol", type=str, default="ETHUSDT", help="Trading symbol to use (e.g., ETHUSDT)")
+    parser.add_argument("--interval", type=str, default="1m", help="Candlestick interval (e.g., 1m, 5m, 1h)")
+    parser.add_argument("--start-date", type=str, default="2022-01-01", help="Start date for data range (YYYY-MM-DD)")
+    parser.add_argument("--end-date", type=str, default="2023-01-01", help="End date for data range (YYYY-MM-DD)")
+    parser.add_argument("--sequence_length", type=int, default=60, help="Length of input sequences.")
+    parser.add_argument("--prediction_steps", type=int, default=5, help="Number of steps ahead to predict.")
+    parser.add_argument("--target_col", type=str, default="close_pct_change", help="Target column name for prediction.")
+    parser.add_argument("--tcn_channels", type=int, nargs='+', default=[64, 128, 256], help="Number of channels in each TCN layer.")
+    parser.add_argument("--tcn_kernel_size", type=int, default=7, help="Kernel size for TCN convolutions.")
+    parser.add_argument("--tcn_dropout", type=float, default=0.2, help="Dropout rate for TCN layers.")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for training.")
+    parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate for the optimizer.")
+    parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping.")
+    parser.add_argument("--accuracy_threshold", type=float, default=0.01, help="Threshold for custom accuracy metric (relative error).")
+    parser.add_argument("--use_scheduler", action="store_true", help="Use ReduceLROnPlateau learning rate scheduler.")
+    parser.add_argument("--scheduler_factor", type=float, default=0.1, help="Factor by which the learning rate will be reduced.")
+    parser.add_argument("--scheduler_patience", type=int, default=5, help="Number of epochs with no improvement after which learning rate will be reduced.")
+    parser.add_argument("--scheduler_min_lr", type=float, default=1e-6, help="Minimum learning rate for the scheduler.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument("--no_cuda", action="store_true", help="Disable CUDA training.")
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of subprocesses to use for data loading.")
+    parser.add_argument("--save_model_path", type=str, default="./models/tcn_predictor.pth", help="Path to save the trained model.")
+    parser.add_argument("--plot_filename", type=str, default="prediction_vs_actual.png", help="Filename for the prediction plot.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    # Add other arguments as needed
+
 
 def parse_args():
     """Parses command line arguments."""
-    parser = argparse.ArgumentParser(description="Train a TCN model for price prediction.")
-    parser.add_argument("--data_path", type=str, required=True, help="Path to the HDF5 training data file.")
-    parser.add_argument("--val_data_path", type=str, default=None, help="Optional path to the HDF5 validation data file.")
-    parser.add_argument("--test_data_path", type=str, default=None, help="Optional path to the HDF5 test data file.")
-    parser.add_argument("--sequence_length", type=int, default=60, help="Input sequence length for TCN.")
-    parser.add_argument("--prediction_steps", type=int, default=1, help="Number of steps ahead to predict (default: 1, i.e., next step).")
-    parser.add_argument("--target_col", type=str, default="close_4h", help="Column name of the target variable in the 4h dataset.")
-    parser.add_argument("--tcn_channels", type=int, nargs='+', default=[64, 128, 256], help="Number of channels in TCN layers.")
-    parser.add_argument("--tcn_kernel_size", type=int, default=3, help="Kernel size for TCN convolutions.")
-    parser.add_argument("--tcn_dropout", type=float, default=0.2, help="Dropout rate for TCN layers.")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
-    parser.add_argument("--learning_rate", type=float, default=0.0001, help="Initial learning rate for optimizer.")
-    parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping.")
-    parser.add_argument("--test_split", type=float, default=0.1, help="Fraction of data to use for testing (if --test_data_path is not provided).")
-    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of training data to use for validation (if --val_data_path is not provided).")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
-    parser.add_argument("--no_cuda", action="store_true", help="Disable CUDA training.")
-    parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for DataLoader (default: 0 recommended for Windows).")
-    parser.add_argument("--accuracy_threshold", type=float, default=0.01, help="Relative threshold for custom accuracy metric (default: 0.01 for 1%).")
-    parser.add_argument("--use_scheduler", action="store_true", help="Use ReduceLROnPlateau learning rate scheduler.")
-    parser.add_argument("--scheduler_factor", type=float, default=0.1, help="Factor by which the learning rate will be reduced (default: 0.1).")
-    parser.add_argument("--scheduler_patience", type=int, default=5, help="Patience for ReduceLROnPlateau scheduler (default: 5).")
-    parser.add_argument("--scheduler_min_lr", type=float, default=1e-8, help="Minimum learning rate for scheduler (default: 1e-8).")
-    parser.add_argument(
-        "--monitor_metric",
-        type=str,
-        default="val_loss",
-        choices=['val_loss', 'val_mae', 'val_rmse', 'val_dir_acc', 'val_custom_acc'],
-        help="Validation metric to monitor for LR scheduling and early stopping (default: val_loss)."
-    )
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(description="Train TCN Price Predictor")
+    add_tcn_training_args(parser) # Add the arguments using the helper function
+    args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled.")
+
+    # --- Validate Channels --- #
+    if not isinstance(args.tcn_channels, list) or not all(isinstance(c, int) for c in args.tcn_channels):
+         raise ValueError("--tcn_channels must be a list of integers.")
+    if not args.tcn_channels:
+        raise ValueError("--tcn_channels cannot be empty.")
+
+    # --- Validate Kernel Size --- #
+    if args.tcn_kernel_size % 2 == 0:
+        logger.warning(f"TCN kernel size ({args.tcn_kernel_size}) is even. Odd kernel sizes are generally preferred.")
+    if args.tcn_kernel_size < 2:
+        raise ValueError("--tcn_kernel_size must be >= 2.")
+
+    # --- Validate Paths --- #
+    # Ensure model save directory exists
+    model_dir = os.path.dirname(args.save_model_path)
+    if model_dir and not os.path.exists(model_dir):
+        os.makedirs(model_dir, exist_ok=True)
+        logger.info(f"Created model save directory: {model_dir}")
+    # Ensure plot save directory exists (if different)
+    plot_dir = os.path.dirname(args.plot_filename)
+    if plot_dir and not os.path.exists(plot_dir):
+        os.makedirs(plot_dir, exist_ok=True)
+        logger.info(f"Created plot save directory: {plot_dir}")
+
+    return args
 
 def main():
     args = parse_args()

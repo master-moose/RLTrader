@@ -5,13 +5,14 @@ from ray.tune.schedulers import ASHAScheduler
 import logging
 import torch
 import numpy as np
-# Removed: import argparse
+import argparse # Need argparse here now
 # Removed: import os # Was unused
 
 # Import necessary components from your training script
 # Assuming tune_tcn.py is in the same directory or RLTrader is in PYTHONPATH
 from tcn_price_predictor.train_tcn import (
-    parse_args, # Keep this
+    # Removed: parse_args,
+    add_tcn_training_args, # Import the new function
     load_and_prepare_data,
     PriceDataset,
     TCNPricePredictor,
@@ -272,8 +273,14 @@ def tune_trainable(config, cli_args):
 
 
 if __name__ == "__main__":
-    # --- Get base parser from train_tcn and add tuning args ---
-    parser = parse_args(return_parser=True) # Get the parser object
+    # --- Create parser, add train args, add tune args, then parse ---
+    # 1. Create a base parser
+    parser = argparse.ArgumentParser(description="Tune TCN Hyperparameters using Ray Tune")
+
+    # 2. Add the arguments from train_tcn.py using the helper function
+    add_tcn_training_args(parser)
+
+    # 3. Add the tuning-specific arguments to the *same* parser
     parser.add_argument(
         "--cpus_per_trial",
         type=int,
@@ -292,7 +299,6 @@ if __name__ == "__main__":
         default=20,
         help="Number of hyperparameter combinations to try."
     )
-    # Add args for experiment name and storage path if desired
     parser.add_argument(
         "--experiment_name",
         type=str,
@@ -306,7 +312,7 @@ if __name__ == "__main__":
         help="Path for Ray Tune results and checkpoints."
     )
 
-    # Now parse all arguments together
+    # 4. Now parse all arguments together
     cli_args = parser.parse_args()
 
     # Define Search Space
