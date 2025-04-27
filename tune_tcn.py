@@ -28,11 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 def tune_trainable(config):
-    \"\"\"
-    Ray Tune trainable function.
-    Takes a hyperparameter configuration, runs one training trial,
-    and reports metrics epoch-by-epoch back to Tune.
-    \"\"\"
+    #\"\"\"
+    # Ray Tune trainable function.
+    # Takes a hyperparameter configuration, runs one training trial,
+    # and reports metrics epoch-by-epoch back to Tune.
+    #\"\"\"
     # 1. Get Default Arguments & Override with Tune Config
     default_args = parse_args([])
     args = default_args
