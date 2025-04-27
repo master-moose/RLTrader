@@ -600,6 +600,7 @@ def parse_args():
     parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of training data to use for validation (if --val_data_path is not provided).")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no_cuda", action="store_true", help="Disable CUDA training.")
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for DataLoader (default: 0 recommended for Windows).")
     return parser.parse_args()
 
 def main():
@@ -743,7 +744,7 @@ def main():
 
     # Create DataLoaders
     # Use persistent_workers and pin_memory if CUDA is available for potential speedup
-    num_workers = 2 # Experimenting with workers on Windows
+    num_workers = args.num_workers
     pin_memory = True if device == torch.device("cuda") else False
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
