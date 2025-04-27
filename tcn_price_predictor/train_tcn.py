@@ -145,14 +145,15 @@ class PriceDataset(Dataset):
 
 
 def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', prediction_steps=1,
-                          fit_scalers=True, existing_target_scaler=None):
+                          fit_scalers=None, existing_target_scaler=None):
     """
-    Loads data from HDF5, merges timeframes, selects scaled features, and creates sequences with raw target values.
+    Loads data from HDF5, merges timeframes, selects scaled features, and creates sequences 
+    with percentage change target values.
 
     Args:
         h5_path (str): Path to the HDF5 file.
         sequence_length (int): Length of input sequences.
-        target_col (str): Name of the target column (e.g., 'close_4h') - This should be the NON-SCALED version for prediction.
+        target_col (str): Name of the target column (e.g., 'close_4h') - This should be the NON-SCALED version for calculating % change.
         prediction_steps (int): Number of steps ahead to predict.
         fit_scalers: **UNUSED** (no scaling performed).
         existing_target_scaler: **UNUSED**.
@@ -160,7 +161,7 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     Returns:
         tuple: (X, y, feature_columns)
                 feature_columns (list): List of feature names used.
-                y (np.ndarray): Array of raw target values.
+                y (np.ndarray): Array of target percentage changes.
     """
     logger.info(f"Loading data from {h5_path}")
     dfs = {}
@@ -341,13 +342,43 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     features_df = final_df[feature_columns]
     target_series = final_df['target']
 
-    # --- Target values are used directly (NO SCALING) --- #
-    target_raw = target_series.values
-    logger.info("Using raw target values.")
+    # --- Calculate Target: Percentage Change --- #
+    # Use the *original* non-shifted, non-scaled target column for calculation base
+    # Ensure it exists before proceeding
+    if raw_target_col not in final_df.columns:
+         logger.error(f"Original target column '{raw_target_col}' needed for % change calculation not found in final DataFrame.")
+         raise ValueError(f"Missing '{raw_target_col}' for target calculation.")
 
-    # Features are already scaled, directly use their values
+    # Calculate future price based on the shifted raw target
+    future_price = final_df['target']
+    # Use the *current* price (before shift) as the base for % change
+    current_price = final_df[raw_target_col]
+
+    # Calculate percentage change: (future - current) / current
+    # Add small epsilon to prevent division by zero, although unlikely for prices
+    epsilon = 1e-10
+    target_pct_change = (future_price - current_price) / (current_price + epsilon)
+
+    # Replace potential infinite values (if current_price was near zero) with 0 or NaN
+    target_pct_change.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Forward fill any NaNs introduced by the pct_change calc or division by zero
+    target_pct_change.fillna(method='ffill', inplace=True)
+    # Drop any remaining NaNs (likely at the beginning)
+    initial_target_len = len(target_pct_change)
+    target_pct_change.dropna(inplace=True)
+    if len(target_pct_change) < initial_target_len:
+        logger.warning(f"Dropped {initial_target_len - len(target_pct_change)} rows due to NaNs in target % change calculation.")
+
+    # Align features and target after potential NaN drops in target
+    common_index = features_df.index.intersection(target_pct_change.index)
+    if len(common_index) < len(features_df):
+        logger.info(f"Aligning features ({len(features_df)}) and target ({len(target_pct_change)}) after NaN handling. New length: {len(common_index)}")
+        features_df = features_df.loc[common_index]
+        target_pct_change = target_pct_change.loc[common_index]
+
     features_final = features_df.values
-    logger.info(f"Using pre-scaled features directly. Shape: {features_final.shape}")
+    target_final = target_pct_change.values
+    logger.info(f"Calculated target as percentage change. Target shape: {target_final.shape}")
 
     # --- Create Sequences --- #
     logger.info(f"Creating sequences of length {sequence_length}...")
@@ -360,17 +391,16 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
 
     # Create sequences
     for i in range(len(features_final) - sequence_length + 1):
-        X.append(features_final[i:(i + sequence_length)])
-        # Target corresponds to the end of the sequence for price prediction
-        # If prediction_steps=1, target is one step after sequence end
-        target_idx = i + sequence_length -1 + prediction_steps
-        if target_idx < len(target_raw):
-            y.append(target_raw[target_idx]) # Use raw target value
-        else:
-            # This happens if prediction_steps pushes index out of bounds near the end
-            # We need to shorten X to match the available y
-            X = X[:-1] # Remove the last sequence added
-            break
+        # The features sequence
+        feature_seq = features_final[i : i + sequence_length]
+
+        # The target corresponds to the percentage change calculated for the *end* of the sequence
+        # The `target_final` array is already aligned with `features_final`
+        target_val = target_final[i + sequence_length - 1]
+
+        # Append sequence and target
+        X.append(feature_seq)
+        y.append(target_val)
 
     X = np.array(X)
     y = np.array(y)
@@ -518,7 +548,7 @@ def evaluate_model(model, test_loader, criterion, device):
             all_targets.extend(targets_original.flatten())
 
     avg_test_loss = test_loss / len(test_loader)
-    logger.info(f"Average Test Loss (Original Scale): {avg_test_loss:.6f}") # Loss is now on original scale
+    logger.info(f"Average Test Loss (MSE of % Change): {avg_test_loss:.6f}")
 
     # Calculate metrics on original scale
     if not all_preds or not all_targets: # Check if lists are empty
@@ -528,9 +558,8 @@ def evaluate_model(model, test_loader, criterion, device):
     else:
          mae = np.mean(np.abs(np.array(all_preds) - np.array(all_targets)))
          rmse = np.sqrt(np.mean((np.array(all_preds) - np.array(all_targets))**2))
-         logger.info(f"MAE (Original Scale): {mae:.4f}")
-         logger.info(f"RMSE (Original Scale): {rmse:.4f}")
-
+         logger.info(f"MAE (% Change): {mae:.6f}") # More precision for % change
+         logger.info(f"RMSE (% Change): {rmse:.6f}")
 
     return all_preds, all_targets, avg_test_loss
 
@@ -546,7 +575,7 @@ def plot_results(predictions, actuals, filename="prediction_vs_actual.png"):
     plt.plot(predictions, label='Predicted Prices', color='red', linestyle='--', alpha=0.7)
     plt.title('TCN Price Prediction vs Actual')
     plt.xlabel('Time Steps (Test Set)')
-    plt.ylabel('Price')
+    plt.ylabel('Percentage Change')
     plt.legend()
     plt.grid(True)
     try:
@@ -599,7 +628,7 @@ def main():
     try:
         X_train, y_train, feature_columns = load_and_prepare_data(
             args.data_path, args.sequence_length, args.target_col, args.prediction_steps,
-            fit_scalers=True # Fit scalers on training data
+            fit_scalers=None # Fit scalers on training data
         )
         if X_train.size == 0:
              logger.error("Training data loading resulted in empty sequences. Exiting.")
@@ -617,7 +646,7 @@ def main():
             try:
                 X_val, y_val = load_and_prepare_data(
                     args.val_data_path, args.sequence_length, args.target_col, args.prediction_steps,
-                    fit_scalers=False
+                    fit_scalers=None
                 )
                 if X_val.size > 0:
                      val_dataset = PriceDataset(X_val, y_val)
@@ -654,7 +683,7 @@ def main():
             try:
                 X_test, y_test = load_and_prepare_data(
                     args.test_data_path, args.sequence_length, args.target_col, args.prediction_steps,
-                    fit_scalers=False
+                    fit_scalers=None
                 )
                 if X_test.size > 0:
                      test_dataset = PriceDataset(X_test, y_test)
