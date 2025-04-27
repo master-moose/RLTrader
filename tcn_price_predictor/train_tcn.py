@@ -24,6 +24,7 @@ import h5py
 import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset, random_split
 import matplotlib.pyplot as plt
 
@@ -419,12 +420,28 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
 
 # --- Training and Evaluation --- #
 
-def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, device, patience=10):
-    """Trains the TCN model."""
+def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler, epochs, device, patience=10):
+    """
+    Trains the TCN model with learning rate scheduling.
+
+    Args:
+        model: The PyTorch model to train.
+        train_loader: DataLoader for training data.
+        val_loader: DataLoader for validation data.
+        optimizer: The optimizer (e.g., Adam).
+        criterion: The loss function.
+        scheduler: Learning rate scheduler (e.g., ReduceLROnPlateau).
+        epochs (int): Maximum number of epochs to train.
+        device: The device to train on (CPU or CUDA).
+        patience (int): Patience for early stopping.
+
+    Returns:
+        dict: Training history containing train and validation losses.
+    """
     model.to(device)
     best_val_loss = float('inf')
     patience_counter = 0
-    history = {'train_loss': [], 'val_loss': []}
+    history = {'train_loss': [], 'val_loss': [], 'lr': []}
 
     logger.info(f"Starting training for {epochs} epochs on device: {device}")
 
@@ -471,6 +488,10 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, d
             avg_val_loss = epoch_val_loss / len(val_loader)
 
         history['val_loss'].append(avg_val_loss)
+        # Record current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        history['lr'].append(current_lr)
+
         epoch_duration = time.time() - start_time
 
         # Handle potential division by zero if loaders were empty
@@ -481,7 +502,16 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, d
         logger.info(f"Epoch [{epoch+1}/{epochs}] - "
                     f"Train Loss: {train_loss_str}, "
                     f"Val Loss: {val_loss_str}, "
+                    f"LR: {current_lr:.1e}, "
                     f"Duration: {epoch_duration:.2f}s")
+
+        # Learning rate scheduler step (requires valid avg_val_loss)
+        if len(val_loader) > 0 and scheduler is not None:
+             scheduler.step(avg_val_loss)
+             # Log if LR changed
+             new_lr = optimizer.param_groups[0]['lr']
+             if new_lr < current_lr:
+                 logger.info(f"Learning rate reduced to {new_lr:.1e}")
 
         # Early stopping logic requires a valid avg_val_loss
         if len(val_loader) > 0:
@@ -633,7 +663,7 @@ def parse_args():
     parser.add_argument("--tcn_dropout", type=float, default=0.2, help="Dropout rate for TCN layers.")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
-    parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate for optimizer.")
+    parser.add_argument("--learning_rate", type=float, default=0.0001, help="Initial learning rate for optimizer.")
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping.")
     parser.add_argument("--test_split", type=float, default=0.1, help="Fraction of data to use for testing (if --test_data_path is not provided).")
     parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of training data to use for validation (if --val_data_path is not provided).")
@@ -641,6 +671,10 @@ def parse_args():
     parser.add_argument("--no_cuda", action="store_true", help="Disable CUDA training.")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for DataLoader (default: 0 recommended for Windows).")
     parser.add_argument("--accuracy_threshold", type=float, default=0.01, help="Relative threshold for custom accuracy metric (default: 0.01 for 1%).")
+    parser.add_argument("--use_scheduler", action="store_true", help="Use ReduceLROnPlateau learning rate scheduler.")
+    parser.add_argument("--scheduler_factor", type=float, default=0.1, help="Factor by which the learning rate will be reduced (default: 0.1).")
+    parser.add_argument("--scheduler_patience", type=int, default=5, help="Patience for ReduceLROnPlateau scheduler (default: 5).")
+    parser.add_argument("--scheduler_min_lr", type=float, default=1e-8, help="Minimum learning rate for scheduler (default: 1e-8).")
     return parser.parse_args()
 
 def main():
@@ -823,6 +857,21 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = nn.MSELoss()
 
+    # --- Initialize Scheduler (Optional) --- #
+    scheduler = None
+    if args.use_scheduler:
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',          # Reduce LR when validation loss stops decreasing
+            factor=args.scheduler_factor,
+            patience=args.scheduler_patience,
+            min_lr=args.scheduler_min_lr,
+            verbose=True        # Logs message when LR is reduced
+        )
+        logger.info(f"Using ReduceLROnPlateau scheduler with factor={args.scheduler_factor}, patience={args.scheduler_patience}, min_lr={args.scheduler_min_lr}")
+    else:
+        logger.info("Learning rate scheduler is disabled.")
+
     # --- Train --- #
     if len(train_dataset) == 0:
         logger.error("Training dataset is empty. Cannot train the model. Exiting.")
@@ -830,7 +879,8 @@ def main():
 
     logger.info("--- Starting Training ---")
     train_history = train_model(
-        model, train_loader, val_loader, optimizer, criterion, args.epochs, device, args.patience
+        model, train_loader, val_loader, optimizer, criterion, scheduler, # Pass scheduler
+        args.epochs, device, args.patience
     )
 
     # --- Evaluate --- #
