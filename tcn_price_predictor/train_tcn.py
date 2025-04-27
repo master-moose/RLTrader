@@ -138,168 +138,244 @@ class PriceDataset(Dataset):
         return torch.FloatTensor(self.features[idx]), torch.FloatTensor([self.targets[idx]]) # Target needs to be float tensor
 
 
-def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', prediction_steps=1):
-    """Loads data from HDF5, merges timeframes, scales, and creates sequences."""
+def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', prediction_steps=1,
+                          fit_scalers=True, existing_feature_scaler=None, existing_target_scaler=None):
+    """
+    Loads data from HDF5, merges timeframes, selects scaled features, scales target, and creates sequences.
+
+    Args:
+        h5_path (str): Path to the HDF5 file.
+        sequence_length (int): Length of input sequences.
+        target_col (str): Name of the target column (e.g., 'close_4h') - This should be the NON-SCALED version for prediction.
+        prediction_steps (int): Number of steps ahead to predict.
+        fit_scalers (bool): If True, fit a new target scaler. If False, use the existing one.
+        existing_feature_scaler: **UNUSED** (features are assumed pre-scaled).
+        existing_target_scaler (MinMaxScaler, optional): Pre-fitted target scaler.
+
+    Returns:
+        tuple: (X, y, feature_columns, target_scaler)
+               feature_columns (list): List of feature names used.
+               target_scaler (MinMaxScaler): Fitted or existing target scaler.
+    """
     logger.info(f"Loading data from {h5_path}")
     dfs = {}
-    keys = ['/15m', '/4h', '/1d']
+    # Define keys and corresponding suffixes (None for the base 15m)
+    key_suffix_map = {'/15m': None, '/4h': '_4h', '/1d': '_1d'}
+    base_key = '/15m' # Use 15m as the base for feature names without suffix
+
     try:
         with h5py.File(h5_path, 'r') as f:
-            for key in keys:
+            # Check if base key exists first
+            if base_key not in f:
+                 logger.error(f"Base timeframe key '{base_key}' not found in {h5_path}. Cannot proceed.")
+                 raise FileNotFoundError(f"Base key {base_key} not found in {h5_path}")
+
+            for key, suffix in key_suffix_map.items():
                 if key in f:
                     logger.info(f"Reading key: {key}")
                     data = f[key][()] # Read dataset into numpy array
-                    # Convert structured numpy array to pandas DataFrame
                     df = pd.DataFrame(data)
-                    # Assuming 'timestamp' column exists and is suitable for index
                     if 'timestamp' in df.columns:
-                         # Convert timestamp if it's not already datetime
                          if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                              # Attempt conversion from seconds or milliseconds
-                              try:
-                                   # Try seconds first
-                                   df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                              try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                               except (ValueError, TypeError):
-                                   try:
-                                        # Try milliseconds if seconds fail
-                                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                                   except (ValueError, TypeError):
-                                        logger.error(f"Could not convert 'timestamp' column in {key} to datetime.")
-                                        raise
+                                   try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                                   except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key}")
                          df.set_index('timestamp', inplace=True)
                          df.sort_index(inplace=True)
+                         # Add suffix to non-base timeframes BEFORE storing
+                         if suffix:
+                              df = df.add_suffix(suffix)
                          dfs[key.strip('/')] = df
-                         logger.info(f"Loaded {key}: {df.shape[0]} rows, {df.shape[1]} columns. Index type: {df.index.dtype}")
+                         logger.info(f"Loaded {key}: {df.shape[0]} rows, {df.shape[1]} columns.")
                     else:
-                        logger.error(f"'timestamp' column not found in key {key}. Cannot process.")
                         raise ValueError(f"'timestamp' column missing in {key}")
                 else:
-                    logger.warning(f"Key {key} not found in {h5_path}")
-                    raise FileNotFoundError(f"Required key {key} not found in {h5_path}")
+                     logger.warning(f"Key {key} not found in {h5_path}. Some features might be missing.")
+                     # Create empty df with suffix if not base, to avoid merge errors but indicate missing data
+                     dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
 
     except Exception as e:
         logger.error(f"Failed to load data from HDF5: {e}", exc_info=True)
         raise
 
-    # Use 4h as the base timeframe
-    base_df = dfs['4h'].copy()
-    logger.info(f"Base DataFrame (4h): {base_df.shape}")
+    # Use 4h as the base *index* timeframe for alignment and target definition
+    base_index_key = '4h'
+    if base_index_key not in dfs or dfs[base_index_key].empty:
+         logger.error(f"Base index timeframe '{base_index_key}' data is missing or empty in {h5_path}.")
+         raise ValueError(f"Missing or empty '{base_index_key}' data in {h5_path}")
+
+    # Start with the 4h dataframe for index alignment
+    aligned_df = dfs[base_index_key].copy()
+    logger.info(f"Base Index DataFrame ({base_index_key}): {aligned_df.shape}")
 
     # Merge other timeframes onto the 4h index
     for key, df in dfs.items():
-        if key != '4h':
-            # Ensure consistent timestamp index type before merging
-            base_df = base_df[~base_df.index.duplicated(keep='first')] # Remove duplicates in base index
-            df = df[~df.index.duplicated(keep='first')] # Remove duplicates in joining index
-
-            # Use merge_asof for robust time-based joining with tolerance
-            # Sort both dataframes by index first
-            base_df = base_df.sort_index()
+        if key != base_index_key and not df.empty:
+            aligned_df = aligned_df[~aligned_df.index.duplicated(keep='first')]
+            df = df[~df.index.duplicated(keep='first')]
+            aligned_df = aligned_df.sort_index()
             df = df.sort_index()
 
-            logger.info(f"Merging '{key}' into '4h'. Base index range: {base_df.index.min()} to {base_df.index.max()}, Joining index range: {df.index.min()} to {df.index.max()}")
-            # Allow merging based on nearest past timestamp within tolerance (e.g., slightly more than the target frequency)
-            tolerance = pd.Timedelta('4 hours 1 minute') if key == '1d' else pd.Timedelta('16 minutes')
+            # Determine merge tolerance based on the key being merged
+            if key == '1d': tolerance = pd.Timedelta('1 day 1 minute')
+            elif key == '15m': tolerance = pd.Timedelta('16 minutes')
+            else: tolerance = pd.Timedelta('5 minutes') # Default small tolerance
+
+            logger.info(f"Merging '{key}' onto '{base_index_key}' index. Tolerance: {tolerance}")
+
+            # Suffixes were added when loading, so just merge
             merged = pd.merge_asof(
-                base_df,
-                df.add_suffix(f'_{key}'), # Add suffix before merging
+                aligned_df,
+                df, # df already has suffix if needed
                 left_index=True,
                 right_index=True,
-                direction='backward', # Use the latest value from 'df' at or before the 'base_df' timestamp
+                direction='backward',
                 tolerance=tolerance
             )
-            # Check merge quality
-            null_after_merge = merged[[c for c in merged.columns if c.endswith(f'_{key}')]].isnull().sum().sum()
+            # Check merge quality based on columns of the dataframe being merged
+            suffix = key_suffix_map[f'/{key}']
+            merged_cols = [c for c in df.columns if c != f'timestamp{suffix if suffix else ""}'] # Get original cols (with suffix)
+            null_after_merge = merged[merged_cols].isnull().sum().sum()
             if null_after_merge > 0:
-                 logger.warning(f"Merge for '{key}' resulted in {null_after_merge} null values (out of {len(merged) * df.shape[1]}). Consider adjusting tolerance or checking data alignment.")
+                 logger.warning(f"Merge for '{key}' resulted in {null_after_merge} null values in its original columns. Check alignment.")
 
-            base_df = merged # Update base_df with merged columns
+            aligned_df = merged
+        elif key != base_index_key and df.empty:
+             logger.warning(f"Skipping merge for empty dataframe from key '/{key}'")
 
-    logger.info(f"DataFrame after merging: {base_df.shape}. Columns: {list(base_df.columns)}")
+    logger.info(f"DataFrame after merging all timeframes: {aligned_df.shape}. Columns: {len(aligned_df.columns)}")
 
-    # --- Feature Engineering / Selection ---
-    # Define target column explicitly using the base timeframe name
-    if target_col not in base_df.columns:
-        logger.error(f"Target column '{target_col}' not found after merging. Available columns: {list(base_df.columns)}")
-        raise ValueError(f"Target column '{target_col}' not found.")
+    # --- Target Definition --- #
+    # Target column should be the UNSCALED 4h close price
+    raw_target_col = target_col # e.g., 'close_4h'
+    if raw_target_col not in aligned_df.columns:
+        logger.error(f"Target column '{raw_target_col}' not found after merging. Available columns: {list(aligned_df.columns)}")
+        raise ValueError(f"Target column '{raw_target_col}' not found.")
 
-    base_df['target'] = base_df[target_col].shift(-prediction_steps)
-    logger.info(f"Created 'target' column by shifting '{target_col}' by {-prediction_steps} steps.")
+    aligned_df['target'] = aligned_df[raw_target_col].shift(-prediction_steps)
+    logger.info(f"Created 'target' column by shifting '{raw_target_col}' by {-prediction_steps} steps.")
 
-    # Drop rows with NaN target (typically the last 'prediction_steps' rows)
-    initial_rows = len(base_df)
-    base_df.dropna(subset=['target'], inplace=True)
-    logger.info(f"Dropped {initial_rows - len(base_df)} rows with NaN target.")
+    # --- Feature Selection (Select only *_scaled features) --- #
+    feature_columns = []
+    for col in aligned_df.columns:
+        # Keep base (15m) scaled features OR suffixed scaled features
+        if col.endswith('_scaled') or col.endswith('_scaled_4h') or col.endswith('_scaled_1d'):
+             # Basic check for excessive NaNs in potential feature columns BEFORE ffill
+             if aligned_df[col].isnull().sum() / len(aligned_df) < 0.5: # Allow up to 50% NaNs pre-fill
+                 feature_columns.append(col)
+             else:
+                 logger.warning(f"Skipping potential feature '{col}' due to excessive NaNs ({aligned_df[col].isnull().sum() / len(aligned_df):.1%}).")
 
-    # Handle potential NaNs introduced by merging/feature engineering
-    # Option 1: Forward fill (simple, assumes persistence)
-    base_df.fillna(method='ffill', inplace=True)
-    # Option 2: Drop rows with any NaNs (can lose significant data)
-    # base_df.dropna(inplace=True)
-    # Option 3: Interpolate (linear or other methods)
-    # base_df.interpolate(method='linear', inplace=True)
+    # Add check if feature_columns is empty
+    if not feature_columns:
+        logger.error("No suitable feature columns (ending in '_scaled', '_scaled_4h', '_scaled_1d') found or kept after NaN check.")
+        raise ValueError("No feature columns selected.")
 
-    # Drop remaining NaNs just in case ffill didn't catch everything at the start
-    rows_before_final_na_drop = len(base_df)
-    base_df.dropna(inplace=True)
-    if len(base_df) < rows_before_final_na_drop:
-        logger.warning(f"Dropped an additional {rows_before_final_na_drop - len(base_df)} rows due to NaNs after forward fill.")
+    logger.info(f"Selected {len(feature_columns)} scaled feature columns: {feature_columns[:5]}...") # Log first few
 
-    if base_df.empty:
-         logger.error("DataFrame is empty after processing NaNs. Check data quality and merging logic.")
+    # Select only the chosen features and the target column for further processing
+    final_df = aligned_df[feature_columns + ['target']].copy()
+
+    # --- Handle NaNs --- #
+    initial_rows = len(final_df)
+    final_df.dropna(subset=['target'], inplace=True) # Drop rows where target is NaN
+    logger.info(f"Dropped {initial_rows - len(final_df)} rows with NaN target.")
+
+    # Forward fill remaining NaNs in feature columns (from merging)
+    final_df.fillna(method='ffill', inplace=True)
+
+    # Final drop of any remaining NaNs (e.g., at the beginning after ffill)
+    rows_before_final_na_drop = len(final_df)
+    final_df.dropna(inplace=True)
+    if len(final_df) < rows_before_final_na_drop:
+        logger.warning(f"Dropped an additional {rows_before_final_na_drop - len(final_df)} rows due to NaNs after forward fill.")
+
+    if final_df.empty:
+         logger.error("DataFrame is empty after processing NaNs and selecting features.")
          raise ValueError("No valid data remaining after preprocessing.")
 
-    logger.info(f"DataFrame after handling NaNs: {base_df.shape}")
-
+    logger.info(f"Final DataFrame shape after NaN handling: {final_df.shape}")
 
     # Separate features and target
-    features_df = base_df.drop(columns=['target', target_col]) # Drop original target col too
-    target_series = base_df['target']
+    features_df = final_df[feature_columns]
+    target_series = final_df['target']
 
-    # --- Scaling --- #
-    logger.info(f"Scaling {features_df.shape[1]} features and the target...")
-    feature_scaler = MinMaxScaler()
-    # Fit only on non-NaN values if any remained (shouldn't if dropna used)
-    valid_features = features_df.values[~np.isnan(features_df.values).any(axis=1)]
-    if valid_features.shape[0] == 0:
-         logger.error("No valid feature rows left to fit the scaler.")
-         raise ValueError("Cannot fit scaler on empty feature data.")
-    feature_scaler.fit(valid_features)
-    features_scaled = feature_scaler.transform(features_df.values)
+    # --- Target Scaling --- #
+    if fit_scalers:
+        logger.info("Fitting target scaler...")
+        target_scaler = MinMaxScaler()
+        valid_targets = target_series.values[~np.isnan(target_series.values)].reshape(-1, 1)
+        if valid_targets.shape[0] == 0:
+            logger.error("No valid target values left to fit the scaler.")
+            raise ValueError("Cannot fit scaler on empty target data.")
+        target_scaler.fit(valid_targets)
+    else:
+        logger.info("Using existing target scaler...")
+        if existing_target_scaler is None:
+            raise ValueError("Existing target scaler must be provided when fit_scalers is False.")
+        target_scaler = existing_target_scaler
 
-
-    target_scaler = MinMaxScaler()
-    valid_targets = target_series.values[~np.isnan(target_series.values)].reshape(-1, 1)
-    if valid_targets.shape[0] == 0:
-        logger.error("No valid target values left to fit the scaler.")
-        raise ValueError("Cannot fit scaler on empty target data.")
-    target_scaler.fit(valid_targets)
+    # Apply target scaling
     target_scaled = target_scaler.transform(target_series.values.reshape(-1, 1)).flatten()
+    logger.info("Target scaling complete.")
 
-    logger.info("Scaling complete.")
-
+    # Features are already scaled, directly use their values
+    features_final = features_df.values
+    logger.info(f"Using pre-scaled features directly. Shape: {features_final.shape}")
 
     # --- Create Sequences --- #
     logger.info(f"Creating sequences of length {sequence_length}...")
     X, y = [], []
-    if len(features_scaled) < sequence_length + prediction_steps:
-         logger.error(f"Not enough data ({len(features_scaled)} rows) to create sequences of length {sequence_length} with prediction step {prediction_steps}.")
-         raise ValueError("Insufficient data for sequence creation.")
+    # Check if enough data for at least one sequence
+    if len(features_final) < sequence_length:
+         if fit_scalers:
+             logger.error(f"Not enough training data ({len(features_final)} rows) to create sequences of length {sequence_length}.")
+             raise ValueError("Insufficient training data for sequence creation.")
+         else:
+             logger.warning(f"Not enough data ({len(features_final)} rows) in {h5_path} to create sequences of length {sequence_length}. Returning empty arrays.")
+             return np.array([]), np.array([]), feature_columns, target_scaler # Return empty arrays
 
-    # Adjusted loop to ensure we don't go out of bounds
-    for i in range(len(features_scaled) - sequence_length): # No +1 needed here
-        X.append(features_scaled[i:(i + sequence_length)])
-        # The target 'y' corresponds to the time step *after* the sequence ends
-        y.append(target_scaled[i + sequence_length -1 + prediction_steps]) # Get target after sequence
+    # Create sequences
+    for i in range(len(features_final) - sequence_length + 1):
+        X.append(features_final[i:(i + sequence_length)])
+        # Target corresponds to the end of the sequence for price prediction
+        # If prediction_steps=1, target is one step after sequence end
+        target_idx = i + sequence_length -1 + prediction_steps
+        if target_idx < len(target_scaled):
+            y.append(target_scaled[target_idx])
+        else:
+            # This happens if prediction_steps pushes index out of bounds near the end
+            # We need to shorten X to match the available y
+            X = X[:-1] # Remove the last sequence added
+            break
 
     X = np.array(X)
     y = np.array(y)
+
+    # Final check if sequence creation resulted in empty arrays or mismatch
+    if X.shape[0] == 0 or y.shape[0] == 0:
+         if fit_scalers:
+              logger.error("Sequence creation resulted in empty arrays for training data.")
+              raise ValueError("Empty sequences generated from training data.")
+         else:
+              logger.warning(f"Sequence creation resulted in empty arrays for {h5_path}.")
+         return np.array([]), np.array([]), feature_columns, target_scaler
+    elif X.shape[0] != y.shape[0]:
+         logger.warning(f"Sequence length mismatch after creation: X={X.shape[0]}, y={y.shape[0]}. Trimming X.")
+         min_len = min(X.shape[0], y.shape[0])
+         X = X[:min_len]
+         y = y[:min_len]
+         if X.shape[0] == 0:
+             logger.error("Trimming resulted in empty sequences for training data.")
+             raise ValueError("Empty sequences after trimming training data.")
 
     logger.info(f"Created {len(X)} sequences.")
     logger.info(f"Feature sequence shape: {X.shape}") # (num_sequences, seq_len, num_features)
     logger.info(f"Target shape: {y.shape}") # (num_sequences,)
 
-    return X, y, feature_scaler, target_scaler
+    # Return the list of feature names used, and the target scaler
+    return X, y, feature_columns, target_scaler
 
 # --- Training and Evaluation --- #
 
@@ -317,57 +393,79 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, d
         epoch_train_loss = 0.0
         start_time = time.time()
 
-        for batch_features, batch_targets in train_loader:
-            batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
+        # Check if train_loader is empty
+        if len(train_loader) == 0:
+            logger.warning(f"Epoch {epoch+1}: Training loader is empty, skipping training phase.")
+            avg_train_loss = 0.0 # Or perhaps np.nan?
+        else:
+            for batch_features, batch_targets in train_loader:
+                batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
 
-            optimizer.zero_grad()
-            outputs = model(batch_features)
-            loss = criterion(outputs, batch_targets)
-            loss.backward()
-            # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+                optimizer.zero_grad()
+                outputs = model(batch_features)
+                loss = criterion(outputs, batch_targets)
+                loss.backward()
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-            epoch_train_loss += loss.item()
+                epoch_train_loss += loss.item()
+            avg_train_loss = epoch_train_loss / len(train_loader)
 
-        avg_train_loss = epoch_train_loss / len(train_loader)
         history['train_loss'].append(avg_train_loss)
 
         # Validation
         model.eval()
         epoch_val_loss = 0.0
-        with torch.no_grad():
-            for batch_features, batch_targets in val_loader:
-                batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
-                outputs = model(batch_features)
-                loss = criterion(outputs, batch_targets)
-                epoch_val_loss += loss.item()
+        # Check if val_loader is empty
+        if len(val_loader) == 0:
+             logger.warning(f"Epoch {epoch+1}: Validation loader is empty, skipping validation phase.")
+             avg_val_loss = float('inf') # Assign high loss if no validation data
+        else:
+            with torch.no_grad():
+                for batch_features, batch_targets in val_loader:
+                    batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
+                    outputs = model(batch_features)
+                    loss = criterion(outputs, batch_targets)
+                    epoch_val_loss += loss.item()
+            avg_val_loss = epoch_val_loss / len(val_loader)
 
-        avg_val_loss = epoch_val_loss / len(val_loader)
         history['val_loss'].append(avg_val_loss)
         epoch_duration = time.time() - start_time
 
+        # Handle potential division by zero if loaders were empty
+        train_loss_str = f"{avg_train_loss:.6f}" if len(train_loader) > 0 else "N/A (empty loader)"
+        val_loss_str = f"{avg_val_loss:.6f}" if len(val_loader) > 0 else "N/A (empty loader)"
+
+
         logger.info(f"Epoch [{epoch+1}/{epochs}] - "
-                    f"Train Loss: {avg_train_loss:.6f}, "
-                    f"Val Loss: {avg_val_loss:.6f}, "
+                    f"Train Loss: {train_loss_str}, "
+                    f"Val Loss: {val_loss_str}, "
                     f"Duration: {epoch_duration:.2f}s")
 
-        # Early stopping
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            # Save the best model
-            torch.save(model.state_dict(), 'best_tcn_model.pth')
-            logger.info(f"Validation loss improved. Saved best model to 'best_tcn_model.pth'")
+        # Early stopping logic requires a valid avg_val_loss
+        if len(val_loader) > 0:
+             if avg_val_loss < best_val_loss:
+                 best_val_loss = avg_val_loss
+                 patience_counter = 0
+                 # Save the best model
+                 torch.save(model.state_dict(), 'best_tcn_model.pth')
+                 logger.info(f"Validation loss improved. Saved best model to 'best_tcn_model.pth'")
+             else:
+                 patience_counter += 1
+                 logger.info(f"Validation loss did not improve. Patience: {patience_counter}/{patience}")
+                 if patience_counter >= patience:
+                     logger.info("Early stopping triggered.")
+                     break
         else:
-            patience_counter += 1
-            logger.info(f"Validation loss did not improve. Patience: {patience_counter}/{patience}")
-            if patience_counter >= patience:
-                logger.info("Early stopping triggered.")
-                break
+             # If no validation data, train for full epochs unless training data also runs out
+             if len(train_loader) == 0:
+                  logger.warning("Both train and validation loaders are empty. Stopping training.")
+                  break
+
 
     logger.info("Training finished.")
-    # Load the best model weights back
+    # Load the best model weights back if they exist
     if os.path.exists('best_tcn_model.pth'):
          logger.info("Loading best model weights.")
          model.load_state_dict(torch.load('best_tcn_model.pth'))
@@ -375,6 +473,11 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, d
 
 def evaluate_model(model, test_loader, criterion, device, target_scaler):
     """Evaluates the model on the test set."""
+    # Check if test_loader is empty
+    if len(test_loader) == 0:
+        logger.warning("Test loader is empty. Skipping evaluation.")
+        return [], [], float('nan') # Return empty lists and NaN loss
+
     model.to(device)
     model.eval()
     test_loss = 0.0
@@ -403,15 +506,26 @@ def evaluate_model(model, test_loader, criterion, device, target_scaler):
     logger.info(f"Average Test Loss (Scaled): {avg_test_loss:.6f}")
 
     # Calculate metrics on original scale
-    mae = np.mean(np.abs(np.array(all_preds) - np.array(all_targets)))
-    rmse = np.sqrt(np.mean((np.array(all_preds) - np.array(all_targets))**2))
-    logger.info(f"MAE (Original Scale): {mae:.4f}")
-    logger.info(f"RMSE (Original Scale): {rmse:.4f}")
+    if not all_preds or not all_targets: # Check if lists are empty
+         logger.warning("No predictions or targets collected during evaluation.")
+         mae = float('nan')
+         rmse = float('nan')
+    else:
+         mae = np.mean(np.abs(np.array(all_preds) - np.array(all_targets)))
+         rmse = np.sqrt(np.mean((np.array(all_preds) - np.array(all_targets))**2))
+         logger.info(f"MAE (Original Scale): {mae:.4f}")
+         logger.info(f"RMSE (Original Scale): {rmse:.4f}")
+
 
     return all_preds, all_targets, avg_test_loss
 
 def plot_results(predictions, actuals, filename="prediction_vs_actual.png"):
     """Plots predictions vs actual values."""
+    # Check if predictions or actuals are empty
+    if not predictions or not actuals:
+        logger.warning("Cannot plot results because predictions or actuals are empty.")
+        return
+
     plt.figure(figsize=(14, 7))
     plt.plot(actuals, label='Actual Prices', color='blue', alpha=0.7)
     plt.plot(predictions, label='Predicted Prices', color='red', linestyle='--', alpha=0.7)
@@ -420,16 +534,22 @@ def plot_results(predictions, actuals, filename="prediction_vs_actual.png"):
     plt.ylabel('Price')
     plt.legend()
     plt.grid(True)
-    plt.savefig(filename)
-    logger.info(f"Saved prediction plot to {filename}")
+    try:
+        plt.savefig(filename)
+        logger.info(f"Saved prediction plot to {filename}")
+    except Exception as e:
+        logger.error(f"Failed to save plot '{filename}': {e}")
     plt.close()
+
 
 # --- Main Execution --- #
 
 def parse_args():
     """Parses command line arguments."""
     parser = argparse.ArgumentParser(description="Train a TCN model for price prediction.")
-    parser.add_argument("--data_path", type=str, required=True, help="Path to the HDF5 data file.")
+    parser.add_argument("--data_path", type=str, required=True, help="Path to the HDF5 training data file.")
+    parser.add_argument("--val_data_path", type=str, default=None, help="Optional path to the HDF5 validation data file.")
+    parser.add_argument("--test_data_path", type=str, default=None, help="Optional path to the HDF5 test data file.")
     parser.add_argument("--sequence_length", type=int, default=60, help="Input sequence length for TCN.")
     parser.add_argument("--prediction_steps", type=int, default=1, help="Number of steps ahead to predict (default: 1, i.e., next step).")
     parser.add_argument("--target_col", type=str, default="close_4h", help="Column name of the target variable in the 4h dataset.")
@@ -440,8 +560,8 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate for optimizer.")
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping.")
-    parser.add_argument("--test_split", type=float, default=0.1, help="Fraction of data to use for testing.")
-    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of training data to use for validation.")
+    parser.add_argument("--test_split", type=float, default=0.1, help="Fraction of data to use for testing (if --test_data_path is not provided).")
+    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of training data to use for validation (if --val_data_path is not provided).")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no_cuda", action="store_true", help="Disable CUDA training.")
     return parser.parse_args()
@@ -449,7 +569,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Set seed
+    # --- Setup --- #
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available() and not args.no_cuda:
@@ -459,37 +579,154 @@ def main():
         device = torch.device("cpu")
     logger.info(f"Using device: {device}")
 
-    # Load data
+    # --- Load Training Data & Fit Scalers --- #
+    logger.info("--- Loading Training Data ---")
     try:
-        X, y, feature_scaler, target_scaler = load_and_prepare_data(
-            args.data_path, args.sequence_length, args.target_col, args.prediction_steps
+        X_train, y_train, feature_columns, target_scaler = load_and_prepare_data(
+            args.data_path, args.sequence_length, args.target_col, args.prediction_steps,
+            fit_scalers=True # Fit scalers on training data
         )
+        if X_train.size == 0:
+             logger.error("Training data loading resulted in empty sequences. Exiting.")
+             sys.exit(1)
+        train_dataset = PriceDataset(X_train, y_train)
     except (FileNotFoundError, ValueError, Exception) as e:
-         logger.error(f"Failed to load or prepare data: {e}", exc_info=True)
+         logger.error(f"Failed to load or prepare training data from {args.data_path}: {e}", exc_info=True)
          sys.exit(1)
 
+    # --- Load or Split Validation Data --- #
+    logger.info("--- Loading/Splitting Validation Data ---")
+    val_dataset = None
+    if args.val_data_path:
+        if os.path.exists(args.val_data_path):
+            try:
+                X_val, y_val, _, _ = load_and_prepare_data(
+                    args.val_data_path, args.sequence_length, args.target_col, args.prediction_steps,
+                    fit_scalers=False,
+                    existing_feature_scaler=feature_scaler,
+                    existing_target_scaler=target_scaler
+                )
+                if X_val.size > 0:
+                     val_dataset = PriceDataset(X_val, y_val)
+                     logger.info(f"Loaded validation data from {args.val_data_path}. Size: {len(val_dataset)}")
+                else:
+                     logger.warning(f"Validation data file {args.val_data_path} resulted in zero sequences. Proceeding without validation set.")
+            except (FileNotFoundError, ValueError, Exception) as e:
+                logger.warning(f"Failed to load validation data from {args.val_data_path}: {e}. Proceeding without validation set.", exc_info=True)
+        else:
+             logger.warning(f"Validation data path specified but not found: {args.val_data_path}. Proceeding without validation set.")
 
-    # Create dataset
-    full_dataset = PriceDataset(X, y)
+    # If validation dataset wasn't loaded, split from training data
+    if val_dataset is None:
+        logger.info(f"Splitting validation data from training data (split ratio: {args.val_split})...")
+        if len(train_dataset) < 2: # Need at least 2 samples to split
+            logger.warning("Not enough training data to create a validation split. Proceeding without validation set.")
+            # Keep train_dataset as is
+        else:
+            val_size = int(len(train_dataset) * args.val_split)
+            train_size = len(train_dataset) - val_size
+            if train_size == 0 or val_size == 0: # Avoid empty splits
+                 logger.warning(f"Split resulted in zero size for train ({train_size}) or validation ({val_size}). Adjust split ratio or provide more data. Proceeding without validation split.")
+                 # Keep train_dataset as is
+            else:
+                 train_dataset, val_dataset = random_split(train_dataset, [train_size, val_size],
+                                                          generator=torch.Generator().manual_seed(args.seed)) # Use generator for reproducibility
+                 logger.info(f"Split validation data. New train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
 
-    # Split data
-    test_size = int(len(full_dataset) * args.test_split)
-    train_val_size = len(full_dataset) - test_size
-    train_val_dataset, test_dataset = random_split(full_dataset, [train_val_size, test_size])
+    # --- Load or Split Test Data --- #
+    logger.info("--- Loading/Splitting Test Data ---")
+    test_dataset = None
+    if args.test_data_path:
+        if os.path.exists(args.test_data_path):
+            try:
+                X_test, y_test, _, _ = load_and_prepare_data(
+                    args.test_data_path, args.sequence_length, args.target_col, args.prediction_steps,
+                    fit_scalers=False,
+                    existing_feature_scaler=feature_scaler,
+                    existing_target_scaler=target_scaler
+                )
+                if X_test.size > 0:
+                     test_dataset = PriceDataset(X_test, y_test)
+                     logger.info(f"Loaded test data from {args.test_data_path}. Size: {len(test_dataset)}")
+                else:
+                     logger.warning(f"Test data file {args.test_data_path} resulted in zero sequences. Test set will be empty.")
+            except (FileNotFoundError, ValueError, Exception) as e:
+                logger.warning(f"Failed to load test data from {args.test_data_path}: {e}. Test set will be empty.", exc_info=True)
+        else:
+             logger.warning(f"Test data path specified but not found: {args.test_data_path}. Test set will be empty.")
 
-    val_size = int(train_val_size * args.val_split)
-    train_size = train_val_size - val_size
-    train_dataset, val_dataset = random_split(train_val_dataset, [train_size, val_size])
+    # If test dataset wasn't loaded, split from the *original* training data pool
+    if test_dataset is None:
+         logger.info(f"Splitting test data from original training data pool (split ratio: {args.test_split})...")
+         # Recreate full dataset from original X_train, y_train before validation split (if any)
+         full_initial_dataset = PriceDataset(X_train, y_train)
+         if len(full_initial_dataset) < 2:
+             logger.warning("Not enough original training data to create a test split. Test set will be empty.")
+             train_dataset_final = train_dataset # Use the potentially validation-split train set
+         else:
+             test_size_split = int(len(full_initial_dataset) * args.test_split)
+             train_val_size_split = len(full_initial_dataset) - test_size_split
+             if train_val_size_split == 0 or test_size_split == 0:
+                  logger.warning(f"Split resulted in zero size for train/val pool ({train_val_size_split}) or test ({test_size_split}). Adjust split ratio or provide more data. Test set will be empty.")
+                  train_dataset_final = train_dataset # Use the potentially validation-split train set
+             else:
+                  # Split original data pool into train/val leftovers and test set
+                  train_val_pool_dataset, test_dataset = random_split(full_initial_dataset, [train_val_size_split, test_size_split],
+                                                                     generator=torch.Generator().manual_seed(args.seed)) # Use generator
+                  logger.info(f"Split test data. Test size: {len(test_dataset)}")
 
-    logger.info(f"Dataset sizes: Train={len(train_dataset)}, Validation={len(val_dataset)}, Test={len(test_dataset)}")
+                  # Re-split train/val from the train_val_pool_dataset if val wasn't loaded separately
+                  if not args.val_data_path:
+                       logger.info("Re-splitting validation data from the remaining pool...")
+                       if len(train_val_pool_dataset) < 2:
+                            logger.warning("Not enough data in pool for train/val re-split. Using pool as train set.")
+                            train_dataset_final = train_val_pool_dataset
+                            val_dataset = None # Reset val dataset as it couldn't be split
+                       else:
+                            # Calculate val_size relative to the *new* pool size
+                            val_split_ratio_adjusted = args.val_split / (1.0 - args.test_split) if (1.0 - args.test_split) > 0 else args.val_split
+                            val_size_resplit = int(len(train_val_pool_dataset) * val_split_ratio_adjusted)
+                            train_size_resplit = len(train_val_pool_dataset) - val_size_resplit
+
+                            if train_size_resplit == 0 or val_size_resplit == 0:
+                                 logger.warning(f"Re-split resulted in zero size for train ({train_size_resplit}) or validation ({val_size_resplit}). Using pool as train set.")
+                                 train_dataset_final = train_val_pool_dataset
+                                 val_dataset = None
+                            else:
+                                 train_dataset_final, val_dataset = random_split(train_val_pool_dataset, [train_size_resplit, val_size_resplit],
+                                                                                 generator=torch.Generator().manual_seed(args.seed + 1)) # Use different seed for re-split
+                                 logger.info(f"Re-split train/val. Final train size: {len(train_dataset_final)}, Val size: {len(val_dataset)}")
+                  else:
+                       # If val_data was loaded separately, the pool is just the final train set
+                       train_dataset_final = train_val_pool_dataset
+                       logger.info(f"Using remaining pool as final train set. Size: {len(train_dataset_final)}")
+                  train_dataset = train_dataset_final # Assign the final train dataset
+
+    # Handle cases where datasets might be None or empty after loading/splitting
+    train_dataset = train_dataset if train_dataset is not None else PriceDataset(np.array([]), np.array([]))
+    val_dataset = val_dataset if val_dataset is not None else PriceDataset(np.array([]), np.array([]))
+    test_dataset = test_dataset if test_dataset is not None else PriceDataset(np.array([]), np.array([]))
+
+    logger.info(f"Final Dataset sizes: Train={len(train_dataset)}, Validation={len(val_dataset)}, Test={len(test_dataset)}")
 
     # Create DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+    # Use persistent_workers and pin_memory if CUDA is available for potential speedup
+    num_workers = 4 if device == torch.device("cuda") else 0 # Use workers only with CUDA
+    pin_memory = True if device == torch.device("cuda") else False
 
-    # Initialize model
-    num_features = X.shape[2] # Get number of features from loaded data
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
+                             num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+
+    # --- Initialize Model --- #
+    # Ensure X_train has the expected shape before accessing shape[2]
+    if len(X_train.shape) < 3:
+        logger.error(f"Training data features (X_train) have unexpected shape: {X_train.shape}. Expected 3 dimensions. Exiting.")
+        sys.exit(1)
+    num_features = X_train.shape[2]
     output_size = 1 # Predicting a single price value
     model = TCNPricePredictor(
         input_size=num_features,
@@ -497,32 +734,48 @@ def main():
         num_channels=args.tcn_channels,
         kernel_size=args.tcn_kernel_size,
         dropout=args.tcn_dropout
-    )
-    logger.info(f"Model initialized:
-{model}")
-    # Count parameters
+    ).to(device) # Move model to device right away
+
+    logger.info(f"Model initialized:")
+    logger.info(f"{model}") # Log model structure separately
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total trainable parameters: {num_params:,}")
 
-
-    # Optimizer and Loss
+    # --- Optimizer and Loss --- #
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    criterion = nn.MSELoss() # Mean Squared Error for regression
+    criterion = nn.MSELoss()
 
-    # Train the model
+    # --- Train --- #
+    if len(train_dataset) == 0:
+        logger.error("Training dataset is empty. Cannot train the model. Exiting.")
+        sys.exit(1)
+
+    logger.info("--- Starting Training ---")
     train_history = train_model(
         model, train_loader, val_loader, optimizer, criterion, args.epochs, device, args.patience
     )
 
-    # Evaluate the model
+    # --- Evaluate --- #
+    logger.info("--- Starting Evaluation ---")
+    # Ensure target_scaler exists before evaluation
+    if target_scaler is None:
+         logger.error("Target scaler was not properly fitted during training data loading. Cannot evaluate.")
+         sys.exit(1)
+
     predictions, actuals, test_loss = evaluate_model(
         model, test_loader, criterion, device, target_scaler
     )
 
-    # Plot results
-    plot_results(predictions, actuals)
+    # --- Plot Results --- #
+    if predictions and actuals:
+        logger.info("--- Plotting Results ---")
+        plot_results(predictions, actuals)
+    else:
+        logger.warning("Skipping plotting due to empty predictions or actuals.")
 
-    logger.info("TCN Price Prediction Training Complete.")
+
+    logger.info("TCN Price Prediction Script Finished.")
+
 
 if __name__ == "__main__":
     main() 
