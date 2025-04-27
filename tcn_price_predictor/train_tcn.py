@@ -5,6 +5,13 @@
 Training script for a TCN model to predict cryptocurrency prices.
 """
 
+# --- Ensure HDF5 plugin is loaded --- #
+try:
+    import hdf5plugin
+except ImportError:
+    print("WARNING: hdf5plugin not found. Install with 'pip install hdf5plugin' if reading compressed HDF5 files.")
+# ------------------------------------ #
+
 import argparse
 import logging
 import os
@@ -168,46 +175,52 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     base_index_key_path = '/4h/table' # Path for the DataFrame index
 
     try:
-        with h5py.File(h5_path, 'r') as f:
-            # Check if base keys exist first
-            if base_key_path not in f:
-                 logger.error(f"Base feature dataset key '{base_key_path}' not found in {h5_path}. Cannot proceed.")
-                 raise FileNotFoundError(f"Base feature dataset key {base_key_path} not found in {h5_path}")
-            if base_index_key_path not in f:
-                 logger.error(f"Base index dataset key '{base_index_key_path}' not found in {h5_path}. Cannot proceed.")
-                 raise FileNotFoundError(f"Base index dataset key {base_index_key_path} not found in {h5_path}")
+        # Use pandas to read HDF5, leveraging PyTables backend
+        for key_path, suffix in key_suffix_map.items():
+            try:
+                # pd.read_hdf handles opening/closing the file
+                df = pd.read_hdf(h5_path, key=key_path)
+                logger.info(f"Reading dataset: {key_path} using pandas")
 
-            for key_path, suffix in key_suffix_map.items():
-                obj = f.get(key_path) # Use the full path like /15m/table
-                if obj is not None and isinstance(obj, h5py.Dataset):
-                    logger.info(f"Reading dataset: {key_path}")
-                    data = obj[()] # Read dataset into numpy array
-                    df = pd.DataFrame(data)
-                    if 'timestamp' in df.columns:
-                         if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                              try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                              except (ValueError, TypeError):
-                                   try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                                   except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key_path}")
-                         df.set_index('timestamp', inplace=True)
-                         df.sort_index(inplace=True)
-                         # Add suffix to columns for non-base timeframes
-                         if suffix:
-                              df = df.add_suffix(suffix)
-                         # Store using the timeframe name (15m, 4h, 1d) as the dict key for easier merging later
-                         timeframe_key = key_path.split('/')[1] # Extract '15m', '4h', or '1d'
-                         dfs[timeframe_key] = df
-                         logger.info(f"Loaded {key_path}: {df.shape[0]} rows, {df.shape[1]} columns.")
-                    else:
-                        raise ValueError(f"'timestamp' column missing in {key_path}")
-                elif obj is not None: # It exists but isn't a dataset
-                     logger.warning(f"Object at path '{key_path}' is not an HDF5 Dataset (type: {type(obj)}). Skipping.")
-                     timeframe_key = key_path.split('/')[1]
-                     dfs[timeframe_key] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
-                else: # Key path not found
-                     logger.warning(f"Dataset path {key_path} not found in {h5_path}. Some features might be missing.")
-                     timeframe_key = key_path.split('/')[1]
-                     dfs[timeframe_key] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
+                # --- Post-read processing --- #
+                if 'timestamp' in df.columns:
+                    # timestamp conversion logic can stay the same
+                    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                        try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                        except (ValueError, TypeError):
+                            try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                            except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key_path}")
+                    df.set_index('timestamp', inplace=True)
+                    df.sort_index(inplace=True)
+                    # Add suffix to columns for non-base timeframes
+                    if suffix:
+                        df = df.add_suffix(suffix)
+                    # Store using the timeframe name
+                    timeframe_key = key_path.split('/')[1]
+                    dfs[timeframe_key] = df
+                    logger.info(f"Loaded {key_path}: {df.shape[0]} rows, {df.shape[1]} columns.")
+                else:
+                    raise ValueError(f"'timestamp' column missing in {key_path}")
+
+            except KeyError:
+                # Handle case where the key_path doesn't exist in the HDF5 file
+                logger.warning(f"Dataset path {key_path} not found in {h5_path}. Some features might be missing.")
+                timeframe_key = key_path.split('/')[1]
+                dfs[timeframe_key] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
+            except Exception as e:
+                # Catch other potential errors during read_hdf or processing
+                logger.error(f"Error processing path {key_path} from {h5_path}: {e}", exc_info=True)
+                # Assign empty df to avoid breaking later parts
+                timeframe_key = key_path.split('/')[1]
+                dfs[timeframe_key] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
+
+        # --- Check if essential dataframes were loaded --- #
+        if base_key_path.split('/')[1] not in dfs or dfs[base_key_path.split('/')[1]].empty:
+            logger.error(f"Base feature dataset for {base_key_path} failed to load or was empty.")
+            raise ValueError(f"Could not load base feature data from {base_key_path}")
+        if base_index_key_path.split('/')[1] not in dfs or dfs[base_index_key_path.split('/')[1]].empty:
+            logger.error(f"Base index dataset for {base_index_key_path} failed to load or was empty.")
+            raise ValueError(f"Could not load base index data from {base_index_key_path}")
 
     except Exception as e:
         logger.error(f"Failed to load data from HDF5: {e}", exc_info=True)
