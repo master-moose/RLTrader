@@ -420,7 +420,7 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
 
 # --- Training and Evaluation --- #
 
-def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler, epochs, device, patience=10):
+def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler, epochs, device, patience=10, monitor_metric="val_loss", monitor_mode="min", accuracy_threshold=0.01):
     """
     Trains the TCN model with learning rate scheduling.
 
@@ -434,12 +434,16 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
         epochs (int): Maximum number of epochs to train.
         device: The device to train on (CPU or CUDA).
         patience (int): Patience for early stopping.
+        monitor_metric (str): Validation metric to monitor for LR scheduling and early stopping.
+        monitor_mode (str): Mode for the monitor_metric (e.g., 'min' for minimizing loss, 'max' for maximizing accuracy).
+        accuracy_threshold (float): The relative threshold for custom accuracy calculation.
 
     Returns:
         dict: Training history containing train and validation losses.
     """
     model.to(device)
-    best_val_loss = float('inf')
+    # Initialize best score based on mode
+    best_metric_score = float('inf') if monitor_mode == 'min' else float('-inf')
     patience_counter = 0
     # Initialize history with lists for new validation metrics
     history = {
@@ -449,6 +453,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
     epsilon = 1e-10 # For safe division in accuracy metrics
 
     logger.info(f"Starting training for {epochs} epochs on device: {device}")
+    logger.info(f"Monitoring '{monitor_metric}' ({monitor_mode} mode) for early stopping and best model saving.")
 
     for epoch in range(epochs):
         model.train()
@@ -487,10 +492,10 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
         val_dir_acc = float('nan')
         val_custom_acc = float('nan')
 
-        # Check if val_loader is empty
         if len(val_loader) == 0:
              logger.warning(f"Epoch {epoch+1}: Validation loader is empty, skipping validation phase.")
-             avg_val_loss = float('inf') # Assign high loss for scheduler/early stopping if needed
+             # Cannot calculate metrics or check for improvement
+             current_metric_score = float('nan') # Assign NaN if no validation
         else:
             with torch.no_grad():
                 for batch_features, batch_targets in val_loader:
@@ -517,10 +522,12 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
                 correct_direction[targets_np == 0] = (preds_np[targets_np == 0] == 0)
                 val_dir_acc = np.mean(correct_direction)
 
+                # Use the passed accuracy_threshold
                 relative_error = np.abs(preds_np - targets_np) / (np.abs(targets_np) + epsilon)
-                # Assuming default threshold of 0.01 (1%) if not passed explicitly
-                # This might need adjustment if accuracy_threshold is needed here
-                val_custom_acc = np.mean(relative_error < 0.01)
+                val_custom_acc = np.mean(relative_error < accuracy_threshold)
+            else:
+                 # Should not happen if val_loader is not empty, but handle defensively
+                 logger.warning(f"Epoch {epoch+1}: No predictions/targets collected during validation despite non-empty loader.")
 
         # Store validation metrics in history
         history['val_loss'].append(avg_val_loss)
@@ -528,6 +535,10 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
         history['val_rmse'].append(val_rmse)
         history['val_dir_acc'].append(val_dir_acc)
         history['val_custom_acc'].append(val_custom_acc)
+
+        # Get the metric score for the current epoch
+        # Use dictionary access for flexibility
+        current_metric_score = history.get(monitor_metric, [float('nan')])[-1]
 
         # --- Logging & Scheduler/Early Stopping --- #
         current_lr = optimizer.param_groups[0]['lr']
@@ -556,32 +567,42 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, scheduler
         )
         logger.info(log_msg)
 
-        # Learning rate scheduler step (requires valid avg_val_loss)
-        if not np.isnan(avg_val_loss) and scheduler is not None:
-             scheduler.step(avg_val_loss)
-             new_lr = optimizer.param_groups[0]['lr']
-             if new_lr < current_lr:
-                 logger.info(f"Learning rate reduced to {new_lr:.1e}")
+        # Learning rate scheduler step
+        # Check if current_metric_score is a valid number for scheduler
+        if not np.isnan(current_metric_score) and scheduler is not None:
+             # Handle cases where metric might be infinite (e.g., initial val_loss)
+             if np.isfinite(current_metric_score):
+                  scheduler.step(current_metric_score)
+                  new_lr = optimizer.param_groups[0]['lr']
+                  if new_lr < current_lr:
+                      logger.info(f"Learning rate reduced to {new_lr:.1e} based on {monitor_metric}")
+             else:
+                  logger.warning(f"Epoch {epoch+1}: Monitored metric '{monitor_metric}' is not finite ({current_metric_score}). Skipping scheduler step.")
 
-        # Early stopping logic requires a valid avg_val_loss
-        if not np.isnan(avg_val_loss):
-             if avg_val_loss < best_val_loss:
-                 best_val_loss = avg_val_loss
+        # Early stopping logic based on the monitored metric
+        # Check if current_metric_score is a valid number for comparison
+        if not np.isnan(current_metric_score):
+             improvement = False
+             if monitor_mode == 'min':
+                 improvement = current_metric_score < best_metric_score
+             else: # monitor_mode == 'max'
+                 improvement = current_metric_score > best_metric_score
+
+             if improvement:
+                 best_metric_score = current_metric_score
                  patience_counter = 0
-                 # Save the best model
                  torch.save(model.state_dict(), 'best_tcn_model.pth')
-                 logger.info(f"Validation loss improved. Saved best model to 'best_tcn_model.pth'")
+                 logger.info(f"Monitored metric '{monitor_metric}' improved to {best_metric_score:.6f}. Saved best model.")
              else:
                  patience_counter += 1
-                 logger.info(f"Validation loss did not improve. Patience: {patience_counter}/{patience}")
+                 logger.info(f"Monitored metric '{monitor_metric}' did not improve. Patience: {patience_counter}/{patience}")
                  if patience_counter >= patience:
-                     logger.info("Early stopping triggered.")
+                     logger.info(f"Early stopping triggered based on '{monitor_metric}'.")
                      break
-        else:
-             # If no validation data, train for full epochs unless training data also runs out
-             if len(train_loader) == 0:
-                  logger.warning("Both train and validation loaders are empty. Stopping training.")
-                  break
+        # If validation is skipped, only stop if training loader also becomes empty
+        elif len(train_loader) == 0:
+             logger.warning("Both train and validation loaders are empty. Stopping training.")
+             break
 
 
     logger.info("Training finished.")
@@ -725,6 +746,13 @@ def parse_args():
     parser.add_argument("--scheduler_factor", type=float, default=0.1, help="Factor by which the learning rate will be reduced (default: 0.1).")
     parser.add_argument("--scheduler_patience", type=int, default=5, help="Patience for ReduceLROnPlateau scheduler (default: 5).")
     parser.add_argument("--scheduler_min_lr", type=float, default=1e-8, help="Minimum learning rate for scheduler (default: 1e-8).")
+    parser.add_argument(
+        "--monitor_metric",
+        type=str,
+        default="val_loss",
+        choices=['val_loss', 'val_mae', 'val_rmse', 'val_dir_acc', 'val_custom_acc'],
+        help="Validation metric to monitor for LR scheduling and early stopping (default: val_loss)."
+    )
     return parser.parse_args()
 
 def main():
@@ -907,12 +935,19 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     criterion = nn.MSELoss()
 
+    # --- Determine Monitoring Mode --- #
+    if args.monitor_metric in ['val_dir_acc', 'val_custom_acc']:
+        monitor_mode = 'max' # Maximize accuracy metrics
+    else:
+        monitor_mode = 'min' # Minimize loss/error metrics
+    logger.info(f"Monitoring metric: {args.monitor_metric} (mode: {monitor_mode})")
+
     # --- Initialize Scheduler (Optional) --- #
     scheduler = None
     if args.use_scheduler:
         scheduler = ReduceLROnPlateau(
             optimizer,
-            mode='min',          # Reduce LR when validation loss stops decreasing
+            mode=monitor_mode, # Use determined mode
             factor=args.scheduler_factor,
             patience=args.scheduler_patience,
             min_lr=args.scheduler_min_lr,
@@ -929,8 +964,18 @@ def main():
 
     logger.info("--- Starting Training ---")
     train_history = train_model(
-        model, train_loader, val_loader, optimizer, criterion, scheduler, # Pass scheduler
-        args.epochs, device, args.patience
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        optimizer=optimizer,
+        criterion=criterion,
+        scheduler=scheduler,
+        epochs=args.epochs,
+        device=device,
+        patience=args.patience,
+        monitor_metric=args.monitor_metric,
+        monitor_mode=monitor_mode,
+        accuracy_threshold=args.accuracy_threshold # Pass threshold
     )
 
     # --- Evaluate --- #
