@@ -259,7 +259,9 @@ def tune_trainable(config, cli_args):
                 else:  # Other NaNs (like train_loss if loader empty); Fixed spacing
                     report_dict[key] = None  # Or keep as NaN if Tune handles it
 
-        tune.report(**report_dict)
+        # Pass the dictionary directly instead of unpacking
+        # tune.report(**report_dict)
+        tune.report(report_dict)
 
         # Note: Early stopping logic removed, handled by ASHA.
         # Wrapped comments
