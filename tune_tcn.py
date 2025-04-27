@@ -171,7 +171,8 @@ def tune_trainable(config, cli_args):
                     model.parameters(), max_norm=1.0
                 )
                 optimizer.step()
-                epoch_train_loss += loss.item()
+                # Use detach().item() to silence warning
+                epoch_train_loss += loss.detach().item()
             avg_train_loss = epoch_train_loss / len(train_loader)
         else:
             avg_train_loss = float('nan')
@@ -391,25 +392,37 @@ if __name__ == "__main__":
     )
     if best_trial:
         logger.info("--- Best Trial Found ---")
-        # Access the best reported result for the metric
-        # Wrapped long line
-        best_metric_result = analysis.get_best_result(
-            metric="val_dir_acc", mode="max"
-        )
+        # Access the best reported result dictionary directly
+        best_metric_result = best_trial.last_result # Get the latest reported metrics
+        # Alternative: use analysis.best_result if available and preferred
+        # best_metric_result = analysis.best_result 
+        # Note: analysis.best_result might be deprecated or behave differently
+        # Using best_trial.last_result is generally reliable for the final metrics.
+
         if best_metric_result:
              # Fixed indentation & quotes, wrapped long line
+             # Check if the metric key exists before accessing
+             metric_key = "val_dir_acc"
+             metric_value = best_metric_result.get(metric_key, 'N/A')
+             epoch_value = best_metric_result.get('epoch', 'N/A')
+             if isinstance(metric_value, float):
+                  metric_value_str = f"{metric_value:.4f}"
+             else:
+                  metric_value_str = str(metric_value)
+
              logger.info(
-                 f"Best Metric (val_dir_acc): "
-                 f"{best_metric_result['val_dir_acc']:.4f} at epoch "
-                 f"{best_metric_result['epoch']}"
+                 f"Best Metric ({metric_key}): "
+                 f"{metric_value_str} at epoch "
+                 f"{epoch_value}"
              )
         else:
              # Fixed indentation
-             logger.warning("Could not retrieve best result details.")
+             logger.warning("Could not retrieve best result details from best_trial.last_result.")
         logger.info(f"Best Config: {best_trial.config}")
         # Wrapped long line
+        # Get logdir from the trial object itself
         logger.info(
-            f"Log Directory: {analysis.get_best_logdir('val_dir_acc', 'max')}"
+            f"Log Directory: {best_trial.logdir}"
         )
     else:
         logger.warning("No successful trials completed.")

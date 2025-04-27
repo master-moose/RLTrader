@@ -23,7 +23,7 @@ import pandas as pd
 import h5py
 import torch
 import torch.nn as nn
-from torch.nn.utils import weight_norm
+import torch.nn.utils.parametrizations as P
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset, random_split
 import matplotlib.pyplot as plt
@@ -53,13 +53,13 @@ class TemporalBlock(nn.Module):
     """A single block of the TCN."""
     def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2):
         super(TemporalBlock, self).__init__()
-        self.conv1 = weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
+        self.conv1 = P.weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
                                            stride=stride, padding=padding, dilation=dilation))
         self.chomp1 = Chomp1d(padding)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
 
-        self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
+        self.conv2 = P.weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
                                            stride=stride, padding=padding, dilation=dilation))
         self.chomp2 = Chomp1d(padding)
         self.relu2 = nn.ReLU()
@@ -348,7 +348,7 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     # Replace potential infinite values (if current_price was near zero) with 0 or NaN
     target_pct_change.replace([np.inf, -np.inf], np.nan, inplace=True)
     # Forward fill any NaNs introduced by the pct_change calc or division by zero
-    target_pct_change.fillna(method='ffill', inplace=True)
+    target_pct_change.ffill(inplace=True)
     # Drop any remaining NaNs (likely at the beginning)
     initial_target_len = len(target_pct_change)
     target_pct_change.dropna(inplace=True)
