@@ -1,10 +1,11 @@
 from __future__ import annotations
 import torch
-from gym import spaces
+import gymnasium as gym # Import Gymnasium
+from gymnasium import spaces
 from pathlib import Path
 # Use correct relative imports now that files are copied
 from .builder import ENVIRONMENTS
-from .custom import Environments
+# from .custom import Environments # Remove unused custom base class import
 import pandas as pd
 # Assuming functions are exported via __init__.py in trademaster_utils
 from .trademaster_utils import get_attr
@@ -24,9 +25,14 @@ __all__ = ["HighFrequencyTradingEnvironment",
 
 
 @ENVIRONMENTS.register_module()
-class HighFrequencyTradingEnvironment(Environments):  # Inherit from real class
+class HighFrequencyTradingEnvironment(gym.Env): # Inherit from gymnasium.Env (via alias)
+    # Add metadata for compatibility if needed
+    metadata = {"render_modes": [], "render_fps": 0}
+
     def __init__(self, **kwargs):
-        super(HighFrequencyTradingEnvironment, self).__init__()
+        # super(HighFrequencyTradingEnvironment, self).__init__() # Call gym.Env constructor if needed
+        # Gymnasium doesn't require explicit super init for basic Env
+        pass
 
         self.dataset = get_attr(kwargs, "dataset", None)
         self.task = get_attr(kwargs, "task", "train")
@@ -122,18 +128,15 @@ class HighFrequencyTradingEnvironment(Environments):  # Inherit from real class
         #     ...
 
         # --- Observation and Action Space ---
-        # Or redefine based on LOB actions
-        self.action_space = spaces.Discrete(
+        self.action_space = spaces.Discrete( # Use spaces directly (imported from gymnasium)
             get_attr(self.dataset, "num_action", 11))
         self.action_dim = self.action_space.n
 
         # Define observation space based on LOB data
-        # Features: lob_depth * (ask_price, ask_vol, bid_price, bid_vol)
         lob_features_count = self.lob_depth * 4
-        # Optional: Add inventory feature
         inventory_features_count = 1
         obs_shape = (lob_features_count + inventory_features_count,)
-        self.observation_space = spaces.Box(
+        self.observation_space = spaces.Box( # Use spaces directly
             low=-np.inf,
             high=np.inf,
             shape=obs_shape,
@@ -426,172 +429,25 @@ class HighFrequencyTradingEnvironment(Environments):  # Inherit from real class
 
         return full_state
 
-    def reset(self):
-        # here is a little difference: we only have one asset
-        # it starts with the back_num_day and ends in end-self.forward_num_day
-        # for the information, it should calculate 2 additional things
-        self.terminal = False
-        self.day = self.stack_length
-        self.data = self.df.iloc[self.day - self.stack_length: self.day]
-        self.initial_reward = 0
-        self.reward_history = [self.initial_reward]
-        self.previous_action = 0
-        price_information = self.data.iloc[-1]
-        self.position = 0
-        self.needed_money_memory = []
-        self.sell_money_memory = []
-        self.comission_fee_history = []
-        avaliable_discriminator = self.calculate_avaliable_action(
-            price_information)
-        self.previous_position = 0
-        DP_distribution = [0] * 11
-        if self.day > 0 and (self.day - 1) < len(self.demonstration_action):
-            action_index = self.demonstration_action[self.day - 1]
-            if 0 <= action_index < len(DP_distribution):
-                DP_distribution[action_index] = 1
-            else:
-                print(
-                    f"Warning: DP action index {action_index} "
-                    f"out of bounds during reset.")
-        else:
-            print(
-                f"Warning: day index {self.day - 1} out of bounds "
-                f"for demonstration_action.")
-        DP_distribution = np.array(DP_distribution)
-        self.position_history = []
+    # Add Gymnasium-compatible reset method to the base class
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        super().reset(seed=seed)
+        # Reset internal state if any (specific to base class, likely none needed)
+        # ...
 
-        # Calculate the initial state using the LOB
-        self.state = self._get_lob_state()
-
-        # Return ONLY the state array for SB3 compatibility
-        return self.state
+        # Return a default observation and empty info dictionary
+        # The actual observation logic is usually in the subclass (TrainingEnv)
+        # Ensure the shape matches the defined observation_space
+        # If observation_space is not defined yet, this might need adjustment
+        # or be handled post-initialization.
+        dummy_obs = np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
+        info = {}
+        return dummy_obs, info
 
     def step(self, action):
-        # Avoid division by zero
-        if self.action_dim <= 1:
-            normlized_action = 0
-        else:
-            normlized_action = action / (self.action_dim - 1)
-        target_position = self.max_holding_number * normlized_action
-
-        self.terminal = self.day >= len(self.df.index.unique()) - 1
-        previous_position = self.previous_position
-        # Use LOB info from the *end* of the previous slice (self.data)
-        previous_price_information = self.data.iloc[-1]
-
-        self.day += 1
-
-        # Check if day exceeds limits before slicing
-        if self.day >= len(self.df.index.unique()):
-            self.terminal = True
-            # Use last known info
-            current_price_information = previous_price_information
-            # State doesn't technically advance, but keep last calculated one
-        else:
-            # Update self.data slice for the *current* step
-            self.data = self.df.iloc[self.day - self.stack_length: self.day]
-            current_price_information = self.data.iloc[-1]
-            # State will be calculated based on this new self.data later
-
-        # === Execution Logic ===
-        # Uses previous_price_information
-        cash = 0
-        needed_cash = 0
-        actual_position_change = 0
-        executed_position = self.previous_position
-
-        if previous_position >= target_position:
-            # hold the position or sell some position
-            self.sell_size = previous_position - target_position
-            if self.sell_size > 0:
-                cash, actual_position_change = self.sell_value(
-                    previous_price_information, self.sell_size
-                )
-                self.sell_money_memory.append(cash)
-                self.needed_money_memory.append(0)
-                executed_position = \
-                    self.previous_position - actual_position_change
-            else:  # Holding
-                self.sell_money_memory.append(0)
-                self.needed_money_memory.append(0)
-                actual_position_change = 0
-
-        elif previous_position < target_position:  # Buy
-            self.buy_size = target_position - previous_position
-            if self.buy_size > 0:
-                needed_cash, actual_position_change = self.buy_value(
-                    previous_price_information, self.buy_size
-                )
-                self.needed_money_memory.append(needed_cash)
-                self.sell_money_memory.append(0)
-                executed_position = \
-                    self.previous_position + actual_position_change
-
-        # Update position *after* execution
-        self.position = executed_position
-
-        previous_value = self.calculate_value(
-            previous_price_information, self.previous_position
-        )
-        current_value = self.calculate_value(
-            current_price_information, self.position
-        )
-        self.reward = (current_value + cash) - (previous_value + needed_cash)
-        self.reward_history.append(self.reward)
-        # Calculate return rate (consistent with base class)
-        if previous_value == 0 and needed_cash == 0:
-            return_rate = 0
-        elif previous_value == 0 and needed_cash > 0:
-            return_rate = self.reward / needed_cash
-        else:
-            denominator = previous_value + needed_cash
-            return_rate = self.reward / denominator if denominator != 0 else 0
-        self.return_rate = return_rate
-
-        # Update previous_position state for the *next* step
-        self.previous_position = self.position
-
-        # --- Calculate NEXT state ---
-        # Use the helper function based on the current LOB data
-        self.state = self._get_lob_state()
-
-        avaliable_discriminator = self.calculate_avaliable_action(
-            current_price_information  # Availability based on current LOB
-        )
-
-        info = {
-            "previous_action": action,
-            "avaliable_action": avaliable_discriminator,
-            "DP_action": np.zeros(self.action_dim)
-        }
-
-        # Terminal handling remains the same...
-        if self.terminal:
-            # ... (metric calculation) ...
-            pass  # No change needed here for state calculation itself
-        else:
-            # Update DP action in info for non-terminal steps
-            DP_distribution = [0] * 11
-            dp_day_index = self.day - 1  # Index for demonstration
-            if dp_day_index >= 0 and \
-               dp_day_index < len(self.demonstration_action):
-                action_index = self.demonstration_action[dp_day_index]
-                if 0 <= action_index < len(DP_distribution):
-                    DP_distribution[action_index] = 1
-                else:
-                    print(
-                        f"Warning: DP action index {action_index} "
-                        f"out of bounds during step.")
-            else:
-                print(
-                    f"Warning: day index {dp_day_index} out of bounds "
-                    f"for demonstration_action during step.")
-            info["DP_action"] = np.array(DP_distribution)
-
-        self.position_history.append(self.position)
-
-        # Return the calculated LOB state
-        return self.state, self.reward, self.terminal, info
+        # Base step logic (can raise NotImplementedError or provide basic functionality)
+        # This is often overridden by the training environment subclass.
+        raise NotImplementedError("Base step method not implemented. Use HighFrequencyTradingTrainingEnvironment.")
 
     def get_final_return_rate(self, slient=False):
         sell_money_memory = np.array(self.sell_money_memory)
@@ -895,6 +751,19 @@ class HighFrequencyTradingEnvironment(Environments):  # Inherit from real class
             action_list.extend([0] * (num_steps - len(action_list)))
         return action_list
 
+    # Add stub methods if they don't exist
+    def render(self, mode='human'):
+        # HFT environments usually don't have a visual representation
+        pass
+
+    def close(self):
+        # Clean up any resources if needed
+        pass
+
+    # seed method is usually handled by wrappers or SB3 itself
+    # def seed(self, seed=None):
+    #     pass
+
 
 # @ENVIRONMENTS.register_module() # Commented out: Need builder.py
 # Uncomment decorator now that builder/custom should be available
@@ -931,37 +800,51 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         logging.info("HighFrequencyTradingTrainingEnvironment initialized.")
         # No return needed in __init__
 
-    def reset(self, i=None):  # Allow optional start index i
-        # if i is None: # Pick a random start index if not provided?
-        #     max_start_index = len(self.df) - self.episode_length \
-        #          - self.stack_length
-        #     if max_start_index <= 0:
-        #          self.i = 0 # Default to start
-        #     else:
-        #          self.i = np.random.randint(0, max_start_index)
-        # else:
-        #     self.i = i # Use provided start index
+    # Update signature to match Gymnasium standard
+    def reset(self, *, seed: int | None = None, options: dict | None = None): 
+        # Handle seeding
+        super().reset(seed=seed) # Call parent Env reset if needed
+        # Seed the numpy random generator used for start index sampling
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # --- Implement random episode start --- 
+        max_start_index = len(self.df) - self.episode_length - self.stack_length
+        if max_start_index <= 0:
+            self.i = 0 # Default to start if dataset is too short
+            if len(self.df) < self.stack_length + self.episode_length:
+                 logging.warning(f"Dataset length ({len(self.df)}) is less than stack+episode length ({self.stack_length + self.episode_length}). Episode may terminate early.")
+        else:
+            # Randomly sample a starting index
+            self.i = np.random.randint(0, max_start_index + 1)
+        # -------------------------------------
 
-        # Use a simpler approach for now:
-        # start from the beginning unless i is specified
-        self.i = i if i is not None else 0
-
-        # Ensure start index + stack length is valid
-        max_df_index = len(self.df) - 1
-        # Check against number of rows
-        if self.i + self.stack_length > max_df_index + 1:
-            # Adjust start index if it would cause slicing beyond df bounds
-            self.i = max(0, max_df_index + 1 - self.stack_length)
-            logging.warning(
-                f"Provided start index {i} too large, adjusting to {self.i}")
-            # raise ValueError(f"Start index {i} + stack {self.stack_length}
-            # > df length {len(self.df)}")
+        # Original logic for bounds check (might be redundant now but safe)
+        # max_df_index = len(self.df) - 1
+        # if self.i + self.stack_length > max_df_index + 1:
+        #      self.i = max(0, max_df_index + 1 - self.stack_length)
+        #      logging.warning(
+        #          f"Adjusted random start index {self.i}")
 
         self.terminal = False
-        # Set day relative to the episode start index 'i'
+        # Set day relative to the randomly chosen episode start index 'i'
         self.day = self.i + self.stack_length
         # Slice data for the initial state
-        self.data = self.df.iloc[self.day - self.stack_length: self.day]
+        # Ensure slicing is within bounds, especially if dataset was short
+        start_slice = max(0, self.day - self.stack_length)
+        end_slice = max(start_slice, self.day)
+        if end_slice > len(self.df):
+             logging.error(f"Reset slicing error: end_slice {end_slice} > df length {len(self.df)}. Start index {self.i}")
+             # Handle error appropriately, maybe reset i to 0 and retry slice
+             self.i = 0
+             self.day = self.i + self.stack_length
+             start_slice = max(0, self.day - self.stack_length)
+             end_slice = max(start_slice, self.day)
+        self.data = self.df.iloc[start_slice:end_slice]
+        
+        # Ensure self.data is not empty after slicing
+        if self.data.empty:
+            raise RuntimeError(f"Failed to get valid data slice during reset. Start: {start_slice}, End: {end_slice}, Day: {self.day}, i: {self.i}")
 
         # Reset internal state variables (same as base reset)
         self.initial_reward = 0
@@ -974,33 +857,38 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         self.comission_fee_history = []
         self.position_history = []  # Reset position history
 
-        # Calculate initial available actions and DP info
+        # Calculate initial available actions and DP info (DP is currently zeros)
+        # Get info from last row of initial data slice
         price_information = self.data.iloc[-1]
         avaliable_discriminator = self.calculate_avaliable_action(
             price_information)
-        DP_distribution = [0] * 11
+        DP_distribution = [0] * self.action_dim # Use self.action_dim
         # Index relative to overall df for demonstration
-        dp_day_index = self.day - 1
+        dp_day_index = self.day - 1 
         if dp_day_index >= 0 and \
            dp_day_index < len(self.demonstration_action):
             action_index = self.demonstration_action[dp_day_index]
             if 0 <= action_index < len(DP_distribution):
                 DP_distribution[action_index] = 1
-            else:
-                logging.warning(
-                    f"DP action index {action_index} out of bounds "
-                    f"during training reset.")
-        else:
-            logging.warning(
-                f"Day index {dp_day_index} out of bounds for "
-                f"demonstration_action during training reset.")
+            # No warning needed as DP is zeros anyway
+        # else:
+        #     logging.warning(
+        #         f"Day index {dp_day_index} out of bounds for "
+        #         f"demonstration_action during training reset.")
         DP_distribution = np.array(DP_distribution)
 
         # Calculate the initial state using the LOB helper
         self.state = self._get_lob_state()
 
-        # Return ONLY the state array for SB3 compatibility
-        return self.state
+        # Construct the info dictionary (must be returned now)
+        info = {
+            # Optionally include initial available actions, etc.
+            # "available_action": avaliable_discriminator,
+            # "DP_action": DP_distribution
+        }
+
+        # Return observation and info tuple
+        return self.state, info
 
     def step(self, action):
         # --- Calculate target position (same as base class) ---
@@ -1011,40 +899,37 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         target_position = self.max_holding_number * normlized_action
 
         # --- Check termination conditions ---
-        # Termination based on episode length OR end of entire dataset
-        end_of_data = self.day >= len(self.df.index.unique()) - 1
-        # Check against episode start
-        end_of_episode = self.day >= self.i + self.episode_length - 1
-        self.terminal = end_of_data or end_of_episode
+        end_of_data = self.day >= len(self.df) # Simpler condition
+        end_of_episode = self.day >= self.i + self.stack_length + self.episode_length # Correct condition
+        
+        # Gymnasium standard: terminated=True if natural end, truncated=True if time limit
+        terminated = end_of_data
+        truncated = end_of_episode and not terminated # Truncated if episode ends before data does
+        self.terminal = terminated or truncated # Old flag kept for potential internal use?
 
         # --- Add log message when end of entire dataset is reached ---
-        if end_of_data and not end_of_episode:
-            logging.warning(
-                f"Episode {self.i}: Reached end of entire dataset "
-                f"at day index {self.day-1}. Episode terminating.")
-        elif end_of_data and end_of_episode:
+        if terminated and not truncated: # Only log if natural end
              logging.info(
-                 f"Episode {self.i}: Reached end of episode and end of "
-                 f"entire dataset simultaneously at day index {self.day-1}.")
+                 f"Episode {self.i}: Reached end of entire dataset at day index {self.day-1}. Terminating.")
+        elif truncated: # Log truncation separately
+             logging.info(
+                 f"Episode {self.i}: Reached episode length limit at day index {self.day-1}. Truncating.")
         # -------------------------------------------------------------
 
         # --- Get previous state info ---
         previous_position = self.previous_position
         previous_price_information = self.data.iloc[-1]
 
-        # --- Advance time ---
-        self.day += 1
+        # --- Advance time --- (Already done before check)
+        # self.day += 1 
 
-        # --- Get current state info ---
-        # Check bounds before slicing for next state/info
-        if self.day >= len(self.df.index.unique()):
-            self.terminal = True  # Ensure terminal is set if we are at the end
-            # Use previous info
-            current_price_information = previous_price_information
-            # State calculation will use self.data which hasn't changed
+        # --- Get current state info ---        
+        if self.day >= len(self.df.index.unique()): # Re-check bounds using day *after* increment
+            # Use previous info if we are truly at the end after increment
+            current_price_information = previous_price_information            
         else:
             # Slice data for the *current* day to get its LOB info
-            self.data = self.df.iloc[self.day - self.stack_length: self.day]
+            self.data = self.df.iloc[self.day - self.stack_length : self.day] # Should use updated day
             current_price_information = self.data.iloc[-1]
             # The state calculation happens *after* execution
 
@@ -1100,14 +985,10 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         self.position_history.append(self.position)
 
         # --- Calculate NEXT state using LOB data ---
-        # CRITICAL FIX: Use _get_lob_state based on the updated self.data
         self.state = self._get_lob_state()
-        # REMOVED INCORRECT STATE CALCULATION:
-        # self.state = self.data[self.tech_indicator_list].values
-
+        
         # --- Calculate info dictionary (same as base class) ---
-        avaliable_discriminator = self.calculate_avaliable_action(
-            current_price_information)
+        avaliable_discriminator = self.calculate_avaliable_action(current_price_information)
         DP_distribution = [0] * 11
         dp_day_index = self.day - 1  # Index relative to overall df
         if dp_day_index >= 0 and \
@@ -1128,9 +1009,9 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         info = {
             "previous_action": action,
             "avaliable_action": avaliable_discriminator,
-            "DP_action": DP_distribution,
+            "DP_action": DP_distribution, 
         }
 
-        # --- Final Return ---
-        # Return the calculated LOB state, reward, terminal flag, and info dict
-        return self.state, self.reward, self.terminal, info
+        # --- Final Return ---        
+        # Return observation, reward, terminated, truncated, info
+        return self.state, self.reward, terminated, truncated, info

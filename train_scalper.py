@@ -12,6 +12,8 @@ from stable_baselines3 import DQN
 from stable_baselines3.common.vec_env import (
     DummyVecEnv, SubprocVecEnv, VecCheckNan, VecFrameStack
 )
+# Import Monitor wrapper
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 # No longer need BaseModel import
@@ -204,8 +206,11 @@ def create_env(rank, seed=0):
             }
             # Seed is handled by SB3 wrapper normally, but env might use it?
         )
-        # Important: Seed the env for reproducibility
-        # env.seed(seed + rank) # Use if env has a seed method
+        # Important: Seed the env for reproducibility (handled by wrapper below)
+        # env.seed(seed + rank)
+        # Wrap the environment with Monitor
+        log_file = LOG_DIR / f"monitor_{rank}.csv" # Optional: Log stats per env
+        env = Monitor(env, filename=str(log_file) if N_ENVS > 1 else None)
         return env
     # set_global_seeds(seed)
     return _init
