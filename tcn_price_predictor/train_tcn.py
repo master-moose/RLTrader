@@ -511,18 +511,35 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, d
          model.load_state_dict(torch.load('best_tcn_model.pth'))
     return history
 
-def evaluate_model(model, test_loader, criterion, device):
-    """Evaluates the model on the test set."""
+def evaluate_model(model, test_loader, criterion, device, accuracy_threshold=0.01):
+    """
+    Evaluates the model on the test set and calculates various metrics.
+
+    Args:
+        model: The trained PyTorch model.
+        test_loader: DataLoader for the test set.
+        criterion: Loss function (e.g., MSELoss).
+        device: Device to run evaluation on (CPU or CUDA).
+        accuracy_threshold (float): The relative threshold for custom accuracy calculation.
+                                     A prediction is considered accurate if
+                                     `abs(pred - actual) / (abs(actual) + epsilon) < threshold`.
+
+    Returns:
+        tuple: (predictions, actuals, avg_test_loss, mae, rmse, directional_accuracy, custom_accuracy)
+               Returns NaNs for metrics if evaluation cannot be performed.
+    """
     # Check if test_loader is empty
     if len(test_loader) == 0:
         logger.warning("Test loader is empty. Skipping evaluation.")
-        return [], [], float('nan') # Return empty lists and NaN loss
+        # Return empty lists and NaNs for all metrics
+        return [], [], float('nan'), float('nan'), float('nan'), float('nan'), float('nan')
 
     model.to(device)
     model.eval()
     test_loss = 0.0
     all_preds = []
     all_targets = []
+    epsilon = 1e-10 # For safe division
 
     logger.info("Starting evaluation on the test set...")
     with torch.no_grad():
@@ -542,18 +559,40 @@ def evaluate_model(model, test_loader, criterion, device):
     avg_test_loss = test_loss / len(test_loader)
     logger.info(f"Average Test Loss (MSE of % Change): {avg_test_loss:.6f}")
 
-    # Calculate metrics on original scale
+    # Calculate metrics if predictions/targets exist
     if not all_preds or not all_targets: # Check if lists are empty
-         logger.warning("No predictions or targets collected during evaluation.")
+         logger.warning("No predictions or targets collected during evaluation. Cannot calculate metrics.")
          mae = float('nan')
          rmse = float('nan')
+         directional_accuracy = float('nan')
+         custom_accuracy = float('nan')
     else:
-         mae = np.mean(np.abs(np.array(all_preds) - np.array(all_targets)))
-         rmse = np.sqrt(np.mean((np.array(all_preds) - np.array(all_targets))**2))
-         logger.info(f"MAE (% Change): {mae:.6f}") # More precision for % change
+         preds_np = np.array(all_preds)
+         targets_np = np.array(all_targets)
+
+         # MAE (Mean Absolute Error)
+         mae = np.mean(np.abs(preds_np - targets_np))
+         logger.info(f"MAE (% Change): {mae:.6f}")
+
+         # RMSE (Root Mean Squared Error)
+         rmse = np.sqrt(np.mean((preds_np - targets_np)**2))
          logger.info(f"RMSE (% Change): {rmse:.6f}")
 
-    return all_preds, all_targets, avg_test_loss
+         # Directional Accuracy
+         correct_direction = (np.sign(preds_np) == np.sign(targets_np))
+         # Handle cases where target is zero - sign is 0. If prediction is also 0, count as correct direction.
+         # If prediction is non-zero but target is zero, it's incorrect direction for this metric's purpose.
+         correct_direction[targets_np == 0] = (preds_np[targets_np == 0] == 0)
+         directional_accuracy = np.mean(correct_direction)
+         logger.info(f"Directional Accuracy: {directional_accuracy:.2%}")
+
+         # Custom Accuracy (within threshold)
+         relative_error = np.abs(preds_np - targets_np) / (np.abs(targets_np) + epsilon)
+         custom_accuracy = np.mean(relative_error < accuracy_threshold)
+         logger.info(f"Accuracy (within +/- {accuracy_threshold*100:.1f}% of actual % change): {custom_accuracy:.2%}")
+
+
+    return all_preds, all_targets, avg_test_loss, mae, rmse, directional_accuracy, custom_accuracy
 
 def plot_results(predictions, actuals, filename="prediction_vs_actual.png"):
     """Plots predictions vs actual values."""
@@ -601,6 +640,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
     parser.add_argument("--no_cuda", action="store_true", help="Disable CUDA training.")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for DataLoader (default: 0 recommended for Windows).")
+    parser.add_argument("--accuracy_threshold", type=float, default=0.01, help="Relative threshold for custom accuracy metric (default: 0.01 for 1%).")
     return parser.parse_args()
 
 def main():
@@ -795,16 +835,30 @@ def main():
 
     # --- Evaluate --- #
     logger.info("--- Starting Evaluation ---")
-    predictions, actuals, test_loss = evaluate_model(
-        model, test_loader, criterion, device
+    predictions, actuals, test_loss, mae, rmse, dir_acc, custom_acc = evaluate_model(
+        model, test_loader, criterion, device, args.accuracy_threshold
     )
 
+    # Log overall evaluation results (already logged within evaluate_model)
+    logger.info("--- Evaluation Summary ---")
+    logger.info(f"Test Loss (MSE): {test_loss:.6f}")
+    logger.info(f"Test MAE: {mae:.6f}")
+    logger.info(f"Test RMSE: {rmse:.6f}")
+    logger.info(f"Test Directional Accuracy: {dir_acc:.2%}")
+    logger.info(f"Test Custom Accuracy (+/- {args.accuracy_threshold*100:.1f}%): {custom_acc:.2%}")
+
+
     # --- Plot Results --- #
-    if predictions and actuals:
+    # Check if predictions and actuals are numpy arrays before plotting
+    if isinstance(predictions, np.ndarray) and isinstance(actuals, np.ndarray) and predictions.size > 0 and actuals.size > 0:
         logger.info("--- Plotting Results ---")
         plot_results(predictions, actuals)
+    elif isinstance(predictions, list) and isinstance(actuals, list) and predictions and actuals:
+         # Convert lists to numpy arrays if they are lists (fallback)
+         logger.info("Converting prediction/actual lists to numpy arrays for plotting.")
+         plot_results(np.array(predictions), np.array(actuals))
     else:
-        logger.warning("Skipping plotting due to empty predictions or actuals.")
+        logger.warning("Skipping plotting due to empty or invalid predictions/actuals.")
 
 
     logger.info("TCN Price Prediction Script Finished.")
