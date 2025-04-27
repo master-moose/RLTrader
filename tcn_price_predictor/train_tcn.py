@@ -916,7 +916,7 @@ def main():
             factor=args.scheduler_factor,
             patience=args.scheduler_patience,
             min_lr=args.scheduler_min_lr,
-            verbose=True        # Logs message when LR is reduced
+            # verbose=True        # Removed: Older PyTorch versions don't support this
         )
         logger.info(f"Using ReduceLROnPlateau scheduler with factor={args.scheduler_factor}, patience={args.scheduler_patience}, min_lr={args.scheduler_min_lr}")
     else:
