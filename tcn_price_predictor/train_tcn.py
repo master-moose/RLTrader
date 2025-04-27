@@ -157,59 +157,66 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     """
     logger.info(f"Loading data from {h5_path}")
     dfs = {}
-    # Define keys and corresponding suffixes (None for the base 15m)
-    key_suffix_map = {'/15m': None, '/4h': '_4h', '/1d': '_1d'}
-    base_key = '/15m' # Use 15m as the base for feature names without suffix
+    # Define keys and corresponding suffixes, using the CORRECT nested paths
+    # The suffix applies to the columns *within* the table
+    key_suffix_map = {
+        '/15m/table': None,  # Base features, no suffix needed for columns
+        '/4h/table': '_4h',
+        '/1d/table': '_1d'
+    }
+    base_key_path = '/15m/table' # Path to the base feature set
+    base_index_key_path = '/4h/table' # Path for the DataFrame index
 
     try:
         with h5py.File(h5_path, 'r') as f:
-            # Check if base key exists first
-            if base_key not in f:
-                 logger.error(f"Base timeframe key '{base_key}' not found in {h5_path}. Cannot proceed.")
-                 raise FileNotFoundError(f"Base key {base_key} not found in {h5_path}")
+            # Check if base keys exist first
+            if base_key_path not in f:
+                 logger.error(f"Base feature dataset key '{base_key_path}' not found in {h5_path}. Cannot proceed.")
+                 raise FileNotFoundError(f"Base feature dataset key {base_key_path} not found in {h5_path}")
+            if base_index_key_path not in f:
+                 logger.error(f"Base index dataset key '{base_index_key_path}' not found in {h5_path}. Cannot proceed.")
+                 raise FileNotFoundError(f"Base index dataset key {base_index_key_path} not found in {h5_path}")
 
-            for key, suffix in key_suffix_map.items():
-                # Use f.get() for safer access
-                obj = f.get(key)
-                if obj is not None:
-                    # Check if the object is a Dataset
-                    if isinstance(obj, h5py.Dataset):
-                        logger.info(f"Reading dataset: {key}")
-                        data = obj[()] # Read dataset into numpy array
-                        df = pd.DataFrame(data)
-                        if 'timestamp' in df.columns:
-                             if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                                  try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                                  except (ValueError, TypeError):
-                                       try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                                       except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key}")
-                             df.set_index('timestamp', inplace=True)
-                             df.sort_index(inplace=True)
-                             if suffix:
-                                 df = df.add_suffix(suffix)
-                             dfs[key.strip('/')] = df
-                             logger.info(f"Loaded {key}: {df.shape[0]} rows, {df.shape[1]} columns.")
-                        else:
-                            raise ValueError(f"'timestamp' column missing in {key}")
-                    elif isinstance(obj, h5py.Group):
-                        logger.warning(f"Key '{key}' points to an HDF5 Group, not a Dataset. Skipping.")
-                        # Assign empty DataFrame to avoid later errors if key was expected
-                        dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
+            for key_path, suffix in key_suffix_map.items():
+                obj = f.get(key_path) # Use the full path like /15m/table
+                if obj is not None and isinstance(obj, h5py.Dataset):
+                    logger.info(f"Reading dataset: {key_path}")
+                    data = obj[()] # Read dataset into numpy array
+                    df = pd.DataFrame(data)
+                    if 'timestamp' in df.columns:
+                         if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                              try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                              except (ValueError, TypeError):
+                                   try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                                   except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key_path}")
+                         df.set_index('timestamp', inplace=True)
+                         df.sort_index(inplace=True)
+                         # Add suffix to columns for non-base timeframes
+                         if suffix:
+                              df = df.add_suffix(suffix)
+                         # Store using the timeframe name (15m, 4h, 1d) as the dict key for easier merging later
+                         timeframe_key = key_path.split('/')[1] # Extract '15m', '4h', or '1d'
+                         dfs[timeframe_key] = df
+                         logger.info(f"Loaded {key_path}: {df.shape[0]} rows, {df.shape[1]} columns.")
                     else:
-                        logger.warning(f"Object at key '{key}' is not an HDF5 Dataset or Group (type: {type(obj)}). Skipping.")
-                        dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
-                else:
-                     logger.warning(f"Key {key} not found in {h5_path}. Some features might be missing.")
-                     dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
+                        raise ValueError(f"'timestamp' column missing in {key_path}")
+                elif obj is not None: # It exists but isn't a dataset
+                     logger.warning(f"Object at path '{key_path}' is not an HDF5 Dataset (type: {type(obj)}). Skipping.")
+                     timeframe_key = key_path.split('/')[1]
+                     dfs[timeframe_key] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
+                else: # Key path not found
+                     logger.warning(f"Dataset path {key_path} not found in {h5_path}. Some features might be missing.")
+                     timeframe_key = key_path.split('/')[1]
+                     dfs[timeframe_key] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
 
     except Exception as e:
         logger.error(f"Failed to load data from HDF5: {e}", exc_info=True)
         raise
 
     # Use 4h as the base *index* timeframe for alignment and target definition
-    base_index_key = '4h'
+    base_index_key = '4h' # Now refers to the dictionary key ('15m', '4h', '1d')
     if base_index_key not in dfs or dfs[base_index_key].empty:
-         logger.error(f"Base index timeframe '{base_index_key}' data is missing or empty in {h5_path}.")
+         logger.error(f"Base index timeframe '{base_index_key}' data is missing or empty after loading from {h5_path}.")
          raise ValueError(f"Missing or empty '{base_index_key}' data in {h5_path}")
 
     # Start with the 4h dataframe for index alignment
@@ -217,39 +224,39 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
     logger.info(f"Base Index DataFrame ({base_index_key}): {aligned_df.shape}")
 
     # Merge other timeframes onto the 4h index
-    for key, df in dfs.items():
-        if key != base_index_key and not df.empty:
+    for timeframe_key, df in dfs.items():
+        if timeframe_key != base_index_key and not df.empty:
             aligned_df = aligned_df[~aligned_df.index.duplicated(keep='first')]
             df = df[~df.index.duplicated(keep='first')]
             aligned_df = aligned_df.sort_index()
             df = df.sort_index()
 
-            # Determine merge tolerance based on the key being merged
-            if key == '1d': tolerance = pd.Timedelta('1 day 1 minute')
-            elif key == '15m': tolerance = pd.Timedelta('16 minutes')
-            else: tolerance = pd.Timedelta('5 minutes') # Default small tolerance
+            # Determine merge tolerance based on the timeframe being merged
+            if timeframe_key == '1d': tolerance = pd.Timedelta('1 day 1 minute')
+            elif timeframe_key == '15m': tolerance = pd.Timedelta('16 minutes')
+            else: tolerance = pd.Timedelta('5 minutes')
 
-            logger.info(f"Merging '{key}' onto '{base_index_key}' index. Tolerance: {tolerance}")
+            logger.info(f"Merging '{timeframe_key}' onto '{base_index_key}' index. Tolerance: {tolerance}")
 
             # Suffixes were added when loading, so just merge
             merged = pd.merge_asof(
                 aligned_df,
-                df, # df already has suffix if needed
+                df,
                 left_index=True,
                 right_index=True,
                 direction='backward',
                 tolerance=tolerance
             )
             # Check merge quality based on columns of the dataframe being merged
-            suffix = key_suffix_map[f'/{key}']
-            merged_cols = [c for c in df.columns if c != f'timestamp{suffix if suffix else ""}'] # Get original cols (with suffix)
+            suffix = key_suffix_map.get(f'/{timeframe_key}/table') # Get suffix using the original path structure pattern
+            merged_cols = [c for c in df.columns if c != f'timestamp{suffix if suffix else ""}']
             null_after_merge = merged[merged_cols].isnull().sum().sum()
             if null_after_merge > 0:
-                 logger.warning(f"Merge for '{key}' resulted in {null_after_merge} null values in its original columns. Check alignment.")
+                 logger.warning(f"Merge for '{timeframe_key}' resulted in {null_after_merge} null values in its original columns. Check alignment.")
 
             aligned_df = merged
-        elif key != base_index_key and df.empty:
-             logger.warning(f"Skipping merge for empty dataframe from key '/{key}'")
+        elif timeframe_key != base_index_key and df.empty:
+             logger.warning(f"Skipping merge for empty dataframe from timeframe '{timeframe_key}'")
 
     logger.info(f"DataFrame after merging all timeframes: {aligned_df.shape}. Columns: {len(aligned_df.columns)}")
 
