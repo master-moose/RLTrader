@@ -751,33 +751,47 @@ def get_callback_list(
     # )
     
     # --- Evaluation Callback ---
-    if eval_env is not None:
-        best_model_save_path = os.path.join(log_dir, "best_model")
-        eval_log_path = os.path.join(log_dir, "eval_logs")
-        ensure_dir_exists(best_model_save_path)
-        ensure_dir_exists(eval_log_path)
+    # TODO: Replace EvalCallback with BestModelCallback if custom metrics are needed
+    # if eval_env is not None:
+    #     eval_logger = logging.getLogger("rl_agent.eval_callback")
+    #     eval_logger.info(
+    #         f"Setting up EvalCallback/BestModelCallback: eval_freq={eval_freq}, "
+    #         f"n_eval_episodes={n_eval_episodes}, patience={early_stopping_patience}"
+    #     )
         
-        eval_callback = BestModelCallback(
-            eval_env=eval_env,
-            log_dir=log_dir, # Pass main log dir
-            eval_freq=max(1, eval_freq),
-            n_eval_episodes=n_eval_episodes,
-            deterministic=True,
-            verbose=1,
-            best_model_save_path=best_model_save_path,
-            log_path=eval_log_path, # Specific path for eval logs
-            patience=early_stopping_patience if early_stopping_patience > 0 else 0
-        )
-        callbacks.append(eval_callback)
-        
-    # Checkpoint Callback
-    callbacks.append(CheckpointCallback(
+    #     # Determine path for best model (inside the specific trial's log dir)
+    #     best_model_save_path = os.path.join(log_dir, "best_model")
+    #     ensure_dir_exists(best_model_save_path)
+    #     eval_log_path = os.path.join(log_dir, "eval_logs") # Log eval stats here
+    #     ensure_dir_exists(eval_log_path)
+
+    #     # --- Use BestModelCallback --- #
+    #     # This callback handles both evaluation and saving the best model based on reward
+    #     eval_callback = BestModelCallback(
+    #         eval_env=eval_env,
+    #         n_eval_episodes=n_eval_episodes,
+    #         eval_freq=eval_freq,
+    #         log_path=eval_log_path, # Separate log path for eval
+    #         best_model_save_path=best_model_save_path, # Save best model here
+    #         deterministic=True,
+    #         render=False,
+    #         verbose=1,
+    #         patience=early_stopping_patience # Pass patience here
+    #     )
+    #     callbacks.append(eval_callback)
+    # else:
+    #     logger.warning("No validation environment provided. Skipping EvalCallback.")
+    
+    # --- Checkpoint Callback --- #
+    # Save checkpoints periodically regardless of evaluation performance
+    checkpoint_callback = CheckpointCallback(
         save_freq=max(1, save_freq),
-        save_path=checkpoint_dir, # Use specific checkpoint dir
-        name_prefix=model_name, # Use model name as prefix
+        save_path=checkpoint_dir, # Use the dedicated checkpoint directory
+        name_prefix=model_name, # Use model_name for prefix
         keep_checkpoints=keep_checkpoints,
         verbose=1
-    ))
+    )
+    callbacks.append(checkpoint_callback)
 
     # --- Add Custom Episode Info Logger ---
     # This will log details AFTER Monitor has processed the episode end
