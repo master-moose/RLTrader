@@ -697,9 +697,13 @@ def evaluate_model(model, test_loader, criterion, device, accuracy_threshold=0.0
 
 def plot_results(predictions, actuals, filename="prediction_vs_actual.png"):
     """Plots predictions vs actual values."""
-    # Check if predictions or actuals are empty
-    if not predictions or not actuals:
-        logger.warning("Cannot plot results because predictions or actuals are empty.")
+    # Check if predictions or actuals are None or empty numpy arrays
+    # Use .size to check for emptiness in numpy arrays
+    predictions_is_none_or_empty = predictions is None or (isinstance(predictions, np.ndarray) and predictions.size == 0)
+    actuals_is_none_or_empty = actuals is None or (isinstance(actuals, np.ndarray) and actuals.size == 0)
+
+    if predictions_is_none_or_empty or actuals_is_none_or_empty:
+        logger.warning("Cannot plot results because predictions or actuals are missing or empty.")
         return
 
     plt.figure(figsize=(14, 7))
