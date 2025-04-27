@@ -743,7 +743,7 @@ def main():
 
     # Create DataLoaders
     # Use persistent_workers and pin_memory if CUDA is available for potential speedup
-    num_workers = 0 # Set to 0 to avoid potential issues on Windows
+    num_workers = 2 # Experimenting with workers on Windows
     pin_memory = True if device == torch.device("cuda") else False
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
