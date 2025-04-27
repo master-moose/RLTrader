@@ -16,6 +16,7 @@ import datetime
 import os
 from pathlib import Path
 import logging
+import json
 
 # --- Configuration ---
 EXCHANGE_ID = 'binance'
@@ -77,12 +78,14 @@ def collect_lob_data():
             # Storing bids/asks as lists within the DataFrame.
             # This is simple but might not be the most HDF5-performant way.
             # Alternatives: Flatten lists, use multi-index, store in separate tables.
+            bids_list = order_book.get('bids', [])
+            asks_list = order_book.get('asks', [])
             data_to_store = pd.DataFrame({
                 'timestamp_utc': [fetch_timestamp_utc],
                 'lob_timestamp_ms': [order_book.get('timestamp')], # Exchange LOB timestamp
                 'lob_nonce': [order_book.get('nonce')],         # Exchange LOB nonce
-                'bids': [order_book.get('bids', [])],
-                'asks': [order_book.get('asks', [])]
+                'bids': [json.dumps(bids_list)], # Serialize to JSON string
+                'asks': [json.dumps(asks_list)]  # Serialize to JSON string
             })
             # Convert timestamp to ensure compatibility
             data_to_store['timestamp_utc'] = pd.to_datetime(data_to_store['timestamp_utc'])
@@ -92,8 +95,7 @@ def collect_lob_data():
             logging.debug(f"Appending to {current_file}")
             with pd.HDFStore(current_file, mode='a') as store:
                 store.append(HDF_KEY, data_to_store, format='table',
-                             data_columns=['timestamp_utc'], # Index timestamp for faster queries
-                             min_itemsize={'bids': 2000, 'asks': 2000}) # Estimate size if lists get long
+                             data_columns=['timestamp_utc']) # Index timestamp for faster queries
 
             logging.info(f"Stored LOB snapshot for {SYMBOL} at {fetch_timestamp_utc}")
 
