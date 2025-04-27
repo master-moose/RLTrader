@@ -314,8 +314,10 @@ if __name__ == "__main__":
     # Use a base directory (e.g., current dir or a specific results dir)
     # We use relative path here, assuming script is run from project root
     base_storage_dir = "./ray_results"
-    storage_path = os.path.join(base_storage_dir, cli_args.experiment_name)
-    logger.info(f"Ray Tune results will be stored in: {os.path.abspath(storage_path)}")
+    relative_storage_path = os.path.join(base_storage_dir, cli_args.experiment_name)
+    # Ensure the path passed to tune.run is absolute
+    storage_path = os.path.abspath(relative_storage_path)
+    logger.info(f"Ray Tune results will be stored in: {storage_path}")
 
     # Define Search Space
     search_space = {
