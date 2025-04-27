@@ -573,7 +573,7 @@ def parse_args():
     parser.add_argument("--tcn_dropout", type=float, default=0.2, help="Dropout rate for TCN layers.")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
-    parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate for optimizer.")
+    parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate for optimizer.")
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping.")
     parser.add_argument("--test_split", type=float, default=0.1, help="Fraction of data to use for testing (if --test_data_path is not provided).")
     parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of training data to use for validation (if --val_data_path is not provided).")
@@ -731,6 +731,11 @@ def main():
                             num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
                              num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0)
+
+    # Log the number of batches in each loader
+    logger.info(f"Number of training batches: {len(train_loader)}")
+    logger.info(f"Number of validation batches: {len(val_loader)}")
+    logger.info(f"Number of test batches: {len(test_loader)}")
 
     # --- Initialize Model --- #
     # Ensure X_train has the expected shape before accessing shape[2]
