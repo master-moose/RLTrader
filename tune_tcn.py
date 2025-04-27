@@ -107,7 +107,8 @@ def tune_trainable(config, cli_args):
 
     except Exception as e:
         logger.error(f"Tune Trial: Failed to load data: {e}", exc_info=True)
-        tune.report(val_dir_acc=float('-inf'))
+        # Correctly report a dictionary of metrics
+        tune.report({"val_dir_acc": float('-inf')}) # Report worst score for the metric being optimized
         return
 
     # Create DataLoaders - Use cli_args
