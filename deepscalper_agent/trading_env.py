@@ -1,306 +1,1136 @@
-"""
-Custom Gymnasium environment for simulating a market-making trading strategy
-based on Limit Order Book (LOB) data, inspired by the DeepScalper paper.
-"""
-
-import gymnasium as gym
-from gymnasium import spaces
-import pandas as pd
-import numpy as np
-import json
+from __future__ import annotations
+import torch
+from gym import spaces
 from pathlib import Path
+# Use correct relative imports now that files are copied
+from .builder import ENVIRONMENTS
+from .custom import Environments
+import pandas as pd
+# Assuming functions are exported via __init__.py in trademaster_utils
+from .trademaster_utils import get_attr
+import numpy as np
+
+# import sys # Unused
+# from pathlib import Path # Unused
+# import pickle # Unused
+import os.path as osp # Keep osp if used by get_attr or similar internally
+# import glob # Unused
+import json
 import logging
-from typing import List, Dict, Any, Tuple, Optional
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-class TradingEnv(gym.Env):
-    """A Gymnasium environment for simulating LOB-based market making.
+__all__ = ["HighFrequencyTradingEnvironment",
+           "HighFrequencyTradingTrainingEnvironment"]
 
-    Args:
-        data_dir (str or Path): Directory containing the HDF5 LOB data files.
-        symbol (str): Trading symbol (e.g., 'BTC/USDT'), used for file naming convention.
-        initial_cash (float): Starting cash balance for the agent.
-        commission_pct (float): Transaction fee percentage.
-        lob_depth (int): Number of LOB levels to include in the observation.
-        max_inventory (float): Maximum absolute inventory allowed.
-        # Add other parameters like reward shaping components, episode length etc.
-    """
-    metadata = {"render_modes": ["human", "ansi"], "render_fps": 1}
 
-    def __init__(
-        self,
-        data_dir: str | Path = 'data/lob_data',
-        symbol: str = 'BTC/USDT',
-        initial_cash: float = 10000.0,
-        commission_pct: float = 0.001, # Example commission (0.1%)
-        lob_depth: int = 10, # Use top 10 levels for state
-        max_inventory: float = 1.0, # Max 1 BTC long or short
-        max_steps: Optional[int] = None # Max steps per episode
-    ):
-        super().__init__()
+@ENVIRONMENTS.register_module()
+class HighFrequencyTradingEnvironment(Environments):  # Inherit from real class
+    def __init__(self, **kwargs):
+        super(HighFrequencyTradingEnvironment, self).__init__()
 
-        self.data_dir = Path(data_dir)
-        self.symbol_filename = symbol.replace('/', '')
-        self.initial_cash = initial_cash
-        self.commission_pct = commission_pct
-        self.lob_depth = lob_depth
-        self.max_inventory = max_inventory
-        self.max_steps = max_steps
+        self.dataset = get_attr(kwargs, "dataset", None)
+        self.task = get_attr(kwargs, "task", "train")
+        self.test_dynamic = int(get_attr(kwargs, "test_dynamic", "-1"))
+        self.task_index = int(get_attr(kwargs, "task_index", "-1"))
+        self.work_dir = get_attr(kwargs, "work_dir", "")
 
-        # --- Load Data ---
-        self.data: pd.DataFrame = self._load_data()
-        if self.data.empty:
-            raise ValueError(f"No LOB data found in {self.data_dir} for symbol {symbol}")
-        self.n_steps = len(self.data)
-        if self.max_steps is None:
-            self.max_steps = self.n_steps - 1 # Default to full dataset length
+        # --- Data Loading ---
+        # Remove reliance on specific csv paths from dataset config
+        # self.df_path = None
+        # if self.task.startswith("train"):
+        #     raise Exception(...)
+        # elif self.task.startswith("valid"):
+        #     self.df_path = get_attr(self.dataset, "valid_path", None)
+        # else:
+        #     self.df_path = get_attr(self.dataset, "test_path", None)
 
-        # --- Define Spaces ---
-        # Action Space: Placeholder - needs refinement based on strategy
-        # Example: Discrete action (e.g., 0: hold, 1: post bid/ask near spread, 2: post wider)
-        self.action_space = spaces.Discrete(3) # TODO: Refine action space
+        # Get data directory from kwargs or dataset
+        # (assuming dataset has a data_path attribute)
+        data_dir = Path(get_attr(kwargs, "data_dir",
+                                 get_attr(self.dataset, "data_path", "data")))
+        # e.g., "BTCUSDT"
+        symbol_filename_part = get_attr(kwargs, "symbol_filename_part", "")
+        if not symbol_filename_part:
+            # Attempt to derive from symbol if provided in dataset
+            symbol = get_attr(self.dataset, "symbol", "")
+            if symbol:
+                # Fix syntax: Use raw string or escape backslash
+                symbol_filename_part = symbol.replace('/', '_').replace(':', '')
+        if not symbol_filename_part:
+            raise ValueError(
+                "Could not determine symbol filename part for data loading.")
 
-        # Observation Space: Placeholder - depends heavily on state representation
-        # Example: Box space including LOB levels, inventory, cash
-        # Shape: (lob_depth * 4 [bid_price, bid_vol, ask_price, ask_vol] + 2 [inventory, cash])
-        obs_shape = (self.lob_depth * 4 + 1,) # Simplified: +1 for inventory
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
-        )
-        # TODO: Refine observation space (normalize?, include cash?, time features?)
-
-        # --- Internal State ---
-        self._current_step = 0
-        self._cash = self.initial_cash
-        self._inventory = 0.0 # Base asset (e.g., BTC)
-        self._total_value = self.initial_cash
-        self._last_observation = None
-        self._active_orders = {'buy': None, 'sell': None} # Example: {price, size}
-
-        logging.info(f"TradingEnv initialized with {self.n_steps} data points.")
-
-    def _load_data(self) -> pd.DataFrame:
-        """Loads LOB data from HDF5 files in the specified directory."""
-        all_data = []
-        file_pattern = f"*{self.symbol_filename}_lob_*.h5"
-        hdf_files = sorted(self.data_dir.glob(file_pattern))
+        # Load HDF5 data from the specified directory
+        # file_pattern = f"*{symbol_filename_part}_lob_*.h5" # Original pattern
+        # --- Corrected pattern based on conversion script output ---
+        file_pattern = f"{symbol_filename_part}_lob.h5"
+        # -------------------------------------------------------
+        hdf_files = sorted(data_dir.glob(file_pattern))
 
         if not hdf_files:
-            logging.warning(f"No HDF5 files found matching pattern '{file_pattern}' in {self.data_dir}")
-            return pd.DataFrame()
+            raise FileNotFoundError(
+                f"No HDF5 files matching pattern '{file_pattern}' in {data_dir}")
 
-        logging.info(f"Found data files: {hdf_files}")
+        logging.info(f"Loading data from HDF5 files: {hdf_files}")
+        all_data = []
         for file_path in hdf_files:
             try:
                 with pd.HDFStore(file_path, mode='r') as store:
-                    # Assuming data is stored under key 'lob_data' (matches collector)
-                    if '/lob_data' in store.keys():
-                        df = store['lob_data']
-                        # Deserialize JSON strings back to lists
-                        df['bids'] = df['bids'].apply(json.loads)
-                        df['asks'] = df['asks'].apply(json.loads)
-                        all_data.append(df)
+                    # Use HDF_KEY from collector or default
+                    hdf_key = get_attr(kwargs, "hdf_key", "lob_data")
+                    if f'/{hdf_key}' in store.keys():
+                        df_temp = store[hdf_key]
+                        all_data.append(df_temp)
                     else:
-                        logging.warning(f"Key 'lob_data' not found in {file_path}")
+                        logging.warning(
+                            f"Key '{hdf_key}' not found in {file_path}")
             except Exception as e:
                 logging.error(f"Error loading data from {file_path}: {e}")
 
         if not all_data:
-            return pd.DataFrame()
+            raise ValueError("Failed to load any data from HDF5 files.")
 
-        full_df = pd.concat(all_data, ignore_index=True)
-        full_df = full_df.sort_values(by='timestamp_utc').reset_index(drop=True)
-        logging.info(f"Loaded and concatenated data: {full_df.shape[0]} rows")
-        return full_df
+        self.df = pd.concat(all_data, ignore_index=True)
+        # Ensure data is sorted by timestamp (use LOB timestamp if available)
+        ts_col = 'timestamp' # Use the actual column name from the HDF5 file
+        if ts_col not in self.df.columns:
+             # Add fallback or error handling if needed
+             raise KeyError(f"Required timestamp column '{ts_col}' not found in HDF5 data.")
 
-    def _get_observation(self) -> np.ndarray:
-        """Constructs the observation array from the current state."""
-        # TODO: Implement actual observation construction based on self.data[self._current_step]
-        # and self._inventory, self._cash.
-        # This needs to match self.observation_space shape and type.
-        # Example placeholder:
-        obs = np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
-        obs[-1] = self._inventory # Put inventory in the last slot
-        return obs
+        self.df = self.df.sort_values(by=ts_col).reset_index(drop=True)
 
-    def _get_reward(self, previous_value: float) -> float:
-        """Calculates the reward for the current step."""
-        # TODO: Implement reward calculation (e.g., change in portfolio value)
-        return self._total_value - previous_value
+        logging.info(f"Loaded and processed data: {len(self.df)} rows")
 
-    def _calculate_current_value(self) -> float:
-        """Calculates the current portfolio value (cash + inventory value)."""
-        # Need a way to price inventory - e.g., mid-price at current step
-        # TODO: Implement inventory valuation
-        current_row = self.data.iloc[self._current_step]
-        bids = current_row['bids']
-        asks = current_row['asks']
-        if not bids or not asks:
-             mid_price = 0 # Handle case with empty book side
+        # --- Parameter setup (moved after df loading) ---
+        self.transaction_cost_pct = get_attr(
+            self.dataset, "transaction_cost_pct", 0.00005
+        )
+        # Remove tech indicators, use lob_depth instead
+        # self.tech_indicator_list = get_attr(
+        #     self.dataset, "tech_indicator_list", [])
+        # Number of LOB levels to use
+        self.lob_depth = get_attr(self.dataset, "lob_depth",
+                                  get_attr(kwargs, "lob_depth", 10))
+        self.stack_length = get_attr(self.dataset, "backward_num_timestamp", 1)
+        self.max_holding_number = get_attr(
+            self.dataset, "max_holding_number", 0.01)
+
+        # Removed section loading dynamic csv test data
+        # if self.task.startswith("test_dynamic"):
+        #     ...
+        # else:
+        #     ...
+
+        # --- Observation and Action Space ---
+        # Or redefine based on LOB actions
+        self.action_space = spaces.Discrete(
+            get_attr(self.dataset, "num_action", 11))
+        self.action_dim = self.action_space.n
+
+        # Define observation space based on LOB data
+        # Features: lob_depth * (ask_price, ask_vol, bid_price, bid_vol)
+        lob_features_count = self.lob_depth * 4
+        # Optional: Add inventory feature
+        inventory_features_count = 1
+        obs_shape = (lob_features_count + inventory_features_count,)
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=obs_shape,
+            dtype=np.float32
+        )
+        self.state_dim = self.observation_space.shape[0]
+
+        # Ensure df is loaded before calling this
+        # DP demonstration might need adaptation if it used tech indicators
+        # --- Disable computationally expensive DP calculation for now ---
+        logging.info("Skipping DP demonstration calculation...")
+        # self.demonstration_action = self.making_multi_level_dp_demonstration(
+        #     max_punish=get_attr(self.dataset, "max_punish", 1e12)
+        # )
+        # Initialize with zeros instead
+        num_steps = len(self.df)
+        self.demonstration_action = np.zeros(num_steps, dtype=int)
+        logging.info("Initialized demonstration_action with zeros.")
+        # -------------------------------------------------------------
+
+        # reset
+        self.terminal = False
+        self.day = self.stack_length
+        self.data = self.df.iloc[self.day - self.stack_length: self.day]
+        self.initial_reward = 0
+        self.reward_history = [self.initial_reward]
+        self.previous_action = 0
+        self.needed_money_memory = []
+        self.sell_money_memory = []
+        self.comission_fee_history = []
+        self.previous_position = 0
+        self.position = 0
+        self.reward_history = [0]
+        self.test_id = 'agent'
+        self.position_history = []
+
+    def sell_value(self, price_information, position):
+        """Calculates the cash received from selling a position
+           by walking the bid side of the LOB.
+        Args:
+            price_information: A dict/Series representing the current LOB row.
+            position: The amount to sell.
+        Returns:
+            Tuple[float, float]: (cash_received_after_commission, actual_amount_sold)
+        """
+        original_position = position
+        value = 0
+        actual_changed_position = 0
+
+        if position <= 0:
+            return 0, 0
+
+        for i in range(self.lob_depth):
+            try:
+                bid_price = price_information.get(f'bid_price_{i}', 0)
+                bid_size = price_information.get(f'bid_size_{i}', 0)
+
+                if pd.isna(bid_price) or pd.isna(bid_size) or \
+                   bid_price <= 0 or bid_size <= 0:
+                    continue # Skip invalid or empty levels
+
+                sell_amount = min(position, bid_size)
+                value += sell_amount * bid_price
+                position -= sell_amount
+                actual_changed_position += sell_amount
+
+                if position <= 1e-9: # Use tolerance for float comparison
+                    break # Sold entire target position
+
+            except KeyError as e:
+                logging.error(f"Error accessing bid level {i}: {e}")
+                break # Stop processing if expected columns are missing
+
+        # if position > 1e-9: # This means not all could be sold
+        #    logging.warning(f"Could not sell entire position. Remaining: {position}")
+
+        commission = self.transaction_cost_pct * value
+        self.comission_fee_history.append(commission)
+
+        return value * (1 - self.transaction_cost_pct), actual_changed_position
+
+    def buy_value(self, price_information, position):
+        """Calculates the cash needed to buy a position
+           by walking the ask side of the LOB.
+        Args:
+            price_information: A dict/Series representing the current LOB row.
+            position: The amount to buy.
+        Returns:
+            Tuple[float, float]: (cash_needed_with_commission, actual_amount_bought)
+        """
+        original_position = position
+        value = 0
+        actual_changed_position = 0
+
+        if position <= 0:
+            return 0, 0
+
+        for i in range(self.lob_depth):
+            try:
+                ask_price = price_information.get(f'ask_price_{i}', 0)
+                ask_size = price_information.get(f'ask_size_{i}', 0)
+
+                if pd.isna(ask_price) or pd.isna(ask_size) or \
+                   ask_price <= 0 or ask_size <= 0:
+                    continue # Skip invalid or empty levels
+
+                buy_amount = min(position, ask_size)
+                value += buy_amount * ask_price
+                position -= buy_amount
+                actual_changed_position += buy_amount
+
+                if position <= 1e-9: # Use tolerance
+                    break # Bought entire target position
+
+            except KeyError as e:
+                logging.error(f"Error accessing ask level {i}: {e}")
+                break
+
+        # if position > 1e-9:
+        #     logging.warning(f"Could not buy entire position. Remaining: {position}")
+
+        commission = self.transaction_cost_pct * value
+        self.comission_fee_history.append(commission)
+
+        return value * (1 + self.transaction_cost_pct), actual_changed_position
+
+    def calculate_value(self, price_information, position):
+        """Calculates the current value of a given position based on the
+           best bid price available.
+        """
+        if position <= 0:
+            return 0
+        # Use best bid price (bid_price_0)
+        try:
+            bid_price_0 = price_information.get('bid_price_0', 0)
+            if pd.isna(bid_price_0) or bid_price_0 <= 0:
+                # If no valid best bid, value is uncertain. Using 0.
+                return 0
+            return bid_price_0 * position
+        except KeyError:
+            logging.error("Missing 'bid_price_0' for calculate_value.")
+            return 0
+
+    def calculate_avaliable_action(self, price_information):
+        """Calculates the range of possible discrete actions based on
+           available liquidity within the first few LOB levels.
+        """
+        # Calculate max buy/sell based on available LOB levels (e.g., first 4)
+        num_levels_check = min(4, self.lob_depth) # Check up to 4 levels or lob_depth
+        buy_size_max = 0
+        sell_size_max = 0
+
+        for i in range(num_levels_check):
+            try:
+                ask_size = price_information.get(f'ask_size_{i}', 0)
+                bid_size = price_information.get(f'bid_size_{i}', 0)
+                if pd.notna(ask_size) and ask_size > 0:
+                    buy_size_max += ask_size
+                if pd.notna(bid_size) and bid_size > 0:
+                    sell_size_max += bid_size
+            except KeyError:
+                 logging.warning(f"Missing size column for level {i} in calculate_avaliable_action.")
+                 # Continue checking other levels
+
+        position_upper = self.position + buy_size_max
+        position_lower = self.position - sell_size_max
+        position_lower = max(position_lower, 0)
+        position_upper = min(position_upper, self.max_holding_number)
+
+        if self.max_holding_number <= 0:
+            scale_factor = 0
         else:
-             mid_price = (bids[0][0] + asks[0][0]) / 2 # Price of top bid/ask
+            scale_factor = (self.action_dim - 1) / self.max_holding_number
 
-        inventory_value = self._inventory * mid_price
-        return self._cash + inventory_value
+        current_action = self.position * scale_factor
+        # Ensure upper bound calculation is integer and clamped
+        action_upper = int(position_upper * scale_factor)
+        action_upper = min(action_upper, self.action_dim - 1)
 
-    def _simulate_trades(self, action: Any):
-        """Simulates order placement, cancellation, and fills based on the action
-           and the LOB state at the *next* time step."""
-        # This is the most complex part. Needs careful logic:
-        # 1. Based on `action`, decide which orders to place/cancel.
-        # 2. Look at self.data[self._current_step + 1] LOB state.
-        # 3. Check if active buy orders cross the *next* step's asks.
-        # 4. Check if active sell orders cross the *next* step's bids.
-        # 5. Update self._cash and self._inventory based on fills, subtracting commission.
-        # 6. Update self._active_orders.
-        pass # TODO: Implement trade simulation logic
+        if position_lower <= 0:
+            action_lower = 0
+        else:
+            # Ensure lower bound calculation is integer and handles edge cases
+            action_lower_float = position_lower * scale_factor
+            # Use ceiling logic
+            action_lower = int(np.ceil(action_lower_float))
+            action_lower = min(action_lower, action_upper)
+            action_lower = max(action_lower, 0)
 
-    def step(self, action: Any) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """Run one timestep of the environment's dynamics."""
-        terminated = False
-        truncated = False
-        info = {}
+        avaliable_discriminator = []
+        for i in range(self.action_dim):
+            # Ensure comparison is robust (action_lower <= i <= action_upper)
+            if action_lower <= i <= action_upper:
+                avaliable_discriminator.append(1)
+            else:
+                avaliable_discriminator.append(0)
+        avaliable_discriminator = torch.tensor(avaliable_discriminator)
+        return avaliable_discriminator
 
-        # Store previous portfolio value for reward calculation
-        previous_value = self._total_value
+    def _get_lob_state(self):
+        """Extracts the LOB state for the observation.
+        Returns a flattened numpy array:
+        [ask1_p_norm, ask1_v_log, bid1_p_norm, bid1_v_log, ...,
+         ask_depth_p_norm, ..., bid_depth_v_log, inventory_norm]
+        Prices are normalized by mid-price, Volumes are log-transformed.
+        Inventory is normalized by max_holding_number.
+        Handles missing levels with padding (prices=mid, volumes=0).
+        """
+        state_lob_data = self.data.iloc[-1] # Get latest row
 
-        # --- Simulate market interactions based on action ---
-        # (This might involve placing/canceling orders, checking for fills)
-        self._simulate_trades(action)
+        # Calculate mid-price for normalization from level 0 prices
+        try:
+            bid_price_0 = state_lob_data['bid_price_0']
+            ask_price_0 = state_lob_data['ask_price_0']
+            if pd.isna(bid_price_0) or pd.isna(ask_price_0) or \
+               ask_price_0 <= 0 or bid_price_0 <= 0:
+                mid_price = 0 # Treat as invalid
+            else:
+                mid_price = (bid_price_0 + ask_price_0) / 2.0
+        except KeyError:
+             logging.error("Missing bid_price_0 or ask_price_0 for mid-price calculation.")
+             mid_price = 0
 
-        # --- Advance time ---
-        self._current_step += 1
+        lob_state_list = []
+        if mid_price <= 0:
+            logging.warning(
+                f"Day {self.day}: Mid-price is {mid_price}, "
+                f"using zero LOB state padding.")
+            # Pad with mid-price=1.0, volume=0.0 for all levels
+            lob_state_list = [1.0, 0.0, 1.0, 0.0] * self.lob_depth
+        else:
+            for i in range(self.lob_depth):
+                try:
+                    # Ask level i
+                    ask_price_i = state_lob_data.get(f'ask_price_{i}', mid_price)
+                    ask_size_i = state_lob_data.get(f'ask_size_{i}', 0)
+                    if pd.isna(ask_price_i) or ask_price_i <= 0:
+                        ask_price_norm = 1.0 # Pad with mid
+                    else:
+                        ask_price_norm = ask_price_i / mid_price
+                    ask_vol_log = np.log1p(ask_size_i if pd.notna(ask_size_i) else 0)
 
-        # --- Update total value ---
-        self._total_value = self._calculate_current_value()
+                    # Bid level i
+                    bid_price_i = state_lob_data.get(f'bid_price_{i}', mid_price)
+                    bid_size_i = state_lob_data.get(f'bid_size_{i}', 0)
+                    if pd.isna(bid_price_i) or bid_price_i <= 0:
+                        bid_price_norm = 1.0 # Pad with mid
+                    else:
+                        bid_price_norm = bid_price_i / mid_price
+                    bid_vol_log = np.log1p(bid_size_i if pd.notna(bid_size_i) else 0)
 
-        # --- Calculate reward ---
-        reward = self._get_reward(previous_value)
+                except KeyError as e:
+                    # This shouldn't happen with .get, but handle defensively
+                    logging.error(f"Missing expected LOB column: {e}")
+                    ask_price_norm = 1.0
+                    ask_vol_log = 0.0
+                    bid_price_norm = 1.0
+                    bid_vol_log = 0.0
 
-        # --- Get next observation ---
-        observation = self._get_observation()
-        self._last_observation = observation # Store for rendering
+                lob_state_list.extend(
+                    [ask_price_norm, ask_vol_log,
+                     bid_price_norm, bid_vol_log])
 
-        # --- Check for termination/truncation conditions ---
-        if self._total_value <= 0: # Ruin
-            terminated = True
-            logging.warning(f"Episode terminated at step {self._current_step}: Agent ruined.")
+        lob_state = np.array(lob_state_list, dtype=np.float32)
 
-        if self._current_step >= self.n_steps - 1 or self._current_step >= self.max_steps:
-            truncated = True # End of data or max steps reached
-            logging.info(f"Episode truncated at step {self._current_step}.")
+        # Normalize inventory (same as before)
+        norm_inventory = 0
+        if self.max_holding_number > 0:
+            norm_inventory = self.position / self.max_holding_number
 
-        # Optional: Add info dictionary content
-        info['step'] = self._current_step
-        info['cash'] = self._cash
-        info['inventory'] = self._inventory
-        info['total_value'] = self._total_value
-        # info['active_orders'] = self._active_orders
+        # Combine LOB state and inventory
+        full_state = np.concatenate((
+            lob_state, np.array([norm_inventory], dtype=np.float32)))
 
-        return observation, reward, terminated, truncated, info
+        # Ensure state shape matches observation space (same as before)
+        if full_state.shape[0] != self.state_dim:
+            # Recalculate expected shape based on current logic
+            expected_dim = (self.lob_depth * 4) + 1
+            if full_state.shape[0] != expected_dim:
+                raise ValueError(
+                    f"Constructed state shape {full_state.shape} "
+                    f"!= expected {expected_dim}")
+            else:
+                 # If the dims match expected calculation but not self.state_dim,
+                 # update self.state_dim - this indicates an issue during init
+                 logging.warning(f"Observation space dim mismatch. Expected {expected_dim}, got {self.state_dim}. Updating self.state_dim.")
+                 self.state_dim = expected_dim
+                 # It might be better to fix the initial calculation in __init__
+                 # self.observation_space needs update too?
 
-    def reset(
-        self, *, seed: Optional[int] = None, options: Optional[dict] = None
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Resets the environment to an initial state."""
-        super().reset(seed=seed)
+        return full_state
 
-        self._current_step = 0
-        self._cash = self.initial_cash
-        self._inventory = 0.0
-        self._total_value = self.initial_cash
-        self._active_orders = {'buy': None, 'sell': None}
+    def reset(self):
+        # here is a little difference: we only have one asset
+        # it starts with the back_num_day and ends in end-self.forward_num_day
+        # for the information, it should calculate 2 additional things
+        self.terminal = False
+        self.day = self.stack_length
+        self.data = self.df.iloc[self.day - self.stack_length: self.day]
+        self.initial_reward = 0
+        self.reward_history = [self.initial_reward]
+        self.previous_action = 0
+        price_information = self.data.iloc[-1]
+        self.position = 0
+        self.needed_money_memory = []
+        self.sell_money_memory = []
+        self.comission_fee_history = []
+        avaliable_discriminator = self.calculate_avaliable_action(
+            price_information)
+        self.previous_position = 0
+        DP_distribution = [0] * 11
+        if self.day > 0 and (self.day - 1) < len(self.demonstration_action):
+            action_index = self.demonstration_action[self.day - 1]
+            if 0 <= action_index < len(DP_distribution):
+                DP_distribution[action_index] = 1
+            else:
+                print(
+                    f"Warning: DP action index {action_index} "
+                    f"out of bounds during reset.")
+        else:
+            print(
+                f"Warning: day index {self.day - 1} out of bounds "
+                f"for demonstration_action.")
+        DP_distribution = np.array(DP_distribution)
+        self.position_history = []
 
-        observation = self._get_observation()
-        self._last_observation = observation
+        # Calculate the initial state using the LOB
+        self.state = self._get_lob_state()
+
+        # Return ONLY the state array for SB3 compatibility
+        return self.state
+
+    def step(self, action):
+        # Avoid division by zero
+        if self.action_dim <= 1:
+            normlized_action = 0
+        else:
+            normlized_action = action / (self.action_dim - 1)
+        target_position = self.max_holding_number * normlized_action
+
+        self.terminal = self.day >= len(self.df.index.unique()) - 1
+        previous_position = self.previous_position
+        # Use LOB info from the *end* of the previous slice (self.data)
+        previous_price_information = self.data.iloc[-1]
+
+        self.day += 1
+
+        # Check if day exceeds limits before slicing
+        if self.day >= len(self.df.index.unique()):
+            self.terminal = True
+            # Use last known info
+            current_price_information = previous_price_information
+            # State doesn't technically advance, but keep last calculated one
+        else:
+            # Update self.data slice for the *current* step
+            self.data = self.df.iloc[self.day - self.stack_length: self.day]
+            current_price_information = self.data.iloc[-1]
+            # State will be calculated based on this new self.data later
+
+        # === Execution Logic ===
+        # Uses previous_price_information
+        cash = 0
+        needed_cash = 0
+        actual_position_change = 0
+        executed_position = self.previous_position
+
+        if previous_position >= target_position:
+            # hold the position or sell some position
+            self.sell_size = previous_position - target_position
+            if self.sell_size > 0:
+                cash, actual_position_change = self.sell_value(
+                    previous_price_information, self.sell_size
+                )
+                self.sell_money_memory.append(cash)
+                self.needed_money_memory.append(0)
+                executed_position = \
+                    self.previous_position - actual_position_change
+            else:  # Holding
+                self.sell_money_memory.append(0)
+                self.needed_money_memory.append(0)
+                actual_position_change = 0
+
+        elif previous_position < target_position:  # Buy
+            self.buy_size = target_position - previous_position
+            if self.buy_size > 0:
+                needed_cash, actual_position_change = self.buy_value(
+                    previous_price_information, self.buy_size
+                )
+                self.needed_money_memory.append(needed_cash)
+                self.sell_money_memory.append(0)
+                executed_position = \
+                    self.previous_position + actual_position_change
+
+        # Update position *after* execution
+        self.position = executed_position
+
+        previous_value = self.calculate_value(
+            previous_price_information, self.previous_position
+        )
+        current_value = self.calculate_value(
+            current_price_information, self.position
+        )
+        self.reward = (current_value + cash) - (previous_value + needed_cash)
+        self.reward_history.append(self.reward)
+        # Calculate return rate (consistent with base class)
+        if previous_value == 0 and needed_cash == 0:
+            return_rate = 0
+        elif previous_value == 0 and needed_cash > 0:
+            return_rate = self.reward / needed_cash
+        else:
+            denominator = previous_value + needed_cash
+            return_rate = self.reward / denominator if denominator != 0 else 0
+        self.return_rate = return_rate
+
+        # Update previous_position state for the *next* step
+        self.previous_position = self.position
+
+        # --- Calculate NEXT state ---
+        # Use the helper function based on the current LOB data
+        self.state = self._get_lob_state()
+
+        avaliable_discriminator = self.calculate_avaliable_action(
+            current_price_information  # Availability based on current LOB
+        )
+
         info = {
-            'step': self._current_step,
-            'cash': self._cash,
-            'inventory': self._inventory,
-            'total_value': self._total_value
+            "previous_action": action,
+            "avaliable_action": avaliable_discriminator,
+            "DP_action": np.zeros(self.action_dim)
         }
 
-        logging.info("Environment reset.")
-        return observation, info
-
-    def render(self, mode="human") -> Optional[str]:
-        """Renders the environment.
-
-        (Currently prints basic info or returns it as a string).
-        """
-        output = (
-            f"Step: {self._current_step}/{self.n_steps}\n"
-            f"Cash: {self._cash:.2f}\n"
-            f"Inventory: {self._inventory:.6f}\n"
-            f"Total Value: {self._total_value:.2f}\n"
-            # f"Observation: {self._last_observation}\n"
-            # f"Active Orders: {self._active_orders}\n"
-        )
-        if mode == "human":
-            print(output)
-            return None
-        elif mode == "ansi":
-            return output
+        # Terminal handling remains the same...
+        if self.terminal:
+            # ... (metric calculation) ...
+            pass  # No change needed here for state calculation itself
         else:
-            super().render(mode=mode) # Raises error for unsupported modes
+            # Update DP action in info for non-terminal steps
+            DP_distribution = [0] * 11
+            dp_day_index = self.day - 1  # Index for demonstration
+            if dp_day_index >= 0 and \
+               dp_day_index < len(self.demonstration_action):
+                action_index = self.demonstration_action[dp_day_index]
+                if 0 <= action_index < len(DP_distribution):
+                    DP_distribution[action_index] = 1
+                else:
+                    print(
+                        f"Warning: DP action index {action_index} "
+                        f"out of bounds during step.")
+            else:
+                print(
+                    f"Warning: day index {dp_day_index} out of bounds "
+                    f"for demonstration_action during step.")
+            info["DP_action"] = np.array(DP_distribution)
 
-    def close(self):
-        """Perform any necessary cleanup."""
-        logging.info("Closing TradingEnv.")
-        # No explicit resources to close in this basic version
-        pass
+        self.position_history.append(self.position)
 
-# Example Usage (for testing the environment structure)
-if __name__ == '__main__':
-    print("Testing TradingEnv structure...")
+        # Return the calculated LOB state
+        return self.state, self.reward, self.terminal, info
 
-    # Create dummy data for testing if real data isn't present
-    dummy_data_dir = Path('data/dummy_lob')
-    dummy_data_dir.mkdir(parents=True, exist_ok=True)
-    dummy_file = dummy_data_dir / 'binance_BTCUSDT_lob_20240101.h5'
+    def get_final_return_rate(self, slient=False):
+        sell_money_memory = np.array(self.sell_money_memory)
+        needed_money_memory = np.array(self.needed_money_memory)
+        true_money = sell_money_memory - needed_money_memory
+        final_balance = np.sum(true_money)
+        balance_list = []
+        current_balance = 0
+        # Calculate required money properly
+        min_balance = 0
+        for money in true_money:
+            current_balance += money
+            balance_list.append(current_balance)
+            if current_balance < min_balance:
+                min_balance = current_balance
+        required_money = -min_balance if min_balance < 0 else 0
 
-    if not dummy_file.exists():
-        print("Creating dummy HDF5 data for testing...")
-        dummy_steps = 100
-        dummy_bids = [[50000.0 - i*0.5, 0.1+i*0.01] for i in range(10)]
-        dummy_asks = [[50000.5 + i*0.5, 0.1+i*0.01] for i in range(10)]
-        timestamps = pd.to_datetime(np.arange(dummy_steps), unit='s',
-                                    origin=pd.Timestamp('2024-01-01'))
-        dummy_df = pd.DataFrame({
-            'timestamp_utc': timestamps,
-            'lob_timestamp_ms': [ts.timestamp() * 1000 for ts in timestamps],
-            'lob_nonce': np.arange(dummy_steps),
-            'bids': [json.dumps(dummy_bids)] * dummy_steps,
-            'asks': [json.dumps(dummy_asks)] * dummy_steps
-        })
-        with pd.HDFStore(dummy_file, mode='w') as store:
-            store.put('lob_data', dummy_df, format='table', data_columns=['timestamp_utc'])
-        print(f"Dummy data created at {dummy_file}")
+        commission_fee = np.sum(self.comission_fee_history)
 
-    try:
-        env = TradingEnv(data_dir=dummy_data_dir, symbol='BTC/USDT')
-        print("Environment created successfully.")
-        obs, info = env.reset()
-        print(f"Reset successful. Initial observation shape: {obs.shape}, Info: {info}")
-        # Test a step
-        action = env.action_space.sample() # Sample a random action
-        obs, reward, terminated, truncated, info = env.step(action)
-        print(f"Step successful. Action: {action}, Next Obs Shape: {obs.shape}, Reward: {reward:.4f}, Term: {terminated}, Trunc: {truncated}, Info: {info}")
-        env.render(mode="human")
-        env.close()
-        print("Environment closed.")
+        # Avoid division by zero for return margin
+        if required_money > 0:
+            return_margin = final_balance / required_money
+        else:
+            return_margin = np.inf if final_balance > 0 else 0
 
-    except Exception as e:
-        print(f"Error during environment testing: {e}")
-        import traceback
-        traceback.print_exc()
+        return (
+            return_margin,
+            final_balance,
+            required_money,
+            commission_fee,
+        )
 
-    # Clean up dummy data
-    # print(f"Cleaning up dummy data file: {dummy_file}")
-    # dummy_file.unlink()
-    # try:
-    #     dummy_data_dir.rmdir()
-    # except OSError: # Directory might not be empty if run failed
-    #     pass 
+    def save_asset_memoey(self):
+        # Use required_money calculated at the end of the episode
+        initial_asset = getattr(self, 'required_money', 0)
+        asset_list = [initial_asset]
+        current_asset = initial_asset
+        # Ensure reward history starts from step 1's reward
+        # The initial 0 reward seems to be a placeholder
+        relevant_rewards = self.reward_history[1:]  # Skip initial 0 reward
+        for reward in relevant_rewards:
+            current_asset += reward
+            asset_list.append(current_asset)
+
+        # asset_list now has initial_asset + cumulative rewards
+        # length should be len(relevant_rewards) + 1
+        # df should align rewards with the state *after* the reward was earned
+        if len(asset_list) > 1:
+            df_value = pd.DataFrame({
+                 # Assets at end of step 1, 2, ...
+                 'total assets': asset_list[1:],
+                 # Reward for step 1, 2, ...
+                 'daily_return': relevant_rewards
+             })
+            # Index might need adjustment depending on how it's used
+            # df_value.index = range(1, len(relevant_rewards) + 1)
+        else:
+            df_value = pd.DataFrame(columns=['total assets', 'daily_return'])
+
+        return df_value
+
+    def get_daily_return_rate(self, price_list: list):
+        return_rate_list = []
+        if len(price_list) < 2:
+            return []
+        for i in range(len(price_list) - 1):
+            # Avoid division by zero
+            if price_list[i] != 0:
+                return_rate = (price_list[i + 1] / price_list[i]) - 1
+                return_rate_list.append(return_rate)
+            else:
+                return_rate_list.append(
+                    np.inf if price_list[i+1] != 0 else 0)
+        return return_rate_list
+
+    def evaualte(self, df):
+        if df.empty:
+            return 0, 0, 0, 0, 0, 0  # Handle empty df
+        daily_return = df["daily_return"]
+        neg_ret_lst = daily_return[daily_return < 0]
+        assets = df["total assets"]
+        # Infer initial from first step
+        initial_assets = assets.iloc[0] - daily_return.iloc[0] \
+            if len(assets) > 0 else 0
+        # Avoid zero/negative initial
+        initial_assets = initial_assets if initial_assets > 1e-10 else 1e-10
+        final_assets = assets.iloc[-1] if len(assets) > 0 else initial_assets
+        tr = final_assets / initial_assets - 1
+
+        return_rate_list = self.get_daily_return_rate(assets.values)
+        if not return_rate_list:
+            return tr, 0, 0, 0, 0, 0  # Handle no returns
+
+        mean_return = np.mean(return_rate_list)
+        std_dev = np.std(return_rate_list)
+        sharpe_ratio = mean_return * (31536000 ** 0.5) / (std_dev + 1e-10)
+        vol = std_dev
+        mdd = 0
+        peak = initial_assets  # Start peak at initial inferred asset level
+        for value in assets:
+            if value > peak:
+                peak = value
+            # Avoid division by zero if peak is 0
+            # (shouldn't happen with initial_assets > 0)
+            dd = (peak - value) / peak if peak != 0 else 0
+            if dd > mdd:
+                mdd = dd
+        cr = tr / (mdd + 1e-10)  # Use total return 'tr' here
+        downside_std = np.std(neg_ret_lst) if not neg_ret_lst.empty else 0
+        # Use mean_return for Sortino numerator consistent with Sharpe
+        sor = mean_return * (31536000 ** 0.5) / (downside_std + 1e-10)
+        # Original Sortino calculation was different, using mean_return now:
+        # downside_std_orig = np.nan_to_num(np.std(neg_ret_lst), nan=0.0)
+        # sqrt_len_return = np.sqrt(len(daily_return))
+        # sor_orig = np.sum(daily_return) / downside_std_orig / sqrt_len_return
+        return tr, sharpe_ratio, vol, mdd, cr, sor
+
+    # Remove redundant definition of get_final_return_rate
+
+    def get_final_return(self):
+        return np.sum(self.reward_history[1:])  # Sum relevant rewards
+
+    def check_sell_needed(self, sell_list, buy_list):
+        if len(sell_list) != len(buy_list):
+            raise Exception("the dimension is not correct")
+        else:
+            in_out_list = []
+            for i in range(len(sell_list)):
+                if sell_list[i] != 0 and buy_list[i] != 0:
+                    raise Exception(
+                        "there is time when money both come in and out")
+                # This elif is redundant because of the first if
+                # elif buy_list[i] != 0 and sell_list[i] != 0:
+                #     raise Exception(
+                #         "there is time when money both come in and out")
+                else:
+                    in_out_list.append(sell_list[i] - buy_list[i])
+            balance_list = []
+            current_balance = 0
+            for flow in in_out_list:
+                current_balance += flow
+                balance_list.append(current_balance)
+            # print("the money we require is", -min(balance_list))
+        return balance_list
+
+    def making_multi_level_dp_demonstration(self, max_punish=1e12):
+        action_list = []
+
+        # Define internal helpers using LOB flat format
+        def sell_value_dp(price_information, position):
+            value = 0
+            actual_changed_position = 0
+            if position <= 0: return -max_punish # Penalize selling nothing
+
+            for i in range(self.lob_depth):
+                try:
+                    bid_price = price_information.get(f'bid_price_{i}', 0)
+                    bid_size = price_information.get(f'bid_size_{i}', 0)
+                    if pd.isna(bid_price) or pd.isna(bid_size) or \
+                       bid_price <= 0 or bid_size <= 0:
+                        continue
+
+                    sell_amount = min(position, bid_size)
+                    value += sell_amount * bid_price
+                    position -= sell_amount
+                    actual_changed_position += sell_amount
+
+                    if position <= 1e-9: break
+                except KeyError: break
+
+            if position > 1e-9: # Penalize if not fully sold
+                value = -max_punish
+
+            if value > -max_punish / 2:
+                return value * (1 - self.transaction_cost_pct)
+            else:
+                return value
+
+        def buy_value_dp(price_information, position):
+            value = 0
+            actual_changed_position = 0
+            if position <= 0: return max_punish # Penalize buying nothing?
+
+            for i in range(self.lob_depth):
+                try:
+                    ask_price = price_information.get(f'ask_price_{i}', 0)
+                    ask_size = price_information.get(f'ask_size_{i}', 0)
+                    if pd.isna(ask_price) or pd.isna(ask_size) or \
+                       ask_price <= 0 or ask_size <= 0:
+                        continue
+
+                    buy_amount = min(position, ask_size)
+                    value += buy_amount * ask_price
+                    position -= buy_amount
+                    actual_changed_position += buy_amount
+
+                    if position <= 1e-9: break
+                except KeyError: break
+
+            if position > 1e-9: # Penalize if not fully bought
+                value = max_punish
+
+            if value < max_punish / 2:
+                return value * (1 + self.transaction_cost_pct)
+            else:
+                return value
+
+        # --- DP calculation (no changes needed here, uses helpers) ---
+        if self.action_dim <= 1:
+            return []
+        scale_factor = self.action_dim - 1
+        num_steps = len(self.df)
+        if num_steps == 0:
+            return []
+
+        dp = [[-np.inf] * self.action_dim for _ in range(num_steps)]
+        price_information = self.df.iloc[0]
+        for j in range(self.action_dim):
+            pos_j = j / scale_factor * self.max_holding_number
+            if j == 0:
+                dp[0][j] = 0
+            else:
+                dp[0][j] = -buy_value_dp(price_information, pos_j)
+
+        for i in range(1, num_steps):
+            price_information = self.df.iloc[i]
+            for j in range(self.action_dim):
+                max_prev_value = -np.inf
+                for k in range(self.action_dim):
+                    if dp[i - 1][k] == -np.inf:
+                        continue
+                    pos_k = k / scale_factor * self.max_holding_number
+                    pos_j = j / scale_factor * self.max_holding_number
+                    position_changed = pos_j - pos_k
+                    transition_pnl = 0
+                    if position_changed > 0:
+                        transition_pnl = -buy_value_dp(
+                            price_information, position_changed)
+                    elif position_changed < 0:
+                        transition_pnl = sell_value_dp(
+                            price_information, -position_changed)
+                    current_value = dp[i - 1][k] + transition_pnl
+                    if current_value > max_prev_value:
+                        max_prev_value = current_value
+                dp[i][j] = max_prev_value
+
+        # --- Backtracking (no changes needed here, uses helpers) ---
+        action_list_reversed = []
+        last_action = 0
+        max_final_val = -np.inf
+        if num_steps > 1:
+            price_information = self.df.iloc[num_steps - 1]
+            for k in range(self.action_dim):
+                if dp[num_steps - 2][k] == -np.inf:
+                    continue
+                pos_k = k / scale_factor * self.max_holding_number
+                position_changed = 0 - pos_k
+                transition_pnl = 0
+                if position_changed < 0:
+                    transition_pnl = sell_value_dp(
+                        price_information, -position_changed)
+                current_final_value = dp[num_steps - 2][k] + transition_pnl
+                if current_final_value > max_final_val:
+                    max_final_val = current_final_value
+                    last_action = k
+            if max_final_val > -np.inf:
+                action_list_reversed.append(last_action)
+                last_value = dp[num_steps - 2][last_action]
+                for i in range(num_steps - 2, 0, -1):
+                    price_information = self.df.iloc[i]
+                    current_action = 0
+                    found_prev = False
+                    for k in range(self.action_dim):
+                        if dp[i - 1][k] == -np.inf:
+                            continue
+                        pos_k = k / scale_factor * self.max_holding_number
+                        pos_last = last_action / scale_factor \
+                            * self.max_holding_number
+                        position_changed = pos_last - pos_k
+                        transition_pnl = 0
+                        if position_changed > 0:
+                            transition_pnl = -buy_value_dp(
+                                price_information, position_changed)
+                        elif position_changed < 0:
+                            transition_pnl = sell_value_dp(
+                                price_information, -position_changed)
+                        if abs((dp[i - 1][k] + transition_pnl)
+                                 - last_value) < 1e-9:
+                            current_action = k
+                            found_prev = True
+                            break
+                    if not found_prev:
+                        print(f"Warning: DP backtrace failed step {i}")
+                        break
+                    action_list_reversed.append(current_action)
+                    last_action = current_action
+                    last_value = dp[i - 1][last_action]
+
+        action_list = action_list_reversed[::-1]
+        if len(action_list) < num_steps:
+            action_list.extend([0] * (num_steps - len(action_list)))
+        return action_list
+
+
+# @ENVIRONMENTS.register_module() # Commented out: Need builder.py
+# Uncomment decorator now that builder/custom should be available
+@ENVIRONMENTS.register_module()
+class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
+    def __init__(self, **kwargs):
+        # Initialize base class first to load data and setup basic params
+        super().__init__(**kwargs)  # CALL SUPER __init__
+
+        # Get training-specific parameters
+        self.episode_length = get_attr(self.dataset, "episode_length", 14400)
+        self.i = 0  # Initialize episode start index
+
+        # The base class __init__ already loaded the df, set up spaces,
+        # calculated demonstration, etc. We don't need to repeat that here.
+        # Remove redundant/incorrect setup from the original TrainingEnv __init__:
+        # self.df_path = None
+        # ... (CSV loading logic removed) ...
+        # self.transaction_cost_pct = ... (already set in super)
+        # self.tech_indicator_list = ... (already removed in super)
+        # self.stack_length = ... (already set in super)
+        # self.max_holding_number = ... (already set in super)
+        # ... (dynamic test path logic removed) ...
+        # self.action_space = ... (already set in super)
+        # self.observation_space = ... (already set in super based on LOB)
+        # self.demonstration_action = ... (already set in super)
+
+        # Reset internal state specific to training episodes
+        # (already done in base __init__, reset will handle episode start)
+        # self.terminal = False
+        # self.day = self.stack_length
+        # ... (rest of internal state vars initialized in base or reset) ...
+
+        logging.info("HighFrequencyTradingTrainingEnvironment initialized.")
+        # No return needed in __init__
+
+    def reset(self, i=None):  # Allow optional start index i
+        # if i is None: # Pick a random start index if not provided?
+        #     max_start_index = len(self.df) - self.episode_length \
+        #          - self.stack_length
+        #     if max_start_index <= 0:
+        #          self.i = 0 # Default to start
+        #     else:
+        #          self.i = np.random.randint(0, max_start_index)
+        # else:
+        #     self.i = i # Use provided start index
+
+        # Use a simpler approach for now:
+        # start from the beginning unless i is specified
+        self.i = i if i is not None else 0
+
+        # Ensure start index + stack length is valid
+        max_df_index = len(self.df) - 1
+        # Check against number of rows
+        if self.i + self.stack_length > max_df_index + 1:
+            # Adjust start index if it would cause slicing beyond df bounds
+            self.i = max(0, max_df_index + 1 - self.stack_length)
+            logging.warning(
+                f"Provided start index {i} too large, adjusting to {self.i}")
+            # raise ValueError(f"Start index {i} + stack {self.stack_length}
+            # > df length {len(self.df)}")
+
+        self.terminal = False
+        # Set day relative to the episode start index 'i'
+        self.day = self.i + self.stack_length
+        # Slice data for the initial state
+        self.data = self.df.iloc[self.day - self.stack_length: self.day]
+
+        # Reset internal state variables (same as base reset)
+        self.initial_reward = 0
+        self.reward_history = [self.initial_reward]
+        self.previous_action = 0
+        self.position = 0
+        self.previous_position = 0
+        self.needed_money_memory = []
+        self.sell_money_memory = []
+        self.comission_fee_history = []
+        self.position_history = []  # Reset position history
+
+        # Calculate initial available actions and DP info
+        price_information = self.data.iloc[-1]
+        avaliable_discriminator = self.calculate_avaliable_action(
+            price_information)
+        DP_distribution = [0] * 11
+        # Index relative to overall df for demonstration
+        dp_day_index = self.day - 1
+        if dp_day_index >= 0 and \
+           dp_day_index < len(self.demonstration_action):
+            action_index = self.demonstration_action[dp_day_index]
+            if 0 <= action_index < len(DP_distribution):
+                DP_distribution[action_index] = 1
+            else:
+                logging.warning(
+                    f"DP action index {action_index} out of bounds "
+                    f"during training reset.")
+        else:
+            logging.warning(
+                f"Day index {dp_day_index} out of bounds for "
+                f"demonstration_action during training reset.")
+        DP_distribution = np.array(DP_distribution)
+
+        # Calculate the initial state using the LOB helper
+        self.state = self._get_lob_state()
+
+        # Return ONLY the state array for SB3 compatibility
+        return self.state
+
+    def step(self, action):
+        # --- Calculate target position (same as base class) ---
+        if self.action_dim <= 1:
+            normlized_action = 0
+        else:
+            normlized_action = action / (self.action_dim - 1)
+        target_position = self.max_holding_number * normlized_action
+
+        # --- Check termination conditions ---
+        # Termination based on episode length OR end of entire dataset
+        end_of_data = self.day >= len(self.df.index.unique()) - 1
+        # Check against episode start
+        end_of_episode = self.day >= self.i + self.episode_length - 1
+        self.terminal = end_of_data or end_of_episode
+
+        # --- Add log message when end of entire dataset is reached ---
+        if end_of_data and not end_of_episode:
+            logging.warning(
+                f"Episode {self.i}: Reached end of entire dataset "
+                f"at day index {self.day-1}. Episode terminating.")
+        elif end_of_data and end_of_episode:
+             logging.info(
+                 f"Episode {self.i}: Reached end of episode and end of "
+                 f"entire dataset simultaneously at day index {self.day-1}.")
+        # -------------------------------------------------------------
+
+        # --- Get previous state info ---
+        previous_position = self.previous_position
+        previous_price_information = self.data.iloc[-1]
+
+        # --- Advance time ---
+        self.day += 1
+
+        # --- Get current state info ---
+        # Check bounds before slicing for next state/info
+        if self.day >= len(self.df.index.unique()):
+            self.terminal = True  # Ensure terminal is set if we are at the end
+            # Use previous info
+            current_price_information = previous_price_information
+            # State calculation will use self.data which hasn't changed
+        else:
+            # Slice data for the *current* day to get its LOB info
+            self.data = self.df.iloc[self.day - self.stack_length: self.day]
+            current_price_information = self.data.iloc[-1]
+            # The state calculation happens *after* execution
+
+        # === Execution Logic (same as base class) ===
+        # We can reuse the base class implementation for sell/buy/calculate_value
+        cash = 0
+        needed_cash = 0
+        actual_position_change = 0
+        executed_position = self.previous_position
+
+        if previous_position >= target_position:  # Sell or Hold
+            sell_size = previous_position - target_position
+            if sell_size > 0:
+                cash, actual_position_change = self.sell_value(
+                    previous_price_information, sell_size
+                )
+                self.sell_money_memory.append(cash)
+                self.needed_money_memory.append(0)
+                executed_position = \
+                    self.previous_position - actual_position_change
+            else:  # Holding
+                self.sell_money_memory.append(0)
+                self.needed_money_memory.append(0)
+                actual_position_change = 0  # Explicitly 0 change
+        elif previous_position < target_position:  # Buy
+            buy_size = target_position - previous_position
+            if buy_size > 0:
+                needed_cash, actual_position_change = self.buy_value(
+                    previous_price_information, buy_size
+                )
+                self.needed_money_memory.append(needed_cash)
+                self.sell_money_memory.append(0)
+                executed_position = \
+                    self.previous_position + actual_position_change
+            # Note: Need else case? If buy_size is 0, no execution needed.
+            # Assuming actual_position_change is 0 if buy_size is 0.
+
+        # === Update position and calculate reward (same as base class) ===
+        self.position = executed_position
+        previous_value = self.calculate_value(
+            previous_price_information, self.previous_position
+        )
+        current_value = self.calculate_value(
+            current_price_information, self.position
+        )
+        # Using the simpler reward calculation from base class
+        self.reward = (current_value + cash) - (previous_value + needed_cash)
+        self.reward_history.append(self.reward)
+
+        # --- Update internal state for next step ---
+        # For the next step's calculation
+        self.previous_position = self.position
+        self.position_history.append(self.position)
+
+        # --- Calculate NEXT state using LOB data ---
+        # CRITICAL FIX: Use _get_lob_state based on the updated self.data
+        self.state = self._get_lob_state()
+        # REMOVED INCORRECT STATE CALCULATION:
+        # self.state = self.data[self.tech_indicator_list].values
+
+        # --- Calculate info dictionary (same as base class) ---
+        avaliable_discriminator = self.calculate_avaliable_action(
+            current_price_information)
+        DP_distribution = [0] * 11
+        dp_day_index = self.day - 1  # Index relative to overall df
+        if dp_day_index >= 0 and \
+           dp_day_index < len(self.demonstration_action):
+            action_index = self.demonstration_action[dp_day_index]
+            if 0 <= action_index < len(DP_distribution):
+                DP_distribution[action_index] = 1
+            else:
+                logging.warning(
+                    f"DP action index {action_index} out of bounds "
+                    f"during training step.")
+        else:
+            # Don't warn if just past end of demonstration data
+            pass
+            # logging.warning(f"Day index {dp_day_index} out of bounds for "
+            # f"demonstration_action during training step.")
+        DP_distribution = np.array(DP_distribution)
+        info = {
+            "previous_action": action,
+            "avaliable_action": avaliable_discriminator,
+            "DP_action": DP_distribution,
+        }
+
+        # --- Final Return ---
+        # Return the calculated LOB state, reward, terminal flag, and info dict
+        return self.state, self.reward, self.terminal, info
