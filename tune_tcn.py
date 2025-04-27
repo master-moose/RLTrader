@@ -6,7 +6,7 @@ import logging
 import torch
 import numpy as np
 import argparse # Need argparse here now
-# Removed: import os # Was unused
+import os # Added: import os
 
 # Import necessary components from your training script
 # Assuming tune_tcn.py is in the same directory or RLTrader is in PYTHONPATH
@@ -306,15 +306,16 @@ if __name__ == "__main__":
         default="tcn_tune_dir_acc_epoch",
         help="Name for the Ray Tune experiment."
     )
-    parser.add_argument(
-        "--storage_path",
-        type=str,
-        default="./ray_results",
-        help="Path for Ray Tune results and checkpoints."
-    )
 
     # 4. Now parse all arguments together
     cli_args = parser.parse_args()
+
+    # --- Construct Storage Path from Experiment Name ---
+    # Use a base directory (e.g., current dir or a specific results dir)
+    # We use relative path here, assuming script is run from project root
+    base_storage_dir = "./ray_results"
+    storage_path = os.path.join(base_storage_dir, cli_args.experiment_name)
+    logger.info(f"Ray Tune results will be stored in: {os.path.abspath(storage_path)}")
 
     # Define Search Space
     search_space = {
@@ -368,7 +369,7 @@ if __name__ == "__main__":
         scheduler=scheduler,
         # search_alg=search_alg, # Uncomment if using HyperOpt
         name=cli_args.experiment_name,     # Use CLI arg; Fixed spacing
-        storage_path=cli_args.storage_path, # Use CLI arg & new API; Fixed spacing
+        storage_path=storage_path, # Use constructed path
         verbose=1,  # 0=silent, 1=progress, 2=trial info; Fixed spacing
         # Add checkpointing config if needed later
         # keep_checkpoints_num=1,
