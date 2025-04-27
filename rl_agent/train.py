@@ -1336,13 +1336,13 @@ def create_model(
         lr = config["learning_rate"]
         lr_schedule = linear_schedule(lr) if isinstance(lr, float) else lr
         
-        # Configure TCN parameters
+        # Configure TCN parameters to match tcn_sac test settings
         sequence_length = config.get("sequence_length", 60)
         tcn_params = {
-            "num_layers": config.get("tcn_num_layers", 4),
-            "num_filters": config.get("tcn_num_filters", 64),
-            "kernel_size": config.get("tcn_kernel_size", 3),
-            "dropout": config.get("tcn_dropout", 0.2)
+            "num_layers": 3,   # Match tcn_sac hardcoded value
+            "num_filters": 32, # Match tcn_sac hardcoded value
+            "kernel_size": config.get("tcn_kernel_size", 3), # Keep config-based
+            "dropout": config.get("tcn_dropout", 0.2)        # Keep config-based
         }
         
         # --- Infer actual features per timestep from environment's observation space ---
