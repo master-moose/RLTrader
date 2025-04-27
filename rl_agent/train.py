@@ -263,8 +263,8 @@ class TuneReportCallback(BaseCallback):
         has_ray_session = check_ray_session()
         
         # Periodically report FPS and step metrics
-        # Reduce frequency from 10 to 1000
-        if self.step_count % 1000 == 0 and has_ray_session:
+        # Reduce frequency from 10 to 1000 --> Further reduce to 100k
+        if self.step_count % 100000 == 0 and has_ray_session:
             try:
                 fps_val = int(self.num_timesteps / (time.time() - self.start_time)) if (time.time() - self.start_time) > 0 else 0
                 report_dict = {
