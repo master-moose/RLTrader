@@ -169,28 +169,37 @@ def load_and_prepare_data(h5_path, sequence_length, target_col='close_4h', predi
                  raise FileNotFoundError(f"Base key {base_key} not found in {h5_path}")
 
             for key, suffix in key_suffix_map.items():
-                if key in f:
-                    logger.info(f"Reading key: {key}")
-                    data = f[key][()] # Read dataset into numpy array
-                    df = pd.DataFrame(data)
-                    if 'timestamp' in df.columns:
-                         if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                              try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                              except (ValueError, TypeError):
-                                   try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                                   except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key}")
-                         df.set_index('timestamp', inplace=True)
-                         df.sort_index(inplace=True)
-                         # Add suffix to non-base timeframes BEFORE storing
-                         if suffix:
-                              df = df.add_suffix(suffix)
-                         dfs[key.strip('/')] = df
-                         logger.info(f"Loaded {key}: {df.shape[0]} rows, {df.shape[1]} columns.")
+                # Use f.get() for safer access
+                obj = f.get(key)
+                if obj is not None:
+                    # Check if the object is a Dataset
+                    if isinstance(obj, h5py.Dataset):
+                        logger.info(f"Reading dataset: {key}")
+                        data = obj[()] # Read dataset into numpy array
+                        df = pd.DataFrame(data)
+                        if 'timestamp' in df.columns:
+                             if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                                  try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                                  except (ValueError, TypeError):
+                                       try: df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                                       except (ValueError, TypeError): raise ValueError(f"Cannot convert timestamp in {key}")
+                             df.set_index('timestamp', inplace=True)
+                             df.sort_index(inplace=True)
+                             if suffix:
+                                 df = df.add_suffix(suffix)
+                             dfs[key.strip('/')] = df
+                             logger.info(f"Loaded {key}: {df.shape[0]} rows, {df.shape[1]} columns.")
+                        else:
+                            raise ValueError(f"'timestamp' column missing in {key}")
+                    elif isinstance(obj, h5py.Group):
+                        logger.warning(f"Key '{key}' points to an HDF5 Group, not a Dataset. Skipping.")
+                        # Assign empty DataFrame to avoid later errors if key was expected
+                        dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
                     else:
-                        raise ValueError(f"'timestamp' column missing in {key}")
+                        logger.warning(f"Object at key '{key}' is not an HDF5 Dataset or Group (type: {type(obj)}). Skipping.")
+                        dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
                 else:
                      logger.warning(f"Key {key} not found in {h5_path}. Some features might be missing.")
-                     # Create empty df with suffix if not base, to avoid merge errors but indicate missing data
                      dfs[key.strip('/')] = pd.DataFrame() if not suffix else pd.DataFrame().add_suffix(suffix)
 
     except Exception as e:
@@ -447,7 +456,7 @@ def train_model(model, train_loader, val_loader, optimizer, criterion, epochs, d
          model.load_state_dict(torch.load('best_tcn_model.pth'))
     return history
 
-def evaluate_model(model, test_loader, criterion, device, target_scaler):
+def evaluate_model(model, test_loader, criterion, device):
     """Evaluates the model on the test set."""
     # Check if test_loader is empty
     if len(test_loader) == 0:
@@ -727,7 +736,7 @@ def main():
     # --- Evaluate --- #
     logger.info("--- Starting Evaluation ---")
     predictions, actuals, test_loss = evaluate_model(
-        model, test_loader, criterion, device, target_scaler
+        model, test_loader, criterion, device
     )
 
     # --- Plot Results --- #
