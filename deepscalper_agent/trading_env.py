@@ -10,6 +10,7 @@ import pandas as pd
 # Assuming functions are exported via __init__.py in trademaster_utils
 from .trademaster_utils import get_attr
 import numpy as np
+import os # Import os for getpid
 
 # import sys # Unused
 # from pathlib import Path # Unused
@@ -775,6 +776,10 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
 
         # Get training-specific parameters
         self.episode_length = get_attr(self.dataset, "episode_length", 14400)
+        # Remove forced episode termination
+        # self.max_steps_per_episode = 1000  # Force episodes to end after 1000 steps
+        self.current_episode_steps = 0
+        
         self.i = 0  # Initialize episode start index
 
         # The base class __init__ already loaded the df, set up spaces,
@@ -801,12 +806,16 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         # No return needed in __init__
 
     # Update signature to match Gymnasium standard
-    def reset(self, *, seed: int | None = None, options: dict | None = None): 
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
         # Handle seeding
         super().reset(seed=seed) # Call parent Env reset if needed
         # Seed the numpy random generator used for start index sampling
         if seed is not None:
             np.random.seed(seed)
+        
+        # Reset step counter for new episode
+        self.current_episode_steps = 0
+        logging.info(f"Reset called: Starting new episode from day {self.day}")
         
         # --- Implement random episode start --- 
         max_start_index = len(self.df) - self.episode_length - self.stack_length
@@ -829,6 +838,8 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         self.terminal = False
         # Set day relative to the randomly chosen episode start index 'i'
         self.day = self.i + self.stack_length
+        # print(f"[{os.getpid()}] TrainingEnv reset: Set day = {self.day}")
+
         # Slice data for the initial state
         # Ensure slicing is within bounds, especially if dataset was short
         start_slice = max(0, self.day - self.stack_length)
@@ -840,8 +851,12 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
              self.day = self.i + self.stack_length
              start_slice = max(0, self.day - self.stack_length)
              end_slice = max(start_slice, self.day)
+        if end_slice > len(self.df):
+            raise IndexError("Cannot start episode, data too short for stack_length.")
+
         self.data = self.df.iloc[start_slice:end_slice]
-        
+        # print(f"[{os.getpid()}] TrainingEnv reset: Sliced self.data (shape {self.data.shape}) for day {self.day}")
+
         # Ensure self.data is not empty after slicing
         if self.data.empty:
             raise RuntimeError(f"Failed to get valid data slice during reset. Start: {start_slice}, End: {end_slice}, Day: {self.day}, i: {self.i}")
@@ -878,7 +893,12 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         DP_distribution = np.array(DP_distribution)
 
         # Calculate the initial state using the LOB helper
-        self.state = self._get_lob_state()
+        try:
+            self.state = self._get_lob_state()
+            # print(f"[{os.getpid()}] TrainingEnv reset: Got LOB state (shape {self.state.shape})")
+        except Exception as e:
+            logging.error(f"Error getting LOB state during reset: {e}", exc_info=True)
+            raise
 
         # Construct the info dictionary (must be returned now)
         info = {
@@ -887,10 +907,14 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
             # "DP_action": DP_distribution
         }
 
+        # print(f"[{os.getpid()}] TrainingEnv reset finished. Returning state.")
         # Return observation and info tuple
         return self.state, info
 
     def step(self, action):
+        # Increment step counter
+        self.current_episode_steps += 1
+        
         # --- Calculate target position (same as base class) ---
         if self.action_dim <= 1:
             normlized_action = 0
@@ -898,15 +922,25 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
             normlized_action = action / (self.action_dim - 1)
         target_position = self.max_holding_number * normlized_action
 
+        # --- Advance day counter --- 
+        self.day += 1
+
         # --- Check termination conditions ---
         end_of_data = self.day >= len(self.df) # Simpler condition
         end_of_episode = self.day >= self.i + self.stack_length + self.episode_length # Correct condition
         
+        # Remove forced episode termination
+        # force_truncate = self.current_episode_steps >= self.max_steps_per_episode
+        
         # Gymnasium standard: terminated=True if natural end, truncated=True if time limit
         terminated = end_of_data
-        truncated = end_of_episode and not terminated # Truncated if episode ends before data does
-        self.terminal = terminated or truncated # Old flag kept for potential internal use?
-
+        truncated = end_of_episode and not terminated
+        # if force_truncate:
+        #     logging.info(f"FORCED episode truncation after {self.current_episode_steps} steps")
+        
+        # Old flag kept for potential internal use
+        self.terminal = terminated or truncated
+        
         # --- Add log message when end of entire dataset is reached ---
         if terminated and not truncated: # Only log if natural end
              logging.info(
@@ -919,9 +953,6 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         # --- Get previous state info ---
         previous_position = self.previous_position
         previous_price_information = self.data.iloc[-1]
-
-        # --- Advance time --- (Already done before check)
-        # self.day += 1 
 
         # --- Get current state info ---        
         if self.day >= len(self.df.index.unique()): # Re-check bounds using day *after* increment
@@ -978,6 +1009,7 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         # Using the simpler reward calculation from base class
         self.reward = (current_value + cash) - (previous_value + needed_cash)
         self.reward_history.append(self.reward)
+        # print(f"[{os.getpid()}] TrainingEnv step: Reward calculated: {self.reward}")
 
         # --- Update internal state for next step ---
         # For the next step's calculation
@@ -985,8 +1017,25 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
         self.position_history.append(self.position)
 
         # --- Calculate NEXT state using LOB data ---
-        self.state = self._get_lob_state()
-        
+        if not self.terminal: # Only get next state if not terminal
+            # print(f"[{os.getpid()}] TrainingEnv step: Getting next state for day {self.day}")
+            try:
+                self.state = self._get_lob_state()
+                # print(f"[{os.getpid()}] TrainingEnv step: Next state shape: {self.state.shape}")
+            except Exception as e:
+                logging.error(f"Error getting LOB state during step {self.day}: {e}", exc_info=True)
+                # Handle error: maybe return last valid state or zeros?
+                # Or re-raise the exception
+                raise
+        else:
+            # If terminal, the state from the previous step is usually returned
+            # Or sometimes a zero state, depending on library/convention
+             # print(f"[{os.getpid()}] TrainingEnv step: Terminal state reached. Not calculating next state.")
+            # Ensure self.state exists and has the correct shape if needed by wrapper
+             if not hasattr(self, 'state') or self.state is None:
+                 self.state = np.zeros(self.observation_space.shape, dtype=self.observation_space.dtype)
+
+
         # --- Calculate info dictionary (same as base class) ---
         avaliable_discriminator = self.calculate_avaliable_action(current_price_information)
         DP_distribution = [0] * 11
@@ -1012,6 +1061,16 @@ class HighFrequencyTradingTrainingEnvironment(HighFrequencyTradingEnvironment):
             "DP_action": DP_distribution, 
         }
 
-        # --- Final Return ---        
+        # Log episode completion more visibly
+        if terminated or truncated:
+            logging.info(f"Episode ended: terminated={terminated}, truncated={truncated}, steps={self.current_episode_steps}, day={self.day}")
+        
+        # More verbose debug
+        if self.current_episode_steps % 250 == 0 or terminated or truncated:
+            logging.info(f"Step {self.current_episode_steps}: day={self.day}, reward={self.reward:.4f}, terminated={terminated}, truncated={truncated}")
+        
+        # --- Final Return ---
         # Return observation, reward, terminated, truncated, info
+        # print(f"[{os.getpid()}] TrainingEnv step finished. Returning state, reward: {self.reward}, terminated: {terminated}, truncated: {truncated}")
+        logging.debug(f"[{os.getpid()}] Step Return: Day={self.day}, R={self.reward:.4f}, Term={terminated}, Trunc={truncated}, StateType={type(self.state)}, StateShape={self.state.shape if isinstance(self.state, np.ndarray) else 'N/A'}")
         return self.state, self.reward, terminated, truncated, info
