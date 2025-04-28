@@ -218,14 +218,15 @@ class DDPMScheduler:
 
 # --- Data Handling ---
 class LOBDataset(Dataset):
-    def __init__(self, data, sequence_length):
-        self.data = data
+    def __init__(self, data_tensor, sequence_length):
+        # Expect data_tensor to be the pre-converted tensor
+        self.data = data_tensor
         self.sequence_length = sequence_length
         # Calculate number of sequences considering the sequence length
-        self.num_sequences = len(data) - sequence_length + 1
+        self.num_sequences = len(data_tensor) - sequence_length + 1
         if self.num_sequences <= 0:
             raise ValueError(
-                f"Data length ({len(data)}) is less than sequence length "
+                f"Data length ({len(data_tensor)}) is less than sequence length "
                 f"({sequence_length}). Cannot create sequences."
             )
 
@@ -234,9 +235,11 @@ class LOBDataset(Dataset):
         return self.num_sequences
 
     def __getitem__(self, idx):
-        # Return a sequence of shape (sequence_length, num_features)
-        sequence = self.data[idx : idx + self.sequence_length]
-        return torch.tensor(sequence, dtype=torch.float32)
+        # Return a sequence (slice) from the pre-existing tensor
+        # Shape: (sequence_length, num_features)
+        sequence_slice = self.data[idx : idx + self.sequence_length]
+        # No need to convert to tensor here, it already is one
+        return sequence_slice
 
 
 class Scaler:
@@ -278,7 +281,7 @@ def load_and_preprocess_data(
     data_dir, symbol_filename_part, hdf_key, lob_depth
 ):
     data_path = Path(data_dir)
-    all_files = sorted(data_path.glob(f"{symbol_filename_part}_lob_*.h5"))
+    all_files = sorted(data_path.glob(f"{symbol_filename_part}_lob.h5")) #temporarily use downloaded dataset
     if not all_files:
         raise FileNotFoundError(
             f"No HDF5 files found in {data_dir} matching "
@@ -349,10 +352,14 @@ def load_and_preprocess_data(
 
     # Normalize data
     scaler = Scaler()
-    scaled_data = scaler.fit_transform(data)
-    logging.info(f"Data shape after scaling: {scaled_data.shape}")
+    scaled_data_np = scaler.fit_transform(data)
+    logging.info(f"Data shape after scaling: {scaled_data_np.shape}")
 
-    return scaled_data, scaler, timestamps, feature_cols
+    # Convert the entire dataset to a tensor *once*
+    scaled_data_tensor = torch.tensor(scaled_data_np, dtype=torch.float32)
+    logging.info("Converted scaled data to PyTorch tensor.")
+
+    return scaled_data_tensor, scaler, timestamps, feature_cols
 
 
 # --- Training Function ---
@@ -648,7 +655,7 @@ def main(args):
 
     # Consider adding num_workers for faster loading if not on Windows or if using appropriate guards
     dataloader = DataLoader(
-        dataset, batch_size=effective_batch_size, shuffle=True, num_workers=0 # Set num_workers
+        dataset, batch_size=effective_batch_size, shuffle=True, num_workers=2 # Set num_workers
     )
 
     # 3. Initialize Model and Scheduler
@@ -695,7 +702,7 @@ def main(args):
 
     # 5. Generate Synthetic Data
     start_gen_time = time.time()
-    synthetic_scaled_sequences = sample_diffusion_model(
+    synthetic_sequences_orig = sample_diffusion_model(
         model, scheduler, args.num_samples, num_features,
         args.sequence_length, device, batch_size=args.sampling_batch_size
     )
@@ -703,17 +710,7 @@ def main(args):
         f"Generation took {time.time() - start_gen_time:.2f} seconds."
     )
 
-    # 6. Inverse Transform
-    # synthetic_scaled_sequences is (num_samples, seq_len, num_features)
-    synthetic_sequences_orig = scaler.inverse_transform(
-        synthetic_scaled_sequences
-    )
-    # Flatten for saving: (num_samples * seq_len, num_features)
-    synthetic_data_flat_orig = synthetic_sequences_orig.reshape(
-        -1, num_features
-    )
-
-    # 7. Validate
+    # 6. Validate
     # Use the original scaled data (as sequences) and generated scaled sequences
     # Select a subset of real data for validation if it's too large
     max_real_seq_for_val = 10000 # Number of sequences
@@ -729,7 +726,7 @@ def main(args):
 
     validate_synthetic_data(
         real_sequences_scaled_for_val, # Use sequences for validation if logic needs it
-        synthetic_scaled_sequences, # Already sequences
+        synthetic_sequences_orig, # Already sequences
         feature_names,
         scaler, # Pass scaler
         num_features_to_plot=args.validation_num_features,
@@ -741,9 +738,21 @@ def main(args):
     output_path = Path(args.output_hdf)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # synthetic_sequences_orig shape: (num_samples, seq_len, num_features)
+    num_gen_samples, seq_len, num_features_gen = synthetic_sequences_orig.shape
+
+    # Flatten for saving: (num_gen_samples * seq_len, num_features)
+    synthetic_data_flat_orig = synthetic_sequences_orig.reshape(
+        -1, num_features_gen
+    )
+
     synthetic_df = pd.DataFrame(
         synthetic_data_flat_orig, columns=feature_names
     )
+
+    # Add sequence_id column
+    sequence_ids = np.repeat(np.arange(num_gen_samples), seq_len)
+    synthetic_df.insert(0, 'sequence_id', sequence_ids)
 
     # Add a synthetic timestamp column
     if not timestamps.empty:
